@@ -96,29 +96,26 @@ jobs:
           # 写入临时表格文件
           echo "${{ steps.fetch.outputs.content }}" > models_table.md
 
-          # 使用 Perl 跨行替换 START/END 区域
+          # 更新英文 README（英文不乱码）
           perl -CS -0777 -i -pe '
             BEGIN {
-              local $/;   # slurp whole file
               open my $fh, "<:utf8", "models_table.md" or die $!;
-              $table = <$fh>;
+              $table = do { local $/; <$fh> };
               close $fh;
             }
             s|<!-- START:models -->.*?<!-- END:models -->|<!-- START:models -->\n$table\n<!-- END:models -->|s
           ' README.md
 
-
-          # 使用 Perl 跨行替换 START/END 区域
-          perl -Mutf8 -0777 -i -pe '
-          BEGIN {
-            open my $fh, "<:encoding(UTF-8)", "models_table.md" or die $!;
-            $table = do { local $/; <$fh> };
-            close $fh;
-          }
-          binmode(STDOUT, ":encoding(UTF-8)");
-          s|<!-- START:models -->.*?<!-- END:models -->|<!-- START:models -->\n$table\n<!-- END:models -->|s
-        ' README.zh-CN.md
-
+          # 更新中文 README，保证 UTF-8 不乱码
+          perl -0777 -Mutf8 -i -pe '
+            BEGIN {
+              open my $fh, "<:encoding(UTF-8)", "models_table.md" or die $!;
+              $table = do { local $/; <$fh> };
+              close $fh;
+            }
+            binmode(STDOUT, ":encoding(UTF-8)");
+            s|<!-- START:models -->.*?<!-- END:models -->|<!-- START:models -->\n$table\n<!-- END:models -->|s
+          ' README.zh-CN.md
       - name: Commit & Push
         run: |
           git config user.name "github-actions[bot]"
