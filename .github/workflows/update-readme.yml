@@ -96,27 +96,28 @@ jobs:
           # 写入临时表格文件
           echo "${{ steps.fetch.outputs.content }}" > models_table.md
 
-          # 定义要更新的文件列表
           FILES=("README.md" "README.zh-CN.md")
 
           for FILE in "${FILES[@]}"; do
             perl -0777 -i -pe '
+              my $file = $ARGV[0];
+
               # 读取临时表格
               open my $fh, "<:encoding(UTF-8)", "models_table.md" or die $!;
-              $table = do { local $/; <$fh> };
+              my $table = do { local $/; <$fh> };
               close $fh;
 
               # 读取目标 README 文件
-              open my $in, "<:encoding(UTF-8)", $_ or die $!;
-              local $_ = do { local $/; <$in> };
+              open my $in, "<:encoding(UTF-8)", $file or die $!;
+              my $content = do { local $/; <$in> };
               close $in;
 
               # 替换 START/END 区域
-              s|<!-- START:models -->.*?<!-- END:models -->|<!-- START:models -->\n$table\n<!-- END:models -->|s;
+              $content =~ s|<!-- START:models -->.*?<!-- END:models -->|<!-- START:models -->\n$table\n<!-- END:models -->|s;
 
               # 写回文件
-              open my $out, ">:encoding(UTF-8)", $_ or die $!;
-              print $out $_;
+              open my $out, ">:encoding(UTF-8)", $file or die $!;
+              print $out $content;
               close $out;
             ' "$FILE"
           done
