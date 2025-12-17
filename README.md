@@ -1,4 +1,4 @@
-ð Language:
+Language:
 [English](README.md) | [ç®ä½ä¸­æ](README.zh-CN.md)
 
 # FlagRelease
