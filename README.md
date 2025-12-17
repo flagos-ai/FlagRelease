@@ -1,12 +1,12 @@
 Language:
-[English](README.md) | [ç®ä½ä¸­æ](README.zh-CN.md)
+[English](README.md) | [Ã§Â®ÂÃ¤Â½ÂÃ¤Â¸Â­Ã¦ÂÂ](README.zh-CN.md)
 
 # FlagRelease
 
 FlagRelease is a large-model automated migration, adaptation, and release platform developed by the Beijing Academy of Artificial Intelligence (BAAI) for multi-architecture artificial intelligence chips. The platform aims to enable mainstream large models to be migrated, validated, and released on diverse domestic AI hardware with lower cost and higher efficiency through automated, standardized, and intelligent adaptation workflows.
 Built upon the unified and open-source AI system software stack FlagOS, which provides cross-hardware adaptation capabilities, FlagRelease establishes a standardized pipeline that supports automatic migration of large models to different hardware architectures, automated evaluation of migration results, built-in automated deployment and tuning, and multi-chip model packaging and release.
 The artifacts released through the FlagRelease platform are published on ModelScope and Hugging Face under the FlagRelease organization, where users can obtain different hardware-specific versions of open-source large models. These models can be downloaded and used directly on the corresponding hardware environments without requiring users to perform model migration themselves, significantly reducing the migration cost for end users.
-Currently, the outputs of the FlagRelease platform include validated, hardware-adapted model files and integrated Docker images. Each image contains the core components of FlagOS along with all required model dependencies, allowing users to deploy and use the models directly on the target chips. In addition, each model release provides evaluation results as technical references, enabling users to clearly understand the modelâs correctness and performance characteristics across different hardware platforms.
+Currently, the outputs of the FlagRelease platform include validated, hardware-adapted model files and integrated Docker images. Each image contains the core components of FlagOS along with all required model dependencies, allowing users to deploy and use the models directly on the target chips. In addition, each model release provides evaluation results as technical references, enabling users to clearly understand the modelÃ¢ÂÂs correctness and performance characteristics across different hardware platforms.
 Furthermore, every released model is accompanied by configuration and usage instructions for AnythingLLM, helping users quickly verify the availability of the migrated models and facilitating downstream development and application based on these models.
 The overall architecture of FlagOS is illustrated in the figure below:
    
