@@ -93,21 +93,21 @@ jobs:
 
       - name: Update README
         run: |
-          # 写入临时表格文件
           echo "${{ steps.fetch.outputs.content }}" > models_table.md
 
-          # 要更新的 README 文件列表
           FILES=("README.md" "README.zh-CN.md")
 
           for FILE in "${FILES[@]}"; do
-            perl -Mutf8 -0777 -pe '
+            perl -Mutf8 -0777 -e '
+              my $file = $ARGV[0];
+
               # 读取表格内容
               open my $fh, "<:encoding(UTF-8)", "models_table.md" or die $!;
               my $table = do { local $/; <$fh> };
               close $fh;
 
               # 读取 README 内容
-              open my $in, "<:encoding(UTF-8)", $ARGV[0] or die $!;
+              open my $in, "<:encoding(UTF-8)", $file or die $!;
               my $content = do { local $/; <$in> };
               close $in;
 
@@ -115,13 +115,18 @@ jobs:
               $content =~ s|<!-- START:models -->.*?<!-- END:models -->|<!-- START:models -->\n$table\n<!-- END:models -->|s;
 
               # 写回临时文件
-              open my $out, ">:encoding(UTF-8)", "$ARGV[0].tmp" or die $!;
+              open my $out, ">:encoding(UTF-8)", "$file.tmp" or die $!;
               print $out $content;
               close $out;
             ' "$FILE"
 
-            # 覆盖原文件
-            mv "$FILE.tmp" "$FILE"
+            # 确保临时文件存在再覆盖
+            if [ -f "$FILE.tmp" ]; then
+              mv "$FILE.tmp" "$FILE"
+            else
+              echo "Error: temporary file $FILE.tmp not found"
+              exit 1
+            fi
           done
       - name: Commit & Push
         run: |
