@@ -65,7 +65,7 @@ jobs:
             CLEAN=$(normalize_name "$ID")
 
             # 生成两个超链接
-            LINK_HF="[Huggingface: ${ORIG_ID}](https://modelscope.cn/models/FlagRelease/${ORIG_ID})"
+            LINK_HF="[Huggingface: ${ORIG_ID}](https://huggingface.co/FlagRelease/${ORIG_ID})"
             LINK_MS="[Modalscope: ${ORIG_ID}](https://modelscope.cn/models/FlagRelease/${ORIG_ID})"
             LINKS="${LINK_HF}<br>${LINK_MS}"
 
