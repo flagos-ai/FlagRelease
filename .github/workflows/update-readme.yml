@@ -109,16 +109,15 @@ jobs:
 
 
           # 使用 Perl 跨行替换 START/END 区域
-          perl -CS -0777 -i -pe '
-            BEGIN {
-              local $/;   # slurp whole file
-              open my $fh, "<:utf8", "models_table.md" or die $!;
-              $table = <$fh>;
-              close $fh;
-            }
-            s|<!-- START:models -->.*?<!-- END:models -->|<!-- START:models -->\n$table\n<!-- END:models -->|s
-          ' README.zh-CN.md
-
+          perl -Mutf8 -0777 -i -pe '
+          BEGIN {
+            open my $fh, "<:encoding(UTF-8)", "models_table.md" or die $!;
+            $table = do { local $/; <$fh> };
+            close $fh;
+          }
+          binmode(STDOUT, ":encoding(UTF-8)");
+          s|<!-- START:models -->.*?<!-- END:models -->|<!-- START:models -->\n$table\n<!-- END:models -->|s
+        ' README.zh-CN.md
 
       - name: Commit & Push
         run: |
