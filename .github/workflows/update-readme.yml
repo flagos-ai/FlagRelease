@@ -1,0 +1,118 @@
+
+name: Update README from HuggingFace
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"  # 每 6 小时更新一次
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+      
+      - name: Fetch HuggingFace Models
+        id: fetch
+        run: |
+          ORG="FlagRelease"
+          API="https://huggingface.co/api/models?author=$ORG&limit=200"
+
+          REMOVE_SUFFIXES=("-FlagOS" "-Nvidia" "-Metax" "-Iluvatar" "-Cambricon" "-Kunlunxin")
+
+          echo "Fetching models for org: $ORG"
+          RESP=$(curl -s "$API")
+
+          echo "$RESP" | jq 'if type=="array" then true else false end' || exit 1
+
+          echo "$RESP" | jq -r '.[] | [.id, .cardData.description] | @tsv' > raw.tsv
+
+          declare -A MODEL_MAP
+          declare -A DESC_MAP
+
+          normalize_name() {
+            local full="$1"
+            local clean="${full##*/}"   # 去掉 / 前缀
+
+            local changed=1
+            while [[ $changed -eq 1 ]]; do
+              changed=0
+              clean_lower="${clean,,}"
+              for suf in "${REMOVE_SUFFIXES[@]}"; do
+                suf_lower="${suf,,}"
+                if [[ "$clean_lower" == *"$suf_lower"* ]]; then
+                  clean=$(echo "$clean" | sed -E "s/${suf}//Ig")
+                  changed=1
+                  break
+                fi
+              done
+            done
+
+            clean=$(echo "$clean" | sed -E 's/-+/-/g')
+            clean=$(echo "$clean" | sed -E 's/^-//; s/-$//')
+            echo "$clean"
+          }
+
+          while IFS=$'\t' read -r ID DESC; do
+            ORIG_ID="${ID##*/}"
+            CLEAN=$(normalize_name "$ID")
+
+            # 生成两个超链接
+            LINK_HF="[Huggingface: ${ORIG_ID}](https://modelscope.cn/models/FlagRelease/${ORIG_ID})"
+            LINK_MS="[Modalscope: ${ORIG_ID}](https://modelscope.cn/models/FlagRelease/${ORIG_ID})"
+            LINKS="${LINK_HF}<br>${LINK_MS}"
+
+            if [[ -z "${MODEL_MAP[$CLEAN]}" ]]; then
+              MODEL_MAP[$CLEAN]="$LINKS"
+              DESC_MAP[$CLEAN]="${DESC:-无描述}"
+            else
+              MODEL_MAP[$CLEAN]="${MODEL_MAP[$CLEAN]}<br>$LINKS"
+            fi
+          done < raw.tsv
+
+          # 生成 Markdown 表格
+          echo '| Model Name | 原始模型 | ' > models.md
+          echo '|------------|----------|' >> models.md
+
+          for key in "${!MODEL_MAP[@]}"; do
+            echo "| ${key} | ${MODEL_MAP[$key]} |" >> models.md
+          done
+
+          CONTENT=$(cat models.md)
+          echo "content<<EOF" >> $GITHUB_OUTPUT
+          echo "$CONTENT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+ 
+
+      - name: Update README
+        run: |
+          # 写入临时表格文件
+          echo "${{ steps.fetch.outputs.content }}" > models_table.md
+
+          # 使用 Perl 跨行替换 START/END 区域
+          perl -CS -0777 -i -pe '
+            BEGIN {
+              local $/;   # slurp whole file
+              open my $fh, "<:utf8", "models_table.md" or die $!;
+              $table = <$fh>;
+              close $fh;
+            }
+            s|<!-- START:models -->.*?<!-- END:models -->|<!-- START:models -->\n$table\n<!-- END:models -->|s
+          ' README.md
+
+
+      - name: Commit & Push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "update HuggingFace models list" || echo "No changes"
+          git push
+
