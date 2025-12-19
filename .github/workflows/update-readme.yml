@@ -25,7 +25,7 @@ jobs:
           ORG="FlagRelease"
           API="https://huggingface.co/api/models?author=$ORG&limit=200"
 
-          REMOVE_SUFFIXES=("-FlagOS" "-Nvidia" "-Metax" "-Iluvatar" "-Cambricon" "-Kunlunxin")
+          REMOVE_SUFFIXES=("-FlagOS" "-Nvidia" "-nvidia" "-Metax" "-metax" "-Iluvatar" "-iluvatar" "-Cambricon" "-cambricon" "-Kunlunxin" "-kunlunxin" "-Mthreads" "-mthreads" "-ascend" "-Ascend" "-Arm" "-hygon" "-Hygon")
 
           echo "Fetching models for org: $ORG"
           RESP=$(curl -s "$API")
