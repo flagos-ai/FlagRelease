@@ -454,160 +454,146 @@ def compare_kernels(cuda_file: str, fg_file: str, ratio_threshold: float = 0.1) 
     cuda_agg = aggregate_kernels(cuda_kernels)
     fg_agg = aggregate_kernels(fg_kernels)
 
-    cuda_total = sum(k['total_time_ns'] for k in cuda_kernels)
-    fg_total = sum(k['total_time_ns'] for k in fg_kernels)
-
     results = []
+    processed_cuda_ops = set()
     processed_fg_ops = set()
 
-    # Process CUDA operations
-    for cuda_op, cuda_data in sorted(cuda_agg.items(), key=lambda x: -x[1]['total_time_ns']):
+    # Step 1: Group CUDA ops by their FlagGems equivalents
+    # This handles multiple CUDA ops mapping to the same FlagGems op
+    fg_to_cuda_mapping = defaultdict(list)  # fg_op -> list of cuda_ops
+
+    for cuda_op, cuda_data in cuda_agg.items():
         source = cuda_data.get('source', 'unknown')
-
-        # Find equivalent FlagGems operation(s)
-        fg_equivalents = find_equivalent_fg_ops(cuda_op, fg_agg)
-
-        if source == 'common':
-            # Check if exists in both
-            if cuda_op in fg_agg:
-                fg_data = fg_agg[cuda_op]
-                processed_fg_ops.add(cuda_op)
-
-                cuda_time = cuda_data['total_time_ns']
-                fg_time = fg_data['total_time_ns']
-
-                if cuda_time > 0:
-                    ratio = fg_time / cuda_time
-                else:
-                    ratio = 1.0
-
-                # Determine category
-                if abs(ratio - 1.0) <= ratio_threshold:
-                    category = 'Similar'
-                elif ratio < 1.0:
-                    category = 'FlagGems_faster'
-                else:
-                    category = 'FlagGems_slower'
-
-                # Mark as not replaced since same kernel name
-                category = 'Not_replaced'
-
-                results.append({
-                    'Operator': cuda_op,
-                    'CUDA_Time_ns': cuda_time,
-                    'CUDA_Pct': cuda_data['time_pct'],
-                    'FlagGems_Time_ns': fg_time,
-                    'FlagGems_Pct': fg_data['time_pct'],
-                    'Ratio': ratio,
-                    'CUDA_Instances': cuda_data['instances'],
-                    'FlagGems_Instances': fg_data['instances'],
-                    'Category': category,
-                })
-            else:
-                # Only in CUDA
-                results.append({
-                    'Operator': cuda_op,
-                    'CUDA_Time_ns': cuda_data['total_time_ns'],
-                    'CUDA_Pct': cuda_data['time_pct'],
-                    'FlagGems_Time_ns': 0,
-                    'FlagGems_Pct': 0,
-                    'Ratio': float('inf'),
-                    'CUDA_Instances': cuda_data['instances'],
-                    'FlagGems_Instances': 0,
-                    'Category': 'Only_CUDA',
-                })
-        elif source == 'cuda':
+        if source == 'cuda':
+            fg_equivalents = find_equivalent_fg_ops(cuda_op, fg_agg)
             if fg_equivalents:
-                # Aggregate all equivalent FlagGems ops
-                fg_time = sum(fg_agg[op]['total_time_ns'] for op in fg_equivalents)
-                fg_pct = sum(fg_agg[op]['time_pct'] for op in fg_equivalents)
-                fg_instances = sum(fg_agg[op]['instances'] for op in fg_equivalents)
+                # Use frozenset as key to group by same FG equivalents
+                fg_key = tuple(sorted(fg_equivalents))
+                fg_to_cuda_mapping[fg_key].append(cuda_op)
 
-                for op in fg_equivalents:
-                    processed_fg_ops.add(op)
+    # Step 2: Process grouped CUDA->FlagGems mappings (sum multiple CUDA ops)
+    for fg_key, cuda_ops in fg_to_cuda_mapping.items():
+        fg_equivalents = list(fg_key)
 
-                cuda_time = cuda_data['total_time_ns']
+        # Sum all CUDA ops that map to this FlagGems op(s)
+        cuda_time = sum(cuda_agg[op]['total_time_ns'] for op in cuda_ops)
+        cuda_pct = sum(cuda_agg[op]['time_pct'] for op in cuda_ops)
+        cuda_instances = sum(cuda_agg[op]['instances'] for op in cuda_ops)
 
-                if cuda_time > 0:
-                    ratio = fg_time / cuda_time
-                else:
-                    ratio = 1.0
+        # Sum all FlagGems equivalents
+        fg_time = sum(fg_agg[op]['total_time_ns'] for op in fg_equivalents)
+        fg_pct = sum(fg_agg[op]['time_pct'] for op in fg_equivalents)
+        fg_instances = sum(fg_agg[op]['instances'] for op in fg_equivalents)
 
-                # Determine category based on ratio
-                if abs(ratio - 1.0) <= ratio_threshold:
-                    category = 'Similar'
-                elif ratio < 1.0 - ratio_threshold:
-                    category = 'FlagGems_faster'
-                else:
-                    category = 'FlagGems_slower'
+        for op in cuda_ops:
+            processed_cuda_ops.add(op)
+        for op in fg_equivalents:
+            processed_fg_ops.add(op)
 
-                op_name = cuda_op
-                if fg_equivalents and fg_equivalents[0] != cuda_op:
-                    op_name = f"{cuda_op} -> {','.join(fg_equivalents)}"
+        # Determine category based on ratio
+        if cuda_time > 0:
+            ratio = fg_time / cuda_time
+        else:
+            ratio = 1.0
 
-                results.append({
-                    'Operator': op_name,
-                    'CUDA_Time_ns': cuda_time,
-                    'CUDA_Pct': cuda_data['time_pct'],
-                    'FlagGems_Time_ns': fg_time,
-                    'FlagGems_Pct': fg_pct,
-                    'Ratio': ratio,
-                    'CUDA_Instances': cuda_data['instances'],
-                    'FlagGems_Instances': fg_instances,
-                    'Category': category,
-                })
-            else:
-                # Only in CUDA
+        if abs(ratio - 1.0) <= ratio_threshold:
+            category = 'Similar'
+        elif ratio < 1.0 - ratio_threshold:
+            category = 'FlagGems_faster'
+        else:
+            category = 'FlagGems_slower'
+
+        # Build operator name
+        if len(cuda_ops) == 1:
+            op_name = cuda_ops[0]
+        else:
+            # Multiple CUDA ops, use common prefix or list them
+            op_name = ','.join(sorted(cuda_ops))
+
+        if fg_equivalents and fg_equivalents[0] != cuda_ops[0]:
+            op_name = f"{op_name} -> {','.join(fg_equivalents)}"
+
+        results.append({
+            'Operator': op_name,
+            'CUDA_Time_ns': cuda_time,
+            'CUDA_Pct': cuda_pct,
+            'FlagGems_Time_ns': fg_time,
+            'FlagGems_Pct': fg_pct,
+            'CUDA_Instances': cuda_instances,
+            'FlagGems_Instances': fg_instances,
+            'Category': category,
+        })
+
+    # Step 3: Process 'common' source (not replaced) - same kernel in both
+    for cuda_op, cuda_data in cuda_agg.items():
+        source = cuda_data.get('source', 'unknown')
+        if source == 'common' and cuda_op not in processed_cuda_ops:
+            if cuda_op in fg_agg:
+                fg_data = fg_agg[cuda_op]
+                processed_cuda_ops.add(cuda_op)
+                processed_fg_ops.add(cuda_op)
+
                 results.append({
                     'Operator': cuda_op,
                     'CUDA_Time_ns': cuda_data['total_time_ns'],
                     'CUDA_Pct': cuda_data['time_pct'],
-                    'FlagGems_Time_ns': 0,
-                    'FlagGems_Pct': 0,
-                    'Ratio': float('inf'),
-                    'CUDA_Instances': cuda_data['instances'],
-                    'FlagGems_Instances': 0,
-                    'Category': 'Only_CUDA',
-                })
-        else:
-            # Unknown source, check if exists in FlagGems
-            if cuda_op in fg_agg:
-                processed_fg_ops.add(cuda_op)
-                fg_data = fg_agg[cuda_op]
-                cuda_time = cuda_data['total_time_ns']
-                fg_time = fg_data['total_time_ns']
-
-                if cuda_time > 0:
-                    ratio = fg_time / cuda_time
-                else:
-                    ratio = 1.0
-
-                results.append({
-                    'Operator': cuda_op,
-                    'CUDA_Time_ns': cuda_time,
-                    'CUDA_Pct': cuda_data['time_pct'],
-                    'FlagGems_Time_ns': fg_time,
+                    'FlagGems_Time_ns': fg_data['total_time_ns'],
                     'FlagGems_Pct': fg_data['time_pct'],
-                    'Ratio': ratio,
                     'CUDA_Instances': cuda_data['instances'],
                     'FlagGems_Instances': fg_data['instances'],
                     'Category': 'Not_replaced',
                 })
             else:
+                processed_cuda_ops.add(cuda_op)
                 results.append({
                     'Operator': cuda_op,
                     'CUDA_Time_ns': cuda_data['total_time_ns'],
                     'CUDA_Pct': cuda_data['time_pct'],
                     'FlagGems_Time_ns': 0,
                     'FlagGems_Pct': 0,
-                    'Ratio': float('inf'),
                     'CUDA_Instances': cuda_data['instances'],
                     'FlagGems_Instances': 0,
                     'Category': 'Only_CUDA',
                 })
 
-    # Process FlagGems-only operations
-    for fg_op, fg_data in sorted(fg_agg.items(), key=lambda x: -x[1]['total_time_ns']):
+    # Step 4: Process remaining CUDA ops (unknown source or no FG equivalent)
+    for cuda_op, cuda_data in cuda_agg.items():
+        if cuda_op in processed_cuda_ops:
+            continue
+
+        source = cuda_data.get('source', 'unknown')
+
+        # Check if exists in FlagGems with same name
+        if cuda_op in fg_agg:
+            fg_data = fg_agg[cuda_op]
+            processed_cuda_ops.add(cuda_op)
+            processed_fg_ops.add(cuda_op)
+
+            results.append({
+                'Operator': cuda_op,
+                'CUDA_Time_ns': cuda_data['total_time_ns'],
+                'CUDA_Pct': cuda_data['time_pct'],
+                'FlagGems_Time_ns': fg_data['total_time_ns'],
+                'FlagGems_Pct': fg_data['time_pct'],
+                'CUDA_Instances': cuda_data['instances'],
+                'FlagGems_Instances': fg_data['instances'],
+                'Category': 'Not_replaced',
+            })
+        else:
+            processed_cuda_ops.add(cuda_op)
+            results.append({
+                'Operator': cuda_op,
+                'CUDA_Time_ns': cuda_data['total_time_ns'],
+                'CUDA_Pct': cuda_data['time_pct'],
+                'FlagGems_Time_ns': 0,
+                'FlagGems_Pct': 0,
+                'CUDA_Instances': cuda_data['instances'],
+                'FlagGems_Instances': 0,
+                'Category': 'Only_CUDA',
+            })
+
+    # Step 5: Process FlagGems-only operations
+    for fg_op, fg_data in fg_agg.items():
         if fg_op not in processed_fg_ops:
             source = fg_data.get('source', 'unknown')
             if source == 'flaggems':
@@ -617,7 +603,6 @@ def compare_kernels(cuda_file: str, fg_file: str, ratio_threshold: float = 0.1) 
                     'CUDA_Pct': 0,
                     'FlagGems_Time_ns': fg_data['total_time_ns'],
                     'FlagGems_Pct': fg_data['time_pct'],
-                    'Ratio': 0,
                     'CUDA_Instances': 0,
                     'FlagGems_Instances': fg_data['instances'],
                     'Category': 'Only_FlagGems',
@@ -686,26 +671,25 @@ def write_csv(results: List[Dict], output_file: str):
     """Write results to CSV file."""
     fieldnames = [
         'Operator', 'CUDA_Time_ns', 'CUDA_Pct', 'FlagGems_Time_ns', 'FlagGems_Pct',
-        'Ratio', 'CUDA_Instances', 'FlagGems_Instances', 'Category'
+        'CUDA_Instances', 'FlagGems_Instances', 'Category'
     ]
 
     with open(output_file, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in results:
-            # Format ratio
-            if row['Ratio'] == float('inf'):
-                row['Ratio'] = 'inf'
-            elif row['Ratio'] == 0:
-                row['Ratio'] = '0'
-            else:
-                row['Ratio'] = f"{row['Ratio']:.3f}"
-
             # Format percentages
-            row['CUDA_Pct'] = f"{row['CUDA_Pct']:.2f}%"
-            row['FlagGems_Pct'] = f"{row['FlagGems_Pct']:.2f}%"
-
-            writer.writerow(row)
+            output_row = {
+                'Operator': row['Operator'],
+                'CUDA_Time_ns': row['CUDA_Time_ns'],
+                'CUDA_Pct': f"{row['CUDA_Pct']:.2f}%",
+                'FlagGems_Time_ns': row['FlagGems_Time_ns'],
+                'FlagGems_Pct': f"{row['FlagGems_Pct']:.2f}%",
+                'CUDA_Instances': row['CUDA_Instances'],
+                'FlagGems_Instances': row['FlagGems_Instances'],
+                'Category': row['Category'],
+            }
+            writer.writerow(output_row)
 
 
 def print_summary(results: List[Dict]):
@@ -735,8 +719,17 @@ def print_summary(results: List[Dict]):
             sorted_items = sorted(items, key=lambda x: max(x['CUDA_Time_ns'], x['FlagGems_Time_ns']), reverse=True)[:5]
             print("  Top 5:")
             for item in sorted_items:
-                print(f"    - {item['Operator']}: CUDA={format_time(item['CUDA_Time_ns'])}, "
-                      f"FG={format_time(item['FlagGems_Time_ns'])}, Ratio={item['Ratio']}")
+                cuda_t = item['CUDA_Time_ns']
+                fg_t = item['FlagGems_Time_ns']
+                if cuda_t > 0:
+                    ratio = fg_t / cuda_t
+                    ratio_str = f"{ratio:.3f}"
+                elif fg_t > 0:
+                    ratio_str = "0"
+                else:
+                    ratio_str = "-"
+                print(f"    - {item['Operator']}: CUDA={format_time(cuda_t)}, "
+                      f"FG={format_time(fg_t)}, Ratio={ratio_str}")
 
 
 def print_flaggems_faster_kernels(cuda_file: str, fg_file: str, ratio_threshold: float = 0.1):
