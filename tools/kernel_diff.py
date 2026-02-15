@@ -1,559 +1,826 @@
 #!/usr/bin/env python3
 """
-OpDiff2: Compare CUDA vs FlagGems kernel performance from nsys profiling CSV files.
-
-Pipeline:
-1. Parse all kernels from both CUDA and FlagGems CSV files
-2. Map each kernel to an operator name using priority-based rules
-3. Aggregate by operator, tracking original kernel names
-4. Compare one-to-one: if kernel names differ -> SLOWER/FASTER, else -> NOT_REPLACED
-
-Usage:
-    python kernel_diff.py --cuda cuda.csv --flaggems flaggems.csv [--output report.md]
+Kernel Comparison Tool: CUDA vs FlagGems
+Maps kernels to unified names and categorizes performance differences.
 """
 
-import argparse
-import csv
 import re
+import csv
+import argparse
 from collections import defaultdict
-from dataclasses import dataclass, field
-from typing import Dict, List, Set, Tuple, Optional
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional
+
+# =============================================================================
+# MAPPING RULES: Map kernel names to unified operator names
+# =============================================================================
+
+# Regex patterns for CUDA kernels -> unified name
+CUDA_KERNEL_PATTERNS = [
+    # GEMM operations (nvjet, cublas, cutlass)
+    (r'nvjet_tst_\d+x\d+_\d+x\d+.*', 'GEMM'),
+    (r'sm90_xmma_gemm.*', 'GEMM'),
+    (r'cutlass.*gemm.*', 'GEMM'),
+    (r'cublasLt::splitKreduce_kernel.*', 'GEMM_splitK_reduce'),
+    (r'internal::gemvx::kernel.*', 'GEMV'),
+
+    # Softmax
+    (r'cunn_SoftMaxForward.*', 'Softmax'),
+
+    # Reduction operations
+    (r'at::native::reduce_kernel.*ArgMaxOps.*', 'ArgMax'),
+    (r'at::native::reduce_kernel.*', 'Reduce'),
+
+    # Elementwise copy operations
+    (r'at::native::elementwise_kernel.*direct_copy_kernel_cuda.*BFloat16.*', 'Copy_bf16'),
+    (r'at::native::elementwise_kernel.*direct_copy_kernel_cuda.*', 'Copy'),
+    (r'at::native::unrolled_elementwise_kernel.*direct_copy_kernel_cuda.*float\).*', 'Copy_float'),
+    (r'at::native::unrolled_elementwise_kernel.*direct_copy_kernel_cuda.*long\).*', 'Copy_long'),
+    (r'at::native::unrolled_elementwise_kernel.*direct_copy_kernel_cuda.*int\).*', 'Copy_int'),
+    (r'at::native::unrolled_elementwise_kernel.*direct_copy_kernel_cuda.*', 'Copy'),
+    (r'at::native::.*CatArrayBatchedCopy.*', 'Cat'),
+    (r'at::native::.*CatArrayBatchedCopy_vectorized.*', 'Cat_vectorized'),
+    (r'at::native::bfloat16_copy_kernel_cuda.*', 'Copy_bf16_cast'),
+
+    # Division
+    (r'at::native::elementwise_kernel.*DivFunctor.*', 'Div'),
+    (r'at::native::vectorized_elementwise_kernel.*DivFunctor.*', 'Div'),
+    (r'at::native::unrolled_elementwise_kernel.*DivFunctor.*', 'Div'),
+
+    # Multiplication
+    (r'at::native::elementwise_kernel.*MulFunctor.*', 'Mul'),
+    (r'at::native::vectorized_elementwise_kernel.*MulFunctor.*', 'Mul'),
+    (r'at::native::vectorized_elementwise_kernel.*AUnaryFunctor.*MulFunctor.*', 'Mul_scalar'),
+    (r'at::native::vectorized_elementwise_kernel.*BUnaryFunctor.*MulFunctor.*', 'Mul_scalar'),
+
+    # Addition/Subtraction
+    (r'at::native::unrolled_elementwise_kernel.*CUDAFunctor_add<int>.*', 'Add_int'),
+    (r'at::native::unrolled_elementwise_kernel.*CUDAFunctorOnSelf_add<int>.*', 'Add_inplace_int'),
+    (r'at::native::vectorized_elementwise_kernel.*CUDAFunctorOnOther_add<long>.*', 'Add_scalar_long'),
+    (r'at::native::vectorized_elementwise_kernel.*CUDAFunctorOnOther_add<float>.*', 'Add_scalar_float'),
+
+    # Fill operations
+    (r'at::native::vectorized_elementwise_kernel.*FillFunctor<signed char>.*', 'Fill_int8'),
+    (r'at::native::vectorized_elementwise_kernel.*FillFunctor<int>.*', 'Fill_int'),
+    (r'at::native::vectorized_elementwise_kernel.*FillFunctor<long>.*', 'Fill_long'),
+    (r'at::native::vectorized_elementwise_kernel.*FillFunctor<float>.*', 'Fill_float'),
+    (r'at::native::vectorized_elementwise_kernel.*FillFunctor<c10::BFloat16>.*', 'Fill_bf16'),
+    (r'at::native::vectorized_elementwise_kernel.*FillFunctor<bool>.*', 'Fill_bool'),
+    (r'at::native::vectorized_elementwise_kernel.*FillFunctor<unsigned char>.*', 'Fill_uint8'),
+    (r'at::native::elementwise_kernel.*FillFunctor<bool>.*', 'Fill_bool'),
+    (r'at::native::unrolled_elementwise_kernel.*FillFunctor<long>.*', 'Fill_long'),
+
+    # Exponential/Random distribution
+    (r'at::native::.*distribution_elementwise_grid_stride_kernel.*exponential.*', 'Exponential'),
+    (r'at::native::.*distribution_elementwise_grid_stride_kernel.*uniform.*', 'Rand'),
+
+    # Scatter/Gather
+    (r'at::native::_scatter_gather_elementwise_kernel.*<\(bool\)1.*', 'Scatter'),
+    (r'at::native::_scatter_gather_elementwise_kernel.*<\(bool\)0.*', 'Gather_scatter'),
+    (r'at::native::vectorized_gather_kernel.*', 'Gather'),
+
+    # Index operations
+    (r'at::native::index_elementwise_kernel.*OpaqueType<\(int\)2>.*', 'Index_2byte'),
+    (r'at::native::index_elementwise_kernel.*OpaqueType<\(int\)4>.*', 'Index_4byte'),
+    (r'at::native::index_elementwise_kernel.*', 'Index'),
+
+    # Masked fill
+    (r'at::native::vectorized_elementwise_kernel.*masked_fill_kernel.*', 'MaskedFill'),
+
+    # Trigonometric
+    (r'at::native::vectorized_elementwise_kernel.*sin_kernel_cuda.*', 'Sin'),
+    (r'at::native::vectorized_elementwise_kernel.*cos_kernel_cuda.*', 'Cos'),
+
+    # Power
+    (r'at::native::elementwise_kernel.*pow_tensor_tensor_kernel.*', 'Pow'),
+
+    # Reciprocal
+    (r'at::native::vectorized_elementwise_kernel.*reciprocal_kernel_cuda.*', 'Reciprocal'),
+
+    # Comparison
+    (r'at::native::elementwise_kernel.*CompareFunctor.*', 'Compare'),
+    (r'at::native::vectorized_elementwise_kernel.*compare_scalar_kernel.*', 'Compare_scalar'),
+
+    # Where/Conditional
+    (r'at::native::vectorized_elementwise_kernel.*where_kernel_impl.*long.*', 'Where_long'),
+    (r'at::native::elementwise_kernel.*where_kernel_impl.*float.*', 'Where_float'),
+    (r'at::native::vectorized_elementwise_kernel.*where_kernel_impl.*', 'Where'),
+
+    # Arange
+    (r'elementwise_kernel_with_index.*arange_cuda_out.*', 'Arange'),
+
+    # Sort operations
+    (r'at_cuda_detail::cub::DeviceSegmentedRadixSortKernel.*<\(bool\)1.*', 'RadixSort_descend'),
+    (r'at_cuda_detail::cub::DeviceSegmentedRadixSortKernel.*<\(bool\)0.*', 'RadixSort_ascend'),
+    (r'at::native::.*fill_reverse_indices_kernel.*', 'Sort_fill_indices'),
+
+    # Scan
+    (r'at::native::tensor_kernel_scan_innermost_dim.*', 'CumSum'),
+]
+
+# Regex patterns for FlagGems kernels -> unified name
+FLAGGEMS_KERNEL_PATTERNS = [
+    # GEMM operations
+    (r'^mm_kernel_general$', 'GEMM'),
+    (r'^mm_kernel_general_host_tma$', 'GEMM'),
+    (r'^bmm_kernel$', 'BMM'),
+
+    # Softmax
+    (r'^softmax_kernel_inner$', 'Softmax'),
+
+    # ArgMax
+    (r'^argmax_kernel_inner$', 'ArgMax'),
+
+    # Copy operations
+    (r'^_copy_kernel_kernel_rank_\d+$', 'Copy'),
+    (r'^cat_copy_func_kernel_\d+$', 'Cat'),
+
+    # Division
+    (r'^true_div_func_kernel_rank_\d+$', 'Div'),
+    (r'^true_div_func_tensor_scalar_kernel_rank_\d+$', 'Div_scalar'),
+
+    # Multiplication
+    (r'^mul_func_kernel_rank_\d+$', 'Mul'),
+    (r'^mul_func_scalar_kernel_rank_\d+$', 'Mul_scalar'),
+
+    # Subtraction (maps to Add in some cases)
+    (r'^sub_func_tensor_scalar_kernel_rank_\d+$', 'Sub_scalar'),
+    (r'^sub_func_scalar_tensor_kernel_rank_\d+$', 'Sub_scalar_tensor'),
+    (r'^sub_func_kernel_rank_\d+$', 'Sub'),
+
+    # Fill operations
+    (r'^fill_scalar_func_kernel_rank_\d+$', 'Fill'),
+    (r'^zeros_kernel$', 'Zeros'),
+    (r'^ones_kernel$', 'Ones'),
+    (r'^full_func_scalar_kernel_rank_\d+$', 'Full'),
+
+    # Exponential/Random
+    (r'^fused_exponential_kernel_f32$', 'Exponential'),
+    (r'^rand_kernel$', 'Rand'),
+
+    # Scatter/Gather
+    (r'^_scatter_jit_function$', 'Scatter'),
+    (r'^_gather_flaggems_jit_function$', 'Gather'),
+
+    # Index
+    (r'^_index_jit_function$', 'Index'),
+
+    # Masked fill
+    (r'^masked_fill_kernel_kernel_rank_\d+$', 'MaskedFill'),
+
+    # Trigonometric
+    (r'^sin_func_kernel_rank_\d+$', 'Sin'),
+    (r'^cos_func_kernel_rank_\d+$', 'Cos'),
+
+    # Power
+    (r'^pow_func_scalar_tensor_kernel_rank_\d+$', 'Pow'),
+
+    # Reciprocal
+    (r'^reciprocal_func_kernel_rank_\d+$', 'Reciprocal'),
+
+    # Comparison
+    (r'^lt_func_kernel_rank_\d+$', 'LessThan'),
+    (r'^le_func_kernel_rank_\d+$', 'LessEqual'),
+    (r'^lt_func_scalar_kernel_rank_\d+$', 'LessThan_scalar'),
+
+    # Where/Conditional
+    (r'^where_inner_kernel_rank_\d+$', 'Where'),
+
+    # Arange
+    (r'^arange_func$', 'Arange'),
+
+    # Sort operations (FlagGems specific)
+    (r'^sweep$', 'RadixSort_sweep'),
+    (r'^compute_global_hist_kernel$', 'RadixSort_histogram'),
+    (r'^reduce_then_scan_block_scan_kernel_row$', 'Scan_block'),
+    (r'^reduce_then_scan_block_sum_kernel_row$', 'Scan_sum'),
+    (r'^reduce_then_scan_root_scan_kernel_row$', 'Scan_root'),
+]
+
+# Kernels that exist in both CUDA and FlagGems (not replaced)
+COMMON_KERNEL_PATTERNS = [
+    # Attention kernels
+    (r'sm90::fwd::sparse_attn_fwd_kernel.*', 'SparseAttention'),
+
+    # MoE kernels
+    (r'^fused_moe_kernel$', 'FusedMoE'),
+
+    # VLLM specific kernels
+    (r'vllm::cross_device_reduce_1stage.*', 'CrossDeviceReduce'),
+    (r'two_shot_all_reduce_kernel_inplace.*', 'TwoShotAllReduce'),
+    (r'vllm::topk_kernel.*', 'TopK'),
+    (r'vllm::topKPerRowDecode.*', 'TopKDecode'),
+    (r'vllm::topKPerRowPrefill.*', 'TopKPrefill'),
+    (r'vllm::concat_and_cache_mla_kernel.*', 'ConcatCacheMLA'),
+    (r'vllm::indexer_k_quant_and_cache_kernel.*', 'IndexerKQuantCache'),
+    (r'vllm::act_and_mul_kernel.*', 'ActAndMul'),
+    (r'vllm::moe::grouped_topk_fused_kernel.*', 'MoEGroupedTopK'),
+    (r'vllm::moe::moe_align_block_size_kernel.*', 'MoEAlignBlockSize'),
+    (r'vllm::moe::moe_align_block_size_small_batch_expert_kernel.*', 'MoEAlignBlockSizeSmall'),
+    (r'vllm::moe::moe_sum_kernel.*', 'MoESum'),
+    (r'vllm::moe::count_and_sort_expert_tokens_kernel.*', 'MoECountSortTokens'),
+    (r'vllm::cp_gather_indexer_k_quant_cache_kernel.*', 'CPGatherIndexerKQuantCache'),
+
+    # Deep GEMM kernels
+    (r'deep_gemm::sm90_fp8_paged_mqa_logits.*', 'DeepGEMM_FP8_PagedMQA'),
+    (r'deep_gemm::sm90_fp8_mqa_logits.*', 'DeepGEMM_FP8_MQA'),
+    (r'deep_gemm::smxx_paged_mqa_logits_metadata.*', 'DeepGEMM_PagedMQA_Metadata'),
+
+    # NCCL kernels
+    (r'ncclDevKernel_AllGather_RING_LL.*', 'NCCL_AllGather'),
+    (r'ncclDevKernel_AllReduce_Sum_f32_RING_LL.*', 'NCCL_AllReduce'),
+
+    # Quantization kernels
+    (r'per_token_group_quant_8bit_kernel.*', 'PerTokenGroupQuant8bit'),
+
+    # Convert kernels
+    (r'^_convert_req_index_to_global_index_kernel$', 'ConvertReqIndexToGlobal'),
+
+    # Triton fused kernels (common)
+    (r'^triton_poi_fused_5$', 'Triton_fused_5'),
+    (r'^triton_poi_fused_6$', 'Triton_fused_6'),
+    (r'^triton_poi_fused_4$', 'Triton_fused_4'),
+    (r'^triton_poi_fused_3$', 'Triton_fused_3'),
+    (r'^triton_red_fused_3$', 'Triton_red_fused_3'),
+    (r'^triton_red_fused_2$', 'Triton_red_fused_2'),
+    (r'^triton_poi_fused_mul_silu_slice_1$', 'Triton_MulSiluSlice_1'),
+    (r'^triton_poi_fused_mul_silu_slice_0$', 'Triton_MulSiluSlice_0'),
+    (r'^triton_per_fused__to_copy_add_mean_mul_pow_rsqrt_2$', 'Triton_RMSNorm_2'),
+    (r'^triton_per_fused__to_copy_add_mean_mul_pow_rsqrt_0$', 'Triton_RMSNorm_0'),
+    (r'^triton_per_fused__to_copy_add_mean_mul_pow_rsqrt_1$', 'Triton_RMSNorm_1'),
+    (r'^triton_per_fused__to_copy_add_mean_moe_forward_shared_mul_pow_rsqrt_0$', 'Triton_MoE_RMSNorm'),
+    (r'^triton_poi_fused_mul_unsqueeze_view_7$', 'Triton_MulUnsqueezeView_7'),
+    (r'^triton_poi_fused_mul_unsqueeze_view_6$', 'Triton_MulUnsqueezeView_6'),
+    (r'^triton_poi_fused_add_all_reduce_bitwise_and_bitwise_not_bitwise_or_embedding_ge_lt_masked_fill_mul_sub_unsqueeze_0$', 'Triton_EmbeddingMask'),
+    (r'^triton_poi_fused_add_all_reduce_mul_1$', 'Triton_AddAllReduceMul'),
+]
+
+# Mapping for equivalent operations between CUDA and FlagGems
+EQUIVALENT_OPS = {
+    # GEMM equivalents
+    'GEMM': ['GEMM', 'BMM'],
+    'GEMM_splitK_reduce': ['GEMM'],
+    'GEMV': ['GEMM'],
+
+    # Softmax
+    'Softmax': ['Softmax'],
+
+    # ArgMax
+    'ArgMax': ['ArgMax'],
+
+    # Copy operations
+    'Copy': ['Copy'],
+    'Copy_bf16': ['Copy'],
+    'Copy_float': ['Copy'],
+    'Copy_long': ['Copy'],
+    'Copy_int': ['Copy'],
+    'Copy_bf16_cast': ['Copy'],
+    'Cat': ['Cat'],
+    'Cat_vectorized': ['Cat'],
+
+    # Division
+    'Div': ['Div', 'Div_scalar'],
+
+    # Multiplication
+    'Mul': ['Mul'],
+    'Mul_scalar': ['Mul_scalar'],
+
+    # Addition related
+    'Add_int': ['Sub_scalar'],  # FlagGems uses sub for some add ops
+    'Add_inplace_int': ['Sub_scalar'],
+    'Add_scalar_long': ['Sub_scalar_tensor'],
+    'Add_scalar_float': ['Sub_scalar_tensor'],
+
+    # Fill operations
+    'Fill_int8': ['Fill', 'Zeros', 'Full'],
+    'Fill_int': ['Fill', 'Zeros', 'Full'],
+    'Fill_long': ['Fill', 'Zeros', 'Full'],
+    'Fill_float': ['Fill', 'Zeros', 'Full'],
+    'Fill_bf16': ['Fill', 'Zeros', 'Full'],
+    'Fill_bool': ['Fill', 'Zeros', 'Full'],
+    'Fill_uint8': ['Fill', 'Zeros', 'Full'],
+
+    # Exponential/Random
+    'Exponential': ['Exponential'],
+    'Rand': ['Rand'],
+
+    # Scatter/Gather
+    'Scatter': ['Scatter'],
+    'Gather': ['Gather'],
+    'Gather_scatter': ['Gather', 'Scatter'],
+
+    # Index
+    'Index': ['Index'],
+    'Index_2byte': ['Index'],
+    'Index_4byte': ['Index'],
+
+    # Masked fill
+    'MaskedFill': ['MaskedFill'],
+
+    # Trigonometric
+    'Sin': ['Sin'],
+    'Cos': ['Cos'],
+
+    # Power
+    'Pow': ['Pow'],
+
+    # Reciprocal
+    'Reciprocal': ['Reciprocal'],
+
+    # Comparison
+    'Compare': ['LessThan', 'LessEqual'],
+    'Compare_scalar': ['LessThan_scalar'],
+
+    # Where
+    'Where': ['Where'],
+    'Where_long': ['Where'],
+    'Where_float': ['Where'],
+
+    # Arange
+    'Arange': ['Arange'],
+
+    # Sort operations
+    'RadixSort_descend': ['RadixSort_sweep', 'RadixSort_histogram', 'Scan_block', 'Scan_sum', 'Scan_root'],
+    'RadixSort_ascend': ['RadixSort_sweep', 'RadixSort_histogram', 'Scan_block', 'Scan_sum', 'Scan_root'],
+    'Sort_fill_indices': ['RadixSort_sweep'],
+    'CumSum': ['Scan_block', 'Scan_sum', 'Scan_root'],
+}
 
 
-@dataclass
-class KernelInfo:
-    """Information about a kernel from profiling data."""
-    name: str
-    total_time_ns: int
-    instances: int
-    avg_ns: float
-    percentage: float
-
-
-@dataclass
-class OperatorStats:
-    """Aggregated statistics for an operator."""
-    name: str
-    total_time_ns: int = 0
-    instances: int = 0
-    kernel_names: Set[str] = field(default_factory=set)
-
-    @property
-    def total_time_s(self) -> float:
-        return self.total_time_ns / 1e9
-
-    @property
-    def total_time_ms(self) -> float:
-        return self.total_time_ns / 1e6
-
-
-class KernelMapper:
-    """Maps kernel names to operator names using pattern matching rules."""
-
-    # Pattern rules: (regex_pattern, operator_name, priority)
-    # Higher priority rules are checked first
-    RULES = [
-        # ============== FlagGems Specific Kernels (priority 100) ==============
-        # Matmul
-        (r'^mm_kernel_general_host_tma$', 'mm', 100),
-        (r'^mm_kernel_general$', 'mm', 100),
-        (r'^bmm_kernel$', 'bmm', 100),
-
-        # Zeros and Fill
-        (r'^zeros_kernel$', 'zeros', 100),
-        (r'^ones_kernel$', 'ones', 100),
-        (r'^fill_scalar_func_kernel', 'fill', 100),
-        (r'^full_func_scalar_kernel', 'full', 100),
-
-        # Elementwise ops
-        (r'^softmax_kernel_inner$', 'softmax', 100),
-        (r'^argmax_kernel_inner$', 'argmax', 100),
-        (r'^true_div_func_kernel', 'div', 100),
-        (r'^true_div_func_tensor_scalar', 'div', 100),
-        (r'^fused_exponential_kernel', 'exponential', 100),
-        (r'^sub_func_tensor_scalar_kernel', 'sub', 100),
-        (r'^sub_func_scalar_tensor_kernel', 'sub', 100),
-        (r'^sub_func_kernel', 'sub', 100),
-        (r'^mul_func_kernel', 'mul', 100),
-        (r'^mul_func_scalar_kernel', 'mul', 100),
-        (r'^add_func_kernel', 'add', 100),
-        (r'^pow_func_scalar_tensor_kernel', 'pow', 100),
-        (r'^reciprocal_func_kernel', 'reciprocal', 100),
-        (r'^sin_func_kernel', 'sin', 100),
-        (r'^cos_func_kernel', 'cos', 100),
-        (r'^exp_func_kernel', 'exp', 100),
-        (r'^log_func_kernel', 'log', 100),
-        (r'^sqrt_func_kernel', 'sqrt', 100),
-        (r'^rsqrt_func_kernel', 'rsqrt', 100),
-        (r'^abs_func_kernel', 'abs', 100),
-        (r'^neg_func_kernel', 'neg', 100),
-        (r'^relu_func_kernel', 'relu', 100),
-        (r'^gelu_func_kernel', 'gelu', 100),
-        (r'^silu_func_kernel', 'silu', 100),
-        (r'^sigmoid_func_kernel', 'sigmoid', 100),
-        (r'^tanh_func_kernel', 'tanh', 100),
-
-        # Comparison ops
-        (r'^le_func_kernel', 'le', 100),
-        (r'^lt_func_kernel', 'lt', 100),
-        (r'^lt_func_scalar_kernel', 'lt', 100),
-        (r'^ge_func_kernel', 'ge', 100),
-        (r'^gt_func_kernel', 'gt', 100),
-        (r'^eq_func_kernel', 'eq', 100),
-        (r'^ne_func_kernel', 'ne', 100),
-        (r'^where_inner_kernel', 'where', 100),
-        (r'^masked_fill_kernel', 'masked_fill', 100),
-
-        # Copy and memory ops
-        (r'^_copy_kernel_kernel', 'copy', 100),
-        (r'^_to_copy_func_kernel', 'to_copy', 100),
-        (r'^cat_copy_func_kernel', 'cat', 100),
-        (r'^_index_jit_function$', 'index', 100),
-        (r'^_scatter_jit_function$', 'scatter', 100),
-        (r'^_gather_flaggems_jit_function$', 'gather', 100),
-        (r'^arange_func$', 'arange', 100),
-        (r'^rand_kernel$', 'rand', 100),
-
-        # Reduction ops
-        (r'^reduce_then_scan', 'scan', 100),
-        (r'^compute_global_hist_kernel', 'histogram', 100),
-        (r'^sweep$', 'sweep', 100),
-
-        # ============== vLLM Specific Kernels (priority 95) ==============
-        (r'vllm::topKPerRowDecode', 'topk_decode', 95),
-        (r'vllm::topKPerRowPrefill', 'topk_prefill', 95),
-        (r'vllm::topk_kernel', 'topk', 95),
-        (r'vllm::cross_device_reduce', 'cross_device_reduce', 95),
-        (r'vllm::moe::grouped_topk', 'moe_topk', 95),
-        (r'vllm::moe::moe_align_block', 'moe_align', 95),
-        (r'vllm::moe::moe_sum', 'moe_sum', 95),
-        (r'vllm::moe::count_and_sort', 'moe_sort', 95),
-        (r'vllm::act_and_mul_kernel', 'act_and_mul', 95),
-        (r'vllm::concat_and_cache', 'concat_cache', 95),
-        (r'vllm::indexer_k_quant', 'kv_quant', 95),
-        (r'vllm::cp_gather_indexer', 'cp_gather', 95),
-        (r'fused_moe_kernel', 'fused_moe', 95),
-        (r'sparse_attn_fwd_kernel', 'sparse_attention', 95),
-        (r'flash.*attention', 'flash_attention', 95),
-        (r'flashmla', 'flash_mla', 95),
-
-        # DeepGEMM
-        (r'deep_gemm::sm90_fp8', 'deepgemm_fp8', 95),
-        (r'deep_gemm::smxx_paged_mqa', 'deepgemm_mqa', 95),
-
-        # ============== NCCL Kernels (priority 95) ==============
-        (r'ncclDevKernel_AllGather', 'nccl_allgather', 95),
-        (r'ncclDevKernel_AllReduce', 'nccl_allreduce', 95),
-        (r'ncclDevKernel_Broadcast', 'nccl_broadcast', 95),
-        (r'ncclDevKernel_Reduce', 'nccl_reduce', 95),
-        (r'ncclDevKernel_ReduceScatter', 'nccl_reduce_scatter', 95),
-        (r'ncclDevKernel_SendRecv', 'nccl_send_recv', 95),
-        (r'two_shot_all_reduce', 'custom_allreduce', 95),
-
-        # ============== CUDA/cuBLAS Kernels (priority 90) ==============
-        # cuBLAS GEMM (nvjet)
-        (r'^nvjet_tst_', 'mm', 90),
-        (r'^sm90_xmma_gemm', 'mm', 90),
-        (r'^cutlass.*gemm', 'mm', 90),
-        (r'^volta_.*gemm', 'mm', 90),
-        (r'^ampere_.*gemm', 'mm', 90),
-        (r'^hopper_.*gemm', 'mm', 90),
-        (r'^cublasLt::splitKreduce', 'mm_reduce', 85),
-
-        # cuDNN ops
-        (r'cunn_SoftMaxForward', 'softmax', 90),
-        (r'cunn_SoftMaxBackward', 'softmax_bwd', 90),
-        (r'cudnn.*BatchNorm', 'batch_norm', 90),
-        (r'cudnn.*Conv', 'conv', 90),
-        (r'cudnn.*Pool', 'pool', 90),
-
-        # PyTorch ATen kernels
-        (r'at::native.*CatArrayBatchedCopy', 'cat', 90),
-        (r'at::native.*SoftMaxForward', 'softmax', 90),
-        (r'at::native.*SoftMaxBackward', 'softmax_bwd', 90),
-        (r'at::native.*reduce_kernel.*ArgMaxOps', 'argmax', 90),
-        (r'at::native.*reduce_kernel.*ArgMinOps', 'argmin', 90),
-        (r'at::native.*reduce_kernel.*SumOps', 'sum', 90),
-        (r'at::native.*reduce_kernel.*MeanOps', 'mean', 90),
-        (r'at::native.*reduce_kernel.*MaxOps', 'max', 90),
-        (r'at::native.*reduce_kernel.*MinOps', 'min', 90),
-        (r'at::native.*reduce_kernel.*ProdOps', 'prod', 90),
-
-        # ATen elementwise with specific functors
-        (r'DivFunctor', 'div', 85),
-        (r'MulFunctor', 'mul', 85),
-        (r'AddFunctor', 'add', 85),
-        (r'SubFunctor', 'sub', 85),
-        (r'at::native.*FillFunctor<signed char>', 'zeros', 90),
-        (r'at::native.*FillFunctor<int>', 'fill', 85),
-        (r'at::native.*FillFunctor<long>', 'fill', 85),
-        (r'at::native.*FillFunctor<float>', 'fill', 85),
-        (r'at::native.*FillFunctor<.*bfloat16>', 'fill', 85),
-        (r'at::native.*FillFunctor<bool>', 'fill', 85),
-        (r'at::native.*FillFunctor<unsigned char>', 'fill', 85),
-        (r'at::native.*FillFunctor', 'fill', 80),
-
-        # ATen copy operations
-        (r'direct_copy_kernel_cuda.*BFloat16', 'copy_bf16', 85),
-        (r'direct_copy_kernel_cuda', 'copy', 80),
-        (r'bfloat16_copy_kernel', 'copy_bf16', 85),
-        (r'LoadWithCast.*StoreWithCast', 'to_copy', 85),
-
-        # ATen random/distribution
-        (r'exponential_kernel', 'exponential', 85),
-        (r'uniform_kernel', 'uniform', 85),
-        (r'normal_kernel', 'normal', 85),
-        (r'bernoulli_kernel', 'bernoulli', 85),
-        (r'distribution_elementwise.*exponential', 'exponential', 85),
-        (r'distribution_elementwise.*uniform', 'uniform', 85),
-
-        # ATen index operations
-        (r'at::native.*index_elementwise', 'index', 85),
-        (r'at::native.*scatter_gather', 'scatter', 85),
-        (r'at::native.*gather_kernel', 'gather', 85),
-        (r'at::native.*index_kernel', 'index', 85),
-        (r'at::native.*index_select', 'index_select', 85),
-        (r'at::native.*index_add', 'index_add', 85),
-        (r'at::native.*index_copy', 'index_copy', 85),
-
-        # ATen comparison
-        (r'at::native.*CompareFunctor', 'compare', 85),
-        (r'at::native.*compare_scalar', 'compare', 85),
-        (r'at::native.*where_kernel', 'where', 85),
-        (r'at::native.*masked_fill', 'masked_fill', 85),
-
-        # ATen math
-        (r'at::native.*sin_kernel', 'sin', 85),
-        (r'at::native.*cos_kernel', 'cos', 85),
-        (r'at::native.*tan_kernel', 'tan', 85),
-        (r'at::native.*exp_kernel', 'exp', 85),
-        (r'at::native.*log_kernel', 'log', 85),
-        (r'at::native.*sqrt_kernel', 'sqrt', 85),
-        (r'at::native.*rsqrt_kernel', 'rsqrt', 85),
-        (r'at::native.*pow_tensor', 'pow', 85),
-        (r'at::native.*reciprocal', 'reciprocal', 85),
-
-        # ATen activations
-        (r'at::native.*relu', 'relu', 85),
-        (r'at::native.*gelu', 'gelu', 85),
-        (r'at::native.*silu', 'silu', 85),
-        (r'at::native.*sigmoid', 'sigmoid', 85),
-        (r'at::native.*tanh', 'tanh', 85),
-
-        # ATen scan operations
-        (r'at::native.*tensor_kernel_scan', 'cumsum', 85),
-        (r'at::native.*cub.*Scan', 'scan', 85),
-        (r'at::native.*cub.*Sort', 'sort', 85),
-        (r'DeviceSegmentedRadixSort', 'sort', 85),
-
-        # ============== Triton Fused Kernels (priority 80) ==============
-        (r'triton_poi_fused.*softmax', 'softmax', 80),
-        (r'triton_poi_fused.*layer_norm', 'layer_norm', 80),
-        (r'triton_poi_fused.*rms_?norm', 'rms_norm', 80),
-        (r'triton_poi_fused.*add.*mul.*rsqrt', 'rms_norm', 75),
-        (r'triton_poi_fused.*mean.*mul.*pow.*rsqrt', 'rms_norm', 75),
-        (r'triton_poi_fused.*silu', 'silu', 80),
-        (r'triton_poi_fused.*gelu', 'gelu', 80),
-        (r'triton_poi_fused.*mul.*silu.*slice', 'swiglu', 80),
-        (r'triton_poi_fused.*embedding', 'embedding', 80),
-        (r'triton_poi_fused.*all_reduce', 'allreduce_fused', 80),
-        (r'triton_poi_fused', 'triton_fused', 50),
-        (r'triton_red_fused', 'triton_reduce', 50),
-        (r'triton_per_fused', 'triton_persistent', 50),
-
-        # ============== Generic Patterns (priority 30-70) ==============
-        (r'at::native.*elementwise', 'elementwise', 30),
-        (r'at::native.*vectorized', 'vectorized', 30),
-        (r'at::native.*unrolled', 'unrolled', 30),
-        (r'CUDAFunctor_add', 'add', 70),
-        (r'CUDAFunctorOnSelf_add', 'add', 70),
-        (r'CUDAFunctorOnOther_add', 'add', 70),
-
-        # Copy - unify different copy patterns
-        (r'at::native.*direct_copy', 'copy', 75),
-        (r'at::native.*CatArrayBatchedCopy_vectorized', 'cat', 85),
-    ]
-
-    def __init__(self):
-        # Compile regex patterns and sort by priority (descending)
-        self.compiled_rules = [
-            (re.compile(pattern), op_name, priority)
-            for pattern, op_name, priority in self.RULES
-        ]
-        self.compiled_rules.sort(key=lambda x: -x[2])
-
-    def map_kernel(self, kernel_name: str) -> Tuple[str, int]:
-        """Map a kernel name to (operator_name, priority)."""
-        for pattern, op_name, priority in self.compiled_rules:
-            if pattern.search(kernel_name):
-                return op_name, priority
-        return 'unknown', 0
-
-
-def parse_csv(filepath: str) -> List[KernelInfo]:
-    """Parse nsys stats CSV output file."""
+def parse_csv(filepath: str) -> List[Dict]:
+    """Parse nsys kernel CSV file."""
     kernels = []
-
     with open(filepath, 'r') as f:
         lines = f.readlines()
 
-    # Find the CSV header line
-    csv_start = 0
+    # Find the header line
+    header_idx = None
     for i, line in enumerate(lines):
         if line.startswith('Time (%),'):
-            csv_start = i
+            header_idx = i
             break
 
-    # Parse CSV data
-    reader = csv.DictReader(lines[csv_start:])
-    for row in reader:
-        try:
-            kernel = KernelInfo(
-                name=row['Name'].strip('"'),
-                total_time_ns=int(row['Total Time (ns)']),
-                instances=int(row['Instances']),
-                avg_ns=float(row['Avg (ns)']),
-                percentage=float(row['Time (%)'])
-            )
-            kernels.append(kernel)
-        except (KeyError, ValueError):
-            continue
+    if header_idx is None:
+        raise ValueError(f"Could not find header in {filepath}")
 
+    # Parse CSV from header
+    reader = csv.DictReader(lines[header_idx:])
+    for row in reader:
+        if row.get('Name'):
+            kernels.append({
+                'name': row['Name'].strip('"'),
+                'time_pct': float(row['Time (%)']) if row['Time (%)'] else 0,
+                'total_time_ns': int(row['Total Time (ns)']) if row['Total Time (ns)'] else 0,
+                'instances': int(row['Instances']) if row['Instances'] else 0,
+                'avg_ns': float(row['Avg (ns)']) if row['Avg (ns)'] else 0,
+            })
     return kernels
 
 
-def aggregate_by_operator(
-    kernels: List[KernelInfo],
-    mapper: KernelMapper
-) -> Dict[str, OperatorStats]:
-    """Aggregate kernel statistics by mapped operator name."""
-    op_stats: Dict[str, OperatorStats] = {}
+def match_kernel_name(kernel_name: str, patterns: List[Tuple[str, str]]) -> Optional[str]:
+    """Match kernel name against patterns and return unified name."""
+    for pattern, unified_name in patterns:
+        if re.search(pattern, kernel_name):
+            return unified_name
+    return None
+
+
+def classify_kernel(kernel_name: str) -> Tuple[str, str]:
+    """
+    Classify a kernel and return (unified_name, source).
+    source: 'cuda', 'flaggems', 'common', 'unknown'
+    """
+    # Check common patterns first
+    unified = match_kernel_name(kernel_name, COMMON_KERNEL_PATTERNS)
+    if unified:
+        return unified, 'common'
+
+    # Check CUDA patterns
+    unified = match_kernel_name(kernel_name, CUDA_KERNEL_PATTERNS)
+    if unified:
+        return unified, 'cuda'
+
+    # Check FlagGems patterns
+    unified = match_kernel_name(kernel_name, FLAGGEMS_KERNEL_PATTERNS)
+    if unified:
+        return unified, 'flaggems'
+
+    return kernel_name, 'unknown'
+
+
+def aggregate_kernels(kernels: List[Dict]) -> Dict[str, Dict]:
+    """Aggregate kernels by unified name."""
+    aggregated = defaultdict(lambda: {
+        'total_time_ns': 0,
+        'time_pct': 0.0,
+        'instances': 0,
+        'raw_kernels': []
+    })
 
     for kernel in kernels:
-        op_name, _ = mapper.map_kernel(kernel.name)
+        unified_name, source = classify_kernel(kernel['name'])
+        agg = aggregated[unified_name]
+        agg['total_time_ns'] += kernel['total_time_ns']
+        agg['time_pct'] += kernel['time_pct']
+        agg['instances'] += kernel['instances']
+        agg['raw_kernels'].append(kernel['name'])
+        agg['source'] = source
 
-        if op_name not in op_stats:
-            op_stats[op_name] = OperatorStats(name=op_name)
-
-        op_stats[op_name].total_time_ns += kernel.total_time_ns
-        op_stats[op_name].instances += kernel.instances
-        op_stats[op_name].kernel_names.add(kernel.name)
-
-    return op_stats
-
-
-def format_time(time_s: float) -> str:
-    """Format time in human-readable format."""
-    if time_s >= 1:
-        return f"{time_s:.2f}s"
-    elif time_s >= 0.001:
-        return f"{time_s*1000:.2f}ms"
-    else:
-        return f"{time_s*1e6:.2f}us"
+    return dict(aggregated)
 
 
-def generate_report(
-    cuda_ops: Dict[str, OperatorStats],
-    flaggems_ops: Dict[str, OperatorStats],
-    output_file: Optional[str] = None
-):
-    """Generate comparison report."""
-    lines = []
+def find_equivalent_fg_ops(cuda_op: str, fg_ops: Dict[str, Dict]) -> List[str]:
+    """Find equivalent FlagGems operations for a CUDA operation."""
+    if cuda_op in EQUIVALENT_OPS:
+        return [op for op in EQUIVALENT_OPS[cuda_op] if op in fg_ops]
+    return [cuda_op] if cuda_op in fg_ops else []
 
-    # Calculate totals
-    cuda_total_ns = sum(op.total_time_ns for op in cuda_ops.values())
-    flaggems_total_ns = sum(op.total_time_ns for op in flaggems_ops.values())
 
-    cuda_total_s = cuda_total_ns / 1e9
-    flaggems_total_s = flaggems_total_ns / 1e9
+def compare_kernels(cuda_file: str, fg_file: str, ratio_threshold: float = 0.1) -> List[Dict]:
+    """
+    Compare CUDA and FlagGems kernels.
 
-    # Get all operator names
-    all_ops = set(cuda_ops.keys()) | set(flaggems_ops.keys())
+    Categories:
+    - FlagGems_faster: FlagGems is >10% faster
+    - FlagGems_slower: FlagGems is >10% slower
+    - Similar: Within 10% of each other
+    - Not_replaced: Same kernel in both
+    - Only_CUDA: Only in CUDA
+    - Only_FlagGems: Only in FlagGems
+    """
+    cuda_kernels = parse_csv(cuda_file)
+    fg_kernels = parse_csv(fg_file)
 
-    # Build comparison data
-    comparisons = []
-    for op_name in all_ops:
-        cuda_op = cuda_ops.get(op_name)
-        flaggems_op = flaggems_ops.get(op_name)
+    cuda_agg = aggregate_kernels(cuda_kernels)
+    fg_agg = aggregate_kernels(fg_kernels)
 
-        cuda_time_ns = cuda_op.total_time_ns if cuda_op else 0
-        flaggems_time_ns = flaggems_op.total_time_ns if flaggems_op else 0
-        cuda_instances = cuda_op.instances if cuda_op else 0
-        flaggems_instances = flaggems_op.instances if flaggems_op else 0
-        cuda_kernels = cuda_op.kernel_names if cuda_op else set()
-        flaggems_kernels = flaggems_op.kernel_names if flaggems_op else set()
+    cuda_total = sum(k['total_time_ns'] for k in cuda_kernels)
+    fg_total = sum(k['total_time_ns'] for k in fg_kernels)
 
-        cuda_time_s = cuda_time_ns / 1e9
-        flaggems_time_s = flaggems_time_ns / 1e9
+    results = []
+    processed_fg_ops = set()
 
-        cuda_pct = (cuda_time_ns / cuda_total_ns * 100) if cuda_total_ns > 0 else 0
-        flaggems_pct = (flaggems_time_ns / flaggems_total_ns * 100) if flaggems_total_ns > 0 else 0
+    # Process CUDA operations
+    for cuda_op, cuda_data in sorted(cuda_agg.items(), key=lambda x: -x[1]['total_time_ns']):
+        source = cuda_data.get('source', 'unknown')
 
-        # Determine status based on kernel names
-        if cuda_time_ns > 0 and flaggems_time_ns > 0:
-            # Both have this operator - check if kernels are different
-            if cuda_kernels != flaggems_kernels:
-                # Different kernels = replaced by FlagGems
-                ratio = flaggems_time_ns / cuda_time_ns
-                if ratio > 1.05:
-                    status = "SLOWER"
-                elif ratio < 0.95:
-                    status = "FASTER"
+        # Find equivalent FlagGems operation(s)
+        fg_equivalents = find_equivalent_fg_ops(cuda_op, fg_agg)
+
+        if source == 'common':
+            # Check if exists in both
+            if cuda_op in fg_agg:
+                fg_data = fg_agg[cuda_op]
+                processed_fg_ops.add(cuda_op)
+
+                cuda_time = cuda_data['total_time_ns']
+                fg_time = fg_data['total_time_ns']
+
+                if cuda_time > 0:
+                    ratio = fg_time / cuda_time
                 else:
-                    status = "SIMILAR"
+                    ratio = 1.0
+
+                # Determine category
+                if abs(ratio - 1.0) <= ratio_threshold:
+                    category = 'Similar'
+                elif ratio < 1.0:
+                    category = 'FlagGems_faster'
+                else:
+                    category = 'FlagGems_slower'
+
+                # Mark as not replaced since same kernel name
+                category = 'Not_replaced'
+
+                results.append({
+                    'Operator': cuda_op,
+                    'CUDA_Time_ns': cuda_time,
+                    'CUDA_Pct': cuda_data['time_pct'],
+                    'FlagGems_Time_ns': fg_time,
+                    'FlagGems_Pct': fg_data['time_pct'],
+                    'Ratio': ratio,
+                    'CUDA_Instances': cuda_data['instances'],
+                    'FlagGems_Instances': fg_data['instances'],
+                    'Category': category,
+                })
             else:
-                # Same kernels = not replaced
-                status = "NOT_REPLACED"
-                ratio = 1.0
-        elif cuda_time_ns > 0 and flaggems_time_ns == 0:
-            status = "CUDA_ONLY"
-            ratio = 0
-        elif cuda_time_ns == 0 and flaggems_time_ns > 0:
-            status = "FLAGGEMS_ONLY"
-            ratio = float('inf')
+                # Only in CUDA
+                results.append({
+                    'Operator': cuda_op,
+                    'CUDA_Time_ns': cuda_data['total_time_ns'],
+                    'CUDA_Pct': cuda_data['time_pct'],
+                    'FlagGems_Time_ns': 0,
+                    'FlagGems_Pct': 0,
+                    'Ratio': float('inf'),
+                    'CUDA_Instances': cuda_data['instances'],
+                    'FlagGems_Instances': 0,
+                    'Category': 'Only_CUDA',
+                })
+        elif source == 'cuda':
+            if fg_equivalents:
+                # Aggregate all equivalent FlagGems ops
+                fg_time = sum(fg_agg[op]['total_time_ns'] for op in fg_equivalents)
+                fg_pct = sum(fg_agg[op]['time_pct'] for op in fg_equivalents)
+                fg_instances = sum(fg_agg[op]['instances'] for op in fg_equivalents)
+
+                for op in fg_equivalents:
+                    processed_fg_ops.add(op)
+
+                cuda_time = cuda_data['total_time_ns']
+
+                if cuda_time > 0:
+                    ratio = fg_time / cuda_time
+                else:
+                    ratio = 1.0
+
+                # Determine category based on ratio
+                if abs(ratio - 1.0) <= ratio_threshold:
+                    category = 'Similar'
+                elif ratio < 1.0 - ratio_threshold:
+                    category = 'FlagGems_faster'
+                else:
+                    category = 'FlagGems_slower'
+
+                op_name = cuda_op
+                if fg_equivalents and fg_equivalents[0] != cuda_op:
+                    op_name = f"{cuda_op} -> {','.join(fg_equivalents)}"
+
+                results.append({
+                    'Operator': op_name,
+                    'CUDA_Time_ns': cuda_time,
+                    'CUDA_Pct': cuda_data['time_pct'],
+                    'FlagGems_Time_ns': fg_time,
+                    'FlagGems_Pct': fg_pct,
+                    'Ratio': ratio,
+                    'CUDA_Instances': cuda_data['instances'],
+                    'FlagGems_Instances': fg_instances,
+                    'Category': category,
+                })
+            else:
+                # Only in CUDA
+                results.append({
+                    'Operator': cuda_op,
+                    'CUDA_Time_ns': cuda_data['total_time_ns'],
+                    'CUDA_Pct': cuda_data['time_pct'],
+                    'FlagGems_Time_ns': 0,
+                    'FlagGems_Pct': 0,
+                    'Ratio': float('inf'),
+                    'CUDA_Instances': cuda_data['instances'],
+                    'FlagGems_Instances': 0,
+                    'Category': 'Only_CUDA',
+                })
         else:
+            # Unknown source, check if exists in FlagGems
+            if cuda_op in fg_agg:
+                processed_fg_ops.add(cuda_op)
+                fg_data = fg_agg[cuda_op]
+                cuda_time = cuda_data['total_time_ns']
+                fg_time = fg_data['total_time_ns']
+
+                if cuda_time > 0:
+                    ratio = fg_time / cuda_time
+                else:
+                    ratio = 1.0
+
+                results.append({
+                    'Operator': cuda_op,
+                    'CUDA_Time_ns': cuda_time,
+                    'CUDA_Pct': cuda_data['time_pct'],
+                    'FlagGems_Time_ns': fg_time,
+                    'FlagGems_Pct': fg_data['time_pct'],
+                    'Ratio': ratio,
+                    'CUDA_Instances': cuda_data['instances'],
+                    'FlagGems_Instances': fg_data['instances'],
+                    'Category': 'Not_replaced',
+                })
+            else:
+                results.append({
+                    'Operator': cuda_op,
+                    'CUDA_Time_ns': cuda_data['total_time_ns'],
+                    'CUDA_Pct': cuda_data['time_pct'],
+                    'FlagGems_Time_ns': 0,
+                    'FlagGems_Pct': 0,
+                    'Ratio': float('inf'),
+                    'CUDA_Instances': cuda_data['instances'],
+                    'FlagGems_Instances': 0,
+                    'Category': 'Only_CUDA',
+                })
+
+    # Process FlagGems-only operations
+    for fg_op, fg_data in sorted(fg_agg.items(), key=lambda x: -x[1]['total_time_ns']):
+        if fg_op not in processed_fg_ops:
+            source = fg_data.get('source', 'unknown')
+            if source == 'flaggems':
+                results.append({
+                    'Operator': fg_op,
+                    'CUDA_Time_ns': 0,
+                    'CUDA_Pct': 0,
+                    'FlagGems_Time_ns': fg_data['total_time_ns'],
+                    'FlagGems_Pct': fg_data['time_pct'],
+                    'Ratio': 0,
+                    'CUDA_Instances': 0,
+                    'FlagGems_Instances': fg_data['instances'],
+                    'Category': 'Only_FlagGems',
+                })
+
+    return results
+
+
+def format_time(ns: int) -> str:
+    """Format time in ns to human readable format."""
+    if ns >= 1e9:
+        return f"{ns/1e9:.2f}s"
+    elif ns >= 1e6:
+        return f"{ns/1e6:.2f}ms"
+    elif ns >= 1e3:
+        return f"{ns/1e3:.2f}us"
+    else:
+        return f"{ns}ns"
+
+
+def print_category_table(categories: Dict[str, List[Dict]]):
+    """Print a formatted ASCII table of category summary."""
+    # Calculate data for each category
+    cat_order = ['FlagGems_faster', 'FlagGems_slower', 'Similar', 'Not_replaced', 'Only_CUDA', 'Only_FlagGems']
+
+    rows = []
+    for cat in cat_order:
+        items = categories.get(cat, [])
+        count = len(items)
+        total_cuda = sum(r['CUDA_Time_ns'] for r in items)
+        total_fg = sum(r['FlagGems_Time_ns'] for r in items)
+
+        cuda_str = format_time(total_cuda) if total_cuda > 0 else '-'
+        fg_str = format_time(total_fg) if total_fg > 0 else '-'
+
+        rows.append((cat, count, cuda_str, fg_str))
+
+    # Column widths
+    col1_w = max(len('Category'), max(len(r[0]) for r in rows)) + 2
+    col2_w = max(len('Count'), max(len(str(r[1])) for r in rows)) + 2
+    col3_w = max(len('CUDA Total'), max(len(r[2]) for r in rows)) + 2
+    col4_w = max(len('FG Total'), max(len(r[3]) for r in rows)) + 2
+
+    # Build table
+    top_border = f"┌{'─' * col1_w}┬{'─' * col2_w}┬{'─' * col3_w}┬{'─' * col4_w}┐"
+    header_sep = f"├{'─' * col1_w}┼{'─' * col2_w}┼{'─' * col3_w}┼{'─' * col4_w}┤"
+    bottom_border = f"└{'─' * col1_w}┴{'─' * col2_w}┴{'─' * col3_w}┴{'─' * col4_w}┘"
+
+    def make_row(c1, c2, c3, c4):
+        return f"│{c1:^{col1_w}}│{c2:^{col2_w}}│{c3:^{col3_w}}│{c4:^{col4_w}}│"
+
+    print()
+    print(top_border)
+    print(make_row('Category', 'Count', 'CUDA Total', 'FG Total'))
+    print(header_sep)
+
+    for i, (cat, count, cuda_str, fg_str) in enumerate(rows):
+        print(make_row(cat, str(count), cuda_str, fg_str))
+        if i < len(rows) - 1:
+            print(header_sep)
+
+    print(bottom_border)
+
+
+def write_csv(results: List[Dict], output_file: str):
+    """Write results to CSV file."""
+    fieldnames = [
+        'Operator', 'CUDA_Time_ns', 'CUDA_Pct', 'FlagGems_Time_ns', 'FlagGems_Pct',
+        'Ratio', 'CUDA_Instances', 'FlagGems_Instances', 'Category'
+    ]
+
+    with open(output_file, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in results:
+            # Format ratio
+            if row['Ratio'] == float('inf'):
+                row['Ratio'] = 'inf'
+            elif row['Ratio'] == 0:
+                row['Ratio'] = '0'
+            else:
+                row['Ratio'] = f"{row['Ratio']:.3f}"
+
+            # Format percentages
+            row['CUDA_Pct'] = f"{row['CUDA_Pct']:.2f}%"
+            row['FlagGems_Pct'] = f"{row['FlagGems_Pct']:.2f}%"
+
+            writer.writerow(row)
+
+
+def print_summary(results: List[Dict]):
+    """Print summary statistics."""
+    categories = defaultdict(list)
+    for r in results:
+        categories[r['Category']].append(r)
+
+    print("\n" + "="*80)
+    print("SUMMARY BY CATEGORY")
+    print("="*80)
+
+    # Print formatted table
+    print_category_table(categories)
+
+    # Print detailed info for each category
+    for cat in ['FlagGems_faster', 'FlagGems_slower', 'Similar', 'Not_replaced', 'Only_CUDA', 'Only_FlagGems']:
+        items = categories.get(cat, [])
+        if items:
+            total_cuda = sum(r['CUDA_Time_ns'] for r in items)
+            total_fg = sum(r['FlagGems_Time_ns'] for r in items)
+            print(f"\n{cat}: {len(items)} operators")
+            print(f"  Total CUDA time: {format_time(total_cuda)}")
+            print(f"  Total FlagGems time: {format_time(total_fg)}")
+
+            # Top 5 by time
+            sorted_items = sorted(items, key=lambda x: max(x['CUDA_Time_ns'], x['FlagGems_Time_ns']), reverse=True)[:5]
+            print("  Top 5:")
+            for item in sorted_items:
+                print(f"    - {item['Operator']}: CUDA={format_time(item['CUDA_Time_ns'])}, "
+                      f"FG={format_time(item['FlagGems_Time_ns'])}, Ratio={item['Ratio']}")
+
+
+def print_flaggems_faster_kernels(cuda_file: str, fg_file: str, ratio_threshold: float = 0.1):
+    """Print original kernel names for FlagGems_faster category."""
+    cuda_kernels = parse_csv(cuda_file)
+    fg_kernels = parse_csv(fg_file)
+
+    cuda_agg = aggregate_kernels(cuda_kernels)
+    fg_agg = aggregate_kernels(fg_kernels)
+
+    print("\n" + "="*80)
+    print("FlagGems_faster: Original Kernel Names")
+    print("="*80)
+
+    faster_ops = []
+
+    for cuda_op, cuda_data in cuda_agg.items():
+        source = cuda_data.get('source', 'unknown')
+        if source == 'common':
             continue
 
-        comparisons.append({
-            'operator': op_name,
-            'cuda_time_s': cuda_time_s,
-            'flaggems_time_s': flaggems_time_s,
-            'cuda_pct': cuda_pct,
-            'flaggems_pct': flaggems_pct,
-            'cuda_instances': cuda_instances,
-            'flaggems_instances': flaggems_instances,
-            'cuda_kernels': cuda_kernels,
-            'flaggems_kernels': flaggems_kernels,
-            'ratio': ratio,
-            'status': status,
-            'time_delta_s': flaggems_time_s - cuda_time_s
-        })
+        # Find equivalent FlagGems operation(s)
+        fg_equivalents = find_equivalent_fg_ops(cuda_op, fg_agg)
 
-    # Sort by FlagGems time (descending)
-    comparisons.sort(key=lambda x: -x['flaggems_time_s'])
+        if source == 'cuda' and fg_equivalents:
+            fg_time = sum(fg_agg[op]['total_time_ns'] for op in fg_equivalents)
+            cuda_time = cuda_data['total_time_ns']
 
-    # Generate report
-    lines.append("# Operator Performance Comparison: CUDA vs FlagGems\n")
+            if cuda_time > 0:
+                ratio = fg_time / cuda_time
+                if ratio < 1.0 - ratio_threshold:
+                    # FlagGems is faster
+                    fg_raw_kernels = []
+                    for op in fg_equivalents:
+                        fg_raw_kernels.extend(fg_agg[op]['raw_kernels'])
 
-    # Summary
-    lines.append("## Summary\n")
-    lines.append(f"| Metric | CUDA | FlagGems |")
-    lines.append(f"|--------|------|----------|")
-    lines.append(f"| Total GPU Time | {format_time(cuda_total_s)} | {format_time(flaggems_total_s)} |")
-    lines.append(f"| Overall Ratio | 1.00x | {flaggems_total_s/cuda_total_s:.2f}x |")
-    lines.append(f"| Unique Operators | {len(cuda_ops)} | {len(flaggems_ops)} |")
-    lines.append("")
+                    faster_ops.append({
+                        'unified_name': cuda_op,
+                        'cuda_kernels': cuda_data['raw_kernels'],
+                        'fg_kernels': fg_raw_kernels,
+                        'cuda_time': cuda_time,
+                        'fg_time': fg_time,
+                        'ratio': ratio,
+                    })
 
-    # Count by status
-    status_counts = defaultdict(int)
-    for c in comparisons:
-        status_counts[c['status']] += 1
+    # Sort by speedup (lowest ratio = most speedup)
+    faster_ops.sort(key=lambda x: x['ratio'])
 
-    lines.append("### Status Breakdown\n")
-    lines.append("| Status | Count | Description |")
-    lines.append("|--------|-------|-------------|")
-    lines.append(f"| SLOWER | {status_counts['SLOWER']} | Replaced by FlagGems, slower |")
-    lines.append(f"| FASTER | {status_counts['FASTER']} | Replaced by FlagGems, faster |")
-    lines.append(f"| SIMILAR | {status_counts['SIMILAR']} | Replaced by FlagGems, similar perf |")
-    lines.append(f"| NOT_REPLACED | {status_counts['NOT_REPLACED']} | Same kernel in both |")
-    lines.append(f"| CUDA_ONLY | {status_counts['CUDA_ONLY']} | Only in CUDA baseline |")
-    lines.append(f"| FLAGGEMS_ONLY | {status_counts['FLAGGEMS_ONLY']} | Only in FlagGems |")
-    lines.append("")
-
-    # Detailed table
-    lines.append("## Detailed Comparison\n")
-    lines.append("| Operator | CUDA Time | %CUDA | FlagGems Time | %FG | Ratio | CUDA Inst | FG Inst | Status |")
-    lines.append("|----------|-----------|-------|---------------|-----|-------|-----------|---------|--------|")
-
-    for c in comparisons:
-        if c['ratio'] == float('inf'):
-            ratio_str = "N/A"
-        elif c['ratio'] == 0:
-            ratio_str = "N/A"
-        else:
-            ratio_str = f"{c['ratio']:.2f}x"
-
-        lines.append(
-            f"| {c['operator']} | {format_time(c['cuda_time_s'])} | {c['cuda_pct']:.1f}% | "
-            f"{format_time(c['flaggems_time_s'])} | {c['flaggems_pct']:.1f}% | {ratio_str} | "
-            f"{c['cuda_instances']} | {c['flaggems_instances']} | {c['status']} |"
-        )
-
-    lines.append("")
-
-    # Kernel name details for replaced operators
-    replaced = [c for c in comparisons if c['status'] in ('SLOWER', 'FASTER', 'SIMILAR')]
-    if replaced:
-        lines.append("## Replaced Operators - Kernel Details\n")
-        lines.append("| Operator | Status | CUDA Kernel(s) | FlagGems Kernel(s) |")
-        lines.append("|----------|--------|----------------|---------------------|")
-        for c in replaced:
-            cuda_k = ', '.join(sorted(c['cuda_kernels']))[:80]
-            fg_k = ', '.join(sorted(c['flaggems_kernels']))[:80]
-            if len(cuda_k) > 80:
-                cuda_k = cuda_k[:77] + "..."
-            if len(fg_k) > 80:
-                fg_k = fg_k[:77] + "..."
-            lines.append(f"| {c['operator']} | {c['status']} | {cuda_k} | {fg_k} |")
-        lines.append("")
-
-    lines.append("---")
-    lines.append("*Generated by opdiff2.py*")
-
-    report = "\n".join(lines)
-
-    # Output
-    print(report)
-
-    if output_file:
-        with open(output_file, 'w') as f:
-            f.write(report)
-        print(f"\nReport saved to: {output_file}")
+    for op in faster_ops:
+        print(f"\n[{op['unified_name']}] Ratio: {op['ratio']:.3f} (CUDA: {format_time(op['cuda_time'])}, FG: {format_time(op['fg_time'])})")
+        print("  CUDA kernels:")
+        for k in set(op['cuda_kernels']):
+            print(f"    - {k}")
+        print("  FlagGems kernels:")
+        for k in set(op['fg_kernels']):
+            print(f"    - {k}")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Compare CUDA vs FlagGems kernel performance from nsys CSV files.'
-    )
-    parser.add_argument(
-        '--cuda', '-c',
-        required=True,
-        help='Path to CUDA baseline kernel CSV file'
-    )
-    parser.add_argument(
-        '--flaggems', '-f',
-        required=True,
-        help='Path to FlagGems kernel CSV file'
-    )
-    parser.add_argument(
-        '--output', '-o',
-        help='Output markdown file path (optional)'
-    )
+    parser = argparse.ArgumentParser(description='Compare CUDA and FlagGems kernel performance')
+    parser.add_argument('--cuda', required=True, help='CUDA kernel CSV file')
+    parser.add_argument('--flaggems', required=True, help='FlagGems kernel CSV file')
+    parser.add_argument('--output', default='comparison.csv', help='Output CSV file')
+    parser.add_argument('--threshold', type=float, default=0.1,
+                        help='Ratio threshold for Similar category (default: 0.1 = 10%%)')
 
     args = parser.parse_args()
 
-    # Parse CSV files
-    print(f"Parsing CUDA CSV: {args.cuda}")
-    cuda_kernels = parse_csv(args.cuda)
-    print(f"  Found {len(cuda_kernels)} kernels")
+    print(f"Comparing kernels:")
+    print(f"  CUDA: {args.cuda}")
+    print(f"  FlagGems: {args.flaggems}")
 
-    print(f"Parsing FlagGems CSV: {args.flaggems}")
-    flaggems_kernels = parse_csv(args.flaggems)
-    print(f"  Found {len(flaggems_kernels)} kernels")
+    results = compare_kernels(args.cuda, args.flaggems, args.threshold)
 
-    # Map kernels to operators
-    mapper = KernelMapper()
+    # Sort by total time (max of CUDA and FlagGems)
+    results.sort(key=lambda x: max(x['CUDA_Time_ns'], x['FlagGems_Time_ns']), reverse=True)
 
-    print("Aggregating by operator...")
-    cuda_ops = aggregate_by_operator(cuda_kernels, mapper)
-    flaggems_ops = aggregate_by_operator(flaggems_kernels, mapper)
+    write_csv(results, args.output)
+    print(f"\nResults written to: {args.output}")
 
-    print(f"  CUDA operators: {len(cuda_ops)}")
-    print(f"  FlagGems operators: {len(flaggems_ops)}")
-    print()
+    print_summary(results)
 
-    # Generate report
-    generate_report(cuda_ops, flaggems_ops, args.output)
+    # Print FlagGems_faster original kernel names
+    print_flaggems_faster_kernels(args.cuda, args.flaggems, args.threshold)
 
 
 if __name__ == '__main__':
