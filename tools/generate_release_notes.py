@@ -104,17 +104,26 @@ def get_tag_date(repo: str, tag: str) -> str:
         )
         tag_info = json.loads(result.stdout)
 
-        # Get the commit date
-        commit_url = tag_info.get("object", {}).get("url", "")
-        if commit_url:
+        # Get the object info (could be tag or commit)
+        obj_info = tag_info.get("object", {})
+        obj_url = obj_info.get("url", "")
+        obj_type = obj_info.get("type", "")
+
+        if obj_url:
             result = subprocess.run(
-                ["gh", "api", commit_url],
+                ["gh", "api", obj_url],
                 capture_output=True,
                 text=True,
                 check=True
             )
-            commit_info = json.loads(result.stdout)
-            return commit_info.get("committer", {}).get("date", "")
+            obj_data = json.loads(result.stdout)
+
+            # Annotated tag: use tagger.date
+            # Lightweight tag (commit): use committer.date
+            if obj_type == "tag":
+                return obj_data.get("tagger", {}).get("date", "")
+            else:
+                return obj_data.get("committer", {}).get("date", "")
     except subprocess.CalledProcessError:
         pass
     return ""
@@ -254,13 +263,17 @@ def generate_markdown(
     categories: List[CategoryConfig],
     version: str,
     repo: str,
+    from_version: str = "",
     include_contributors: bool = True,
 ) -> str:
     """Generate Markdown release notes."""
     lines = []
 
-    # Title
+    # Title with version range info
     lines.append(f"# Release {version}")
+    if from_version:
+        lines.append("")
+        lines.append(f"**Changes since {from_version}**")
     lines.append("")
 
     # Classify PRs
@@ -294,13 +307,14 @@ def generate_markdown(
         lines.append("")
 
         for pr in cat_prs:
-            # Format: - Description (#PR) by @author
+            # Format: - Description ([#PR](url)) by @author
             description = pr.clean_title
             # Capitalize first letter
             if description and description[0].islower():
                 description = description[0].upper() + description[1:]
 
-            lines.append(f"- {description} (#{pr.number}) by @{pr.author}")
+            pr_link = f"https://github.com/{repo}/pull/{pr.number}"
+            lines.append(f"- {description} ([#{pr.number}]({pr_link})) by @{pr.author}")
 
         lines.append("")
 
@@ -390,7 +404,8 @@ Examples:
 
     # Generate release notes
     version = args.to_ref
-    markdown = generate_markdown(prs, categories, version, args.repo)
+    from_version = args.from_ref
+    markdown = generate_markdown(prs, categories, version, args.repo, from_version)
 
     # Output
     if args.output:
