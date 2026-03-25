@@ -9,12 +9,15 @@
 - 生成符合主流开源社区标准的 Markdown 格式
 - 支持自定义配置（分类规则、模板）
 - 显示贡献者统计
+- 支持首次发布（从仓库创建开始）
 
 ## 安装要求
 
-- Python 3.8+
-- GitHub CLI (`gh`) 已安装并登录
-- PyYAML 库
+### 必需依赖
+
+- **Python 3.8+**
+- **GitHub CLI (`gh`)** - 已安装并登录
+- **PyYAML** - Python 库
 
 ```bash
 # 安装 PyYAML
@@ -24,23 +27,40 @@ pip install pyyaml
 gh auth status
 ```
 
+### 验证安装
+
+```bash
+# 检查 gh 是否安装
+which gh
+gh --version
+
+# 检查 Python 和 PyYAML
+python3 -c "import yaml; print('PyYAML OK')"
+```
+
 ## 使用方法
 
 ### 基本用法
 
 ```bash
 # 生成两个版本间的 release notes
-python generate_release_notes.py \
+python3 generate_release_notes.py \
     --repo flagos-ai/FlagScale \
     --from v0.9.0 \
     --to v1.0.0-alpha.0
 
 # 保存到文件
-python generate_release_notes.py \
+python3 generate_release_notes.py \
     --repo flagos-ai/FlagScale \
     --from v0.9.0 \
     --to v1.0.0-alpha.0 \
     -o release_notes.md
+
+# 首次发布（没有前置版本）
+python3 generate_release_notes.py \
+    --repo flagos-ai/FlagScale \
+    --to v0.1.0 \
+    --first-release
 ```
 
 ### 命令行参数
@@ -48,8 +68,9 @@ python generate_release_notes.py \
 | 参数 | 说明 | 必需 |
 |------|------|------|
 | `--repo` | 仓库名称，格式：`owner/repo` | 是 |
-| `--from` | 起始版本（tag、分支或 commit） | 是 |
+| `--from` | 起始版本（tag、分支或 commit） | 否（与 `--first-release` 二选一） |
 | `--to` | 结束版本（tag、分支或 commit） | 是 |
+| `--first-release` | 首次发布，从仓库创建开始 | 否 |
 | `-o, --output` | 输出文件路径（默认输出到 stdout） | 否 |
 | `--config` | 自定义配置文件路径 | 否 |
 | `--method` | PR 获取方法：`date` 或 `commit` | 否（默认 `date`） |
@@ -82,22 +103,38 @@ python generate_release_notes.py \
 
 ## 输出格式示例
 
+### 常规发布
+
 ```markdown
 # Release v1.0.0
 
+**Changes since v0.9.0**
+
 ## New Features
-- Add new model support (#123) by @author
+- Add new model support ([#123](https://github.com/owner/repo/pull/123)) by @author
 
 ## Bug Fixes
-- Fix memory leak (#124) by @author
-
-## Improvements
-- Refactor data loader (#125) by @author
+- Fix memory leak ([#124](https://github.com/owner/repo/pull/124)) by @author
 
 ## Contributors
 Thanks to all contributors who made this release possible:
 - @author1 (3 PRs)
 - @author2
+```
+
+### 首次发布
+
+```markdown
+# Release v0.1.0
+
+**Initial Release**
+
+## New Features
+- Initial implementation ([#1](https://github.com/owner/repo/pull/1)) by @author
+
+## Contributors
+Thanks to all contributors who made this release possible:
+- @author1
 ```
 
 ## 配置文件说明

@@ -129,6 +129,71 @@ def get_tag_date(repo: str, tag: str) -> str:
     return ""
 
 
+def get_repo_created_at(repo: str) -> str:
+    """Get the creation date of the repository."""
+    try:
+        result = subprocess.run(
+            ["gh", "api", f"repos/{repo}"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        repo_info = json.loads(result.stdout)
+        return repo_info.get("created_at", "")
+    except subprocess.CalledProcessError:
+        pass
+    return ""
+
+
+def get_merged_prs_since_creation(repo: str, to_tag: str) -> List[PRInfo]:
+    """Get all merged PRs from repo creation to a specific tag (first release)."""
+    # Get repo creation date and tag date
+    from_date = get_repo_created_at(repo)
+    to_date = get_tag_date(repo, to_tag)
+
+    if not from_date:
+        print(f"Warning: Could not get repo creation date.", file=sys.stderr)
+        return []
+
+    if not to_date:
+        print(f"Warning: Could not get date for tag {to_tag}.", file=sys.stderr)
+        return []
+
+    print(f"Repository created: {from_date}", file=sys.stderr)
+    print(f"Tag {to_tag} date: {to_date}", file=sys.stderr)
+
+    # Use gh pr list with search query
+    search_query = f"merged:>={from_date} merged:<{to_date}"
+
+    try:
+        result = run_gh_command([
+            "pr", "list",
+            "--repo", repo,
+            "--state", "merged",
+            "--search", search_query,
+            "--json", "number,title,author,mergedAt,labels,url",
+            "--limit", "1000"
+        ])
+    except SystemExit:
+        print("Failed to fetch PRs.", file=sys.stderr)
+        return []
+
+    prs = []
+    for item in json.loads(result):
+        prs.append(PRInfo(
+            number=item["number"],
+            title=item["title"],
+            author=item.get("author", {}).get("login", "unknown"),
+            merged_at=item.get("mergedAt", ""),
+            labels=[label.get("name", "") for label in item.get("labels", [])],
+            url=item.get("url", f"https://github.com/{repo}/pull/{item['number']}")
+        ))
+
+    # Sort by merged date
+    prs.sort(key=lambda x: x.merged_at)
+    return prs
+
+
 def get_merged_prs_between(repo: str, from_tag: str, to_tag: str) -> List[PRInfo]:
     """Get merged PRs between two tags using gh CLI."""
     # Use gh pr list with date range
@@ -271,9 +336,11 @@ def generate_markdown(
 
     # Title with version range info
     lines.append(f"# Release {version}")
+    lines.append("")
     if from_version:
-        lines.append("")
         lines.append(f"**Changes since {from_version}**")
+    else:
+        lines.append("**Initial Release**")
     lines.append("")
 
     # Classify PRs
@@ -355,22 +422,36 @@ Examples:
   # Generate release notes between two tags
   python generate_release_notes.py --repo flagos-ai/FlagScale --from v0.9.0 --to v1.0.0
 
+  # First release (no previous tag)
+  python generate_release_notes.py --repo flagos-ai/FlagScale --to v0.1.0 --first-release
+
   # Save to a file
   python generate_release_notes.py --repo flagos-ai/FlagScale --from v0.9.0 --to v1.0.0 -o release.md
 
   # Use custom config
   python generate_release_notes.py --repo flagos-ai/FlagScale --from v0.9.0 --to v1.0.0 --config my_config.yaml
+
+Prerequisites:
+  - GitHub CLI (gh) installed and authenticated
+  - PyYAML: pip install pyyaml
         """
     )
     parser.add_argument("--repo", required=True, help="Repository in format 'owner/repo'")
-    parser.add_argument("--from", dest="from_ref", required=True, help="Starting git reference (tag, branch, or commit)")
+    parser.add_argument("--from", dest="from_ref", help="Starting git reference (tag, branch, or commit). Required unless --first-release is set.")
     parser.add_argument("--to", dest="to_ref", required=True, help="Ending git reference (tag, branch, or commit)")
+    parser.add_argument("--first-release", action="store_true", help="Use this for the first release (includes all PRs since repo creation)")
     parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
     parser.add_argument("--config", help="Path to YAML config file")
     parser.add_argument("--method", choices=["date", "commit"], default="date",
                         help="Method to determine PR range: 'date' uses tag dates, 'commit' uses commit comparison")
 
     args = parser.parse_args()
+
+    # Validate arguments
+    if not args.from_ref and not args.first_release:
+        parser.error("--from is required unless --first-release is specified")
+    if args.from_ref and args.first_release:
+        parser.error("Cannot use both --from and --first-release")
 
     # Load config if provided
     config = load_config(args.config)
@@ -388,13 +469,16 @@ Examples:
             for i, cat in enumerate(config["categories"])
         ]
 
-    print(f"Fetching merged PRs between {args.from_ref} and {args.to_ref}...", file=sys.stderr)
-
     # Get PRs
-    if args.method == "commit":
-        prs = get_merged_prs_by_commits(args.repo, args.from_ref, args.to_ref)
+    if args.first_release:
+        print(f"Fetching merged PRs since repo creation up to {args.to_ref}...", file=sys.stderr)
+        prs = get_merged_prs_since_creation(args.repo, args.to_ref)
     else:
-        prs = get_merged_prs_between(args.repo, args.from_ref, args.to_ref)
+        print(f"Fetching merged PRs between {args.from_ref} and {args.to_ref}...", file=sys.stderr)
+        if args.method == "commit":
+            prs = get_merged_prs_by_commits(args.repo, args.from_ref, args.to_ref)
+        else:
+            prs = get_merged_prs_between(args.repo, args.from_ref, args.to_ref)
 
     print(f"Found {len(prs)} merged PRs", file=sys.stderr)
 
@@ -404,7 +488,7 @@ Examples:
 
     # Generate release notes
     version = args.to_ref
-    from_version = args.from_ref
+    from_version = "" if args.first_release else args.from_ref
     markdown = generate_markdown(prs, categories, version, args.repo, from_version)
 
     # Output
