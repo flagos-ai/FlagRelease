@@ -11,32 +11,44 @@
 - 显示贡献者统计
 - 支持首次发布（从仓库创建开始）
 
-## 安装要求
+## 依赖要求
 
 ### 必需依赖
 
-- **Python 3.8+**
-- **GitHub CLI (`gh`)** - 已安装并登录
-- **PyYAML** - Python 库
+| 依赖 | 说明 |
+|------|------|
+| **Python 3.8+** | - |
+| **GitHub CLI (gh)** | 需安装并认证（OAuth，非 SSH） |
 
 ```bash
-# 安装 PyYAML
+# 安装 GitHub CLI
+# macOS
+brew install gh
+
+# Linux (Debian/Ubuntu)
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+sudo apt update && sudo apt install gh
+
+# Windows
+winget install GitHub.cli
+
+# 认证（会打开浏览器进行 OAuth 授权）
+gh auth login
+```
+
+### 可选依赖
+
+| 依赖 | 说明 |
+|------|------|
+| PyYAML | 用于加载 YAML 配置文件（`--config`） |
+
+```bash
+# 安装 PyYAML（可选，仅用于自定义配置）
 pip install pyyaml
-
-# 确保 gh 已安装并登录
-gh auth status
 ```
 
-### 验证安装
-
-```bash
-# 检查 gh 是否安装
-which gh
-gh --version
-
-# 检查 Python 和 PyYAML
-python3 -c "import yaml; print('PyYAML OK')"
-```
+> **Note**: 如未安装 PyYAML，仍可正常运行脚本，使用默认配置。如需自定义配置，可使用 JSON 格式文件替代。
 
 ## 使用方法
 

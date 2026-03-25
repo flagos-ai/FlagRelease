@@ -22,7 +22,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import yaml
+# Try to import yaml, use fallback if not available
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
 
 
 @dataclass
@@ -71,11 +76,37 @@ HARDWARE_PREFIXES = ["MLU", "CUDA", "NPU", "ROCm", "GPU", "CPU", "TPU"]
 
 
 def load_config(config_path: Optional[str] = None) -> Dict:
-    """Load configuration from YAML file."""
-    if config_path and Path(config_path).exists():
+    """Load configuration from YAML or JSON file."""
+    if not config_path or not Path(config_path).exists():
+        return {}
+
+    # Try JSON first (no dependency required)
+    if config_path.endswith('.json'):
         with open(config_path, 'r') as f:
-            return yaml.safe_load(f)
-    return {}
+            return json.load(f)
+
+    # For YAML files, check if PyYAML is available
+    if not YAML_AVAILABLE:
+        print(f"Warning: PyYAML not installed. Cannot load YAML config: {config_path}", file=sys.stderr)
+        print("Install PyYAML: pip install pyyaml", file=sys.stderr)
+        print("Or use JSON config file instead.", file=sys.stderr)
+        return {}
+
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f) or {}
+
+
+def check_gh_cli() -> bool:
+    """Check if GitHub CLI is installed and authenticated."""
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "status"],
+            capture_output=True,
+            text=True
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
 
 
 def run_gh_command(args: List[str]) -> str:
@@ -414,6 +445,19 @@ def generate_markdown(
 
 
 def main():
+    # Check GitHub CLI availability
+    if not check_gh_cli():
+        print("Error: GitHub CLI (gh) is not installed or not authenticated.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Please install GitHub CLI:", file=sys.stderr)
+        print("  macOS: brew install gh", file=sys.stderr)
+        print("  Linux: https://github.com/cli/cli/blob/trunk/docs/install_linux.md", file=sys.stderr)
+        print("  Windows: winget install GitHub.cli", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Then authenticate:", file=sys.stderr)
+        print("  gh auth login", file=sys.stderr)
+        sys.exit(1)
+
     parser = argparse.ArgumentParser(
         description="Generate release notes for flagos-ai repositories",
         formatter_class=argparse.RawDescriptionHelpFormatter,

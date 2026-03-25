@@ -1,0 +1,16 @@
+{
+  "categories": [
+    {"name": "Highlights", "prefixes": ["highlight", "Highlight"], "order": 0},
+    {"name": "Breaking Changes", "prefixes": ["Breaking", "breaking"], "order": 1},
+    {"name": "New Features", "prefixes": ["Feature", "feature", "Model", "model", "Add", "New"], "order": 2},
+    {"name": "Bug Fixes", "prefixes": ["Fix", "fix", "BugFix", "bugfix", "Bugfix", "Hotfix"], "order": 3},
+    {"name": "Performance", "prefixes": ["Perf", "perf", "Performance", "Optimization", "Optimize"], "order": 4},
+    {"name": "Improvements", "prefixes": ["Refactor", "refactor", "Improve", "improve", "Enhancement"], "order": 5},
+    {"name": "Documentation", "prefixes": ["Doc", "Docs", "doc", "docs", "Documentation", "DOC"], "order": 6},
+    {"name": "CI/Infrastructure", "prefixes": ["CI", "CICD", "CI/CD", "ci", "cicd", "Infra", "infra", "Build", "BUILD"], "order": 7},
+    {"name": "Testing", "prefixes": ["Test", "test", "Benchmark", "benchmark"], "order": 8},
+    {"name": "Dependencies", "prefixes": ["Dep", "deps", "Dependencies", "Bump"], "order": 9},
+    {"name": "Hardware Support", "prefixes": ["MLU", "CUDA", "NPU", "ROCm", "GPU", "CPU", "TPU", "Hardware"], "order": 10},
+    {"name": "Other", "order": 99}
+  ]
+}
