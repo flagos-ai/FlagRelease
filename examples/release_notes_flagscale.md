@@ -1,4 +1,4 @@
-# Release v1.0.0-alpha.0
+# FlagScale Release v1.0.0-alpha.0
 
 **Changes since v0.9.0**
 

@@ -365,8 +365,11 @@ def generate_markdown(
     """Generate Markdown release notes."""
     lines = []
 
+    # Extract repo name from "owner/repo" format
+    repo_name = repo.split("/")[-1] if "/" in repo else repo
+
     # Title with version range info
-    lines.append(f"# Release {version}")
+    lines.append(f"# {repo_name} Release {version}")
     lines.append("")
     if from_version:
         lines.append(f"**Changes since {from_version}**")

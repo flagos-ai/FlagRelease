@@ -1,4 +1,4 @@
-# Release v0.4.0
+# FlagTree Release v0.4.0
 
 **Changes since v0.3.0**
 
