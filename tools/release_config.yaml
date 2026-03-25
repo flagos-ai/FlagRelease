@@ -1,0 +1,102 @@
+# Release Notes Generator Configuration
+# This file defines how PRs are classified into categories
+
+# Category definitions for PR classification
+# Each category has:
+#   - name: Display name in the release notes
+#   - prefixes: List of title prefixes to match (case-insensitive)
+#   - labels: List of GitHub labels to match
+#   - order: Display order (lower = earlier in document)
+
+categories:
+  - name: Highlights
+    prefixes: [highlight, Highlight]
+    labels: [highlight]
+    order: 0
+
+  - name: Breaking Changes
+    prefixes: [Breaking, breaking]
+    labels: [breaking-change]
+    order: 1
+
+  - name: Deprecations
+    prefixes: [Deprecate, deprecate, Deprecation]
+    labels: [deprecation]
+    order: 2
+
+  - name: New Features
+    prefixes: [Feature, feature, Model, model, Add, New]
+    labels: [enhancement]
+    order: 3
+
+  - name: Bug Fixes
+    prefixes: [Fix, fix, BugFix, bugfix, Bugfix, Hotfix]
+    labels: [bug]
+    order: 4
+
+  - name: Performance
+    prefixes: [Perf, perf, Performance, Optimization, Optimize]
+    labels: [performance]
+    order: 5
+
+  - name: Improvements
+    prefixes: [Refactor, refactor, Improve, improve, Enhancement]
+    labels: [improvement]
+    order: 6
+
+  - name: Documentation
+    prefixes: [Doc, Docs, doc, docs, Documentation, DOC]
+    labels: [documentation]
+    order: 7
+
+  - name: CI/Infrastructure
+    prefixes: [CI, CICD, CI/CD, ci, cicd, Infra, infra, Build, BUILD]
+    labels: [ci, github_actions]
+    order: 8
+
+  - name: Testing
+    prefixes: [Test, test, Benchmark, benchmark]
+    labels: [test]
+    order: 9
+
+  - name: Dependencies
+    prefixes: [Dep, deps, Dependencies, Bump]
+    labels: [dependencies]
+    order: 10
+
+  - name: Hardware Support
+    prefixes: [MLU, CUDA, NPU, ROCm, GPU, CPU, TPU, Hardware]
+    order: 11
+
+  - name: Other
+    order: 99
+
+# Hardware-specific prefixes (automatically categorized as "Hardware Support")
+hardware_prefixes:
+  - MLU
+  - CUDA
+  - NPU
+  - ROCm
+  - GPU
+  - CPU
+  - TPU
+
+# Output formatting options
+output:
+  # Include "by @author" attribution
+  include_author: true
+  # Include contributors section
+  include_contributors: true
+  # Maximum number of PRs per category before showing summary
+  max_prs_per_category: 50
+
+# Template for release notes header
+# Available variables: {version}, {date}, {repo}
+header_template: |
+  # Release {version}
+
+  **Release Date:** {date}
+
+# Template for each PR line
+# Available variables: {title}, {number}, {author}, {url}
+pr_template: "- {title} (#{number}) by @{author}"
