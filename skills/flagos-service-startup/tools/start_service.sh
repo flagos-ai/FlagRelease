@@ -1,0 +1,179 @@
+#!/bin/bash
+# start_service.sh — 从 context.yaml 读取配置并启动 vllm/sglang 服务
+#
+# 供 operator_search.py 的 --service-startup-cmd 调用。
+# 在容器内执行，读取 /flagos-workspace/shared/context.yaml 获取启动参数。
+#
+# 用法:
+#   bash /flagos-workspace/scripts/start_service.sh
+#   bash /flagos-workspace/scripts/start_service.sh --mode flagos
+#   bash /flagos-workspace/scripts/start_service.sh --mode native
+
+set -euo pipefail
+
+CONTEXT_YAML="/flagos-workspace/shared/context.yaml"
+MODE=""
+
+# 解析参数（支持 --mode flagos / --mode=flagos / 裸值）
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --mode=*) MODE="${1#--mode=}"; shift ;;
+        --mode)   MODE="${2:-}"; shift; shift 2>/dev/null || true ;;
+        *)        shift ;;
+    esac
+done
+
+# 如果未传 --mode，从环境变量 USE_FLAGGEMS 推断
+if [ -z "$MODE" ]; then
+    if [ "${USE_FLAGGEMS:-}" = "0" ]; then
+        MODE="native"
+    elif [ "${USE_FLAGGEMS:-}" = "1" ]; then
+        MODE="flagos"
+    else
+        MODE="flagos"
+    fi
+    echo "[start_service.sh] --mode 未指定，从环境推断 mode=${MODE}"
+fi
+
+# flagos_optimized 也是 FlagGems 启用模式
+case "$MODE" in
+    native)       USE_FLAGGEMS_FLAG=0 ;;
+    flagos|flagos_optimized|flagos_full)  USE_FLAGGEMS_FLAG=1 ;;
+    *)            USE_FLAGGEMS_FLAG=1 ;;
+esac
+
+# 从 context.yaml 读取启动参数
+read_context() {
+    PATH=/opt/conda/bin:$PATH python3 -c "
+import yaml, json, sys
+with open('${CONTEXT_YAML}') as f:
+    ctx = yaml.safe_load(f)
+
+model_path = ctx.get('model', {}).get('container_path', '')
+model_name = ctx.get('model', {}).get('name', '').split('/')[-1]
+port = ctx.get('service', {}).get('port', 8000)
+tp_size = ctx.get('runtime', {}).get('tp_size', 0)
+gpu_count = ctx.get('runtime', {}).get('gpu_count', ctx.get('gpu', {}).get('count', 0))
+max_model_len = ctx.get('service', {}).get('max_model_len', 8192)
+framework = ctx.get('runtime', {}).get('framework', 'vllm')
+cuda_visible = ctx.get('runtime', {}).get('cuda_visible_devices', '')
+visible_devices_env = ctx.get('gpu', {}).get('visible_devices_env', 'CUDA_VISIBLE_DEVICES')
+thinking = ctx.get('runtime', {}).get('thinking_model', False)
+
+# TP fallback: 如果为 0，使用 GPU 数量
+if tp_size <= 0:
+    tp_size = gpu_count if gpu_count > 0 else 1
+
+print(json.dumps({
+    'model_path': model_path,
+    'model_name': model_name,
+    'port': port,
+    'tp_size': tp_size,
+    'max_model_len': max_model_len,
+    'framework': framework,
+    'cuda_visible': cuda_visible,
+    'visible_devices_env': visible_devices_env,
+    'thinking': thinking,
+}))
+"
+}
+
+CONFIG_JSON=$(read_context)
+
+MODEL_PATH=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['model_path'])")
+MODEL_NAME=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['model_name'])")
+PORT=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['port'])")
+TP_SIZE=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['tp_size'])")
+MAX_MODEL_LEN=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['max_model_len'])")
+FRAMEWORK=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['framework'])")
+CUDA_VISIBLE=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['cuda_visible'])")
+VISIBLE_ENV=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['visible_devices_env'])")
+THINKING=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['thinking'])")
+
+if [ -z "$MODEL_PATH" ]; then
+    echo "ERROR: model.container_path 为空，无法启动服务" >&2
+    exit 1
+fi
+
+# 设置 GPU 可见设备（根据厂商使用对应环境变量名）
+if [ -n "$CUDA_VISIBLE" ]; then
+    export "${VISIBLE_ENV}=${CUDA_VISIBLE}"
+fi
+
+# 确保 conda 环境在 PATH 中
+export PATH=/opt/conda/bin:$PATH
+
+# 加载持久化的环境变量（FLAGGEMS_CONTROL_MODE 等）
+if [ -f /etc/environment ]; then
+    set -a
+    . /etc/environment
+    set +a
+fi
+
+# 从控制文件推断 FLAGGEMS_CONTROL_MODE（兜底：docker exec 不继承宿主进程环境变量）
+if [ -z "${FLAGGEMS_CONTROL_MODE:-}" ] && [ -f /root/flaggems_ops_control.json ]; then
+    HAS_INCLUDE=$(PATH=/opt/conda/bin:$PATH python3 -c "
+import json
+try:
+    d = json.load(open('/root/flaggems_ops_control.json'))
+    print('only_enable' if d.get('include') else 'unused')
+except: print('')
+" 2>/dev/null)
+    if [ -n "$HAS_INCLUDE" ]; then
+        export FLAGGEMS_CONTROL_MODE="$HAS_INCLUDE"
+        echo "[start_service.sh] FLAGGEMS_CONTROL_MODE=$HAS_INCLUDE (从控制文件推断)"
+    fi
+fi
+
+# 根据 mode 强制覆盖 USE_FLAGGEMS（确保 native/flagos 模式正确）
+export USE_FLAGGEMS="$USE_FLAGGEMS_FLAG"
+
+# native 模式下清除 FlagGems 控制变量，避免残留配置干扰
+if [ "$MODE" = "native" ]; then
+    unset FLAGGEMS_CONTROL_MODE 2>/dev/null || true
+fi
+
+LOG_FILE="/flagos-workspace/logs/startup_${MODE}.log"
+
+# FlagGems 模式启动前清理 Triton/FlagGems 编译缓存（约束39：避免旧缓存隐藏问题算子）
+if [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
+    rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/ 2>/dev/null || true
+fi
+
+# 构建启动命令
+if [ "$FRAMEWORK" = "vllm" ]; then
+    CMD="vllm serve '${MODEL_PATH}' \
+        --host 0.0.0.0 \
+        --port ${PORT} \
+        --served-model-name '${MODEL_NAME}' \
+        --tensor-parallel-size ${TP_SIZE} \
+        --max-model-len ${MAX_MODEL_LEN} \
+        --trust-remote-code"
+
+    # Thinking model 添加 reasoning parser
+    if [ "$THINKING" = "true" ]; then
+        # 根据模型名推断 parser
+        MODEL_LOWER=$(echo "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')
+        if echo "$MODEL_LOWER" | grep -qE 'qwen3|qwq'; then
+            CMD="$CMD --reasoning-parser qwen3"
+        elif echo "$MODEL_LOWER" | grep -qE 'deepseek'; then
+            CMD="$CMD --reasoning-parser deepseek_r1"
+        fi
+    fi
+else
+    # sglang
+    CMD="python3 -m sglang.launch_server \
+        --model-path '${MODEL_PATH}' \
+        --host 0.0.0.0 \
+        --port ${PORT} \
+        --tp ${TP_SIZE} \
+        --context-length ${MAX_MODEL_LEN} \
+        --trust-remote-code"
+fi
+
+echo "[start_service.sh] mode=${MODE}, framework=${FRAMEWORK}, port=${PORT}, tp=${TP_SIZE}"
+echo "[start_service.sh] CMD: ${CMD}"
+
+# 后台启动，日志写入文件
+nohup bash -c "cd /flagos-workspace && ${CMD}" > "${LOG_FILE}" 2>&1 &
+echo "[start_service.sh] PID=$!, log=${LOG_FILE}"

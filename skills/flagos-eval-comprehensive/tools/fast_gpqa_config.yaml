@@ -1,0 +1,12 @@
+# GPQA Diamond 快速精度评测 — 配置文件
+
+model:
+  name: ""                              # 模型名称（必填，必须与 /v1/models 返回的 id 一致）
+  api_base: "http://localhost:8000/v1"  # OpenAI 兼容 API 地址（必填）
+  api_key: "EMPTY"                      # API 密钥（可选，默认 EMPTY）
+
+# 数据集缓存目录（可选，预下载后可离线评测）
+dataset_dir: ""
+
+# 数据集来源: modelscope / huggingface
+dataset_hub: "modelscope"
