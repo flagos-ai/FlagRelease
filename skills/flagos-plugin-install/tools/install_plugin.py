@@ -60,6 +60,19 @@ def get_current_version():
     return None
 
 
+def _load_proxy_list():
+    """从 .proxy 文件或环境变量加载代理列表"""
+    proxy_file = "/flagos-workspace/.proxy"
+    if os.path.exists(proxy_file):
+        with open(proxy_file) as f:
+            return [line.strip() for line in f if line.strip()]
+    proxy_str = os.environ.get("FLAGOS_PROXY_LIST", "")
+    if proxy_str:
+        return [p.strip() for p in proxy_str.split(",") if p.strip()]
+    current = os.environ.get("https_proxy") or os.environ.get("http_proxy", "")
+    return [current] if current else []
+
+
 def install_plugin(repo_url=DEFAULT_REPO, branch="main", proxy=None, editable=False):
     """git clone + pip install --no-build-isolation"""
     env = {}
@@ -71,16 +84,32 @@ def install_plugin(repo_url=DEFAULT_REPO, branch="main", proxy=None, editable=Fa
     if os.path.exists(CLONE_DIR):
         run_cmd(f"rm -rf {CLONE_DIR}")
 
-    # clone
+    # clone（支持代理切换重试）
     clone_cmd = f"git clone --depth 1 -b {branch} {repo_url} {CLONE_DIR}"
     code, out, err = run_cmd(clone_cmd, timeout=120, env=env)
     if code != 0:
-        return {
-            "success": False,
-            "action": "install",
-            "error": f"git clone 失败: {err}",
-            "command": clone_cmd,
-        }
+        # 尝试从代理列表逐个切换重试
+        proxy_list = _load_proxy_list()
+        clone_success = False
+        for fallback_proxy in proxy_list:
+            if fallback_proxy == proxy:
+                continue
+            print(f"  git clone 失败，切换代理重试: {fallback_proxy}")
+            env["http_proxy"] = fallback_proxy
+            env["https_proxy"] = fallback_proxy
+            if os.path.exists(CLONE_DIR):
+                run_cmd(f"rm -rf {CLONE_DIR}")
+            code, out, err = run_cmd(clone_cmd, timeout=120, env=env)
+            if code == 0:
+                clone_success = True
+                break
+        if not clone_success:
+            return {
+                "success": False,
+                "action": "install",
+                "error": f"git clone 失败 (所有代理均尝试): {err}",
+                "command": clone_cmd,
+            }
 
     # install (with pip mirror fallback)
     edit_flag = "-e " if editable else ""

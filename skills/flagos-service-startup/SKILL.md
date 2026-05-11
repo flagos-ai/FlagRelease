@@ -288,10 +288,9 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 | 模型类型 | max_model_len | 原因 |
 |---------|---------------|------|
-| Thinking model（Qwen3/QwQ/DeepSeek-R1/R2） | **32768** | thinking chain 需要大量 token，需留余量给 prompt |
-| 标准模型 | **8192** | 非 thinking 模型评测和性能测试够用 |
+| 所有模型 | **32768** | GPQA 等评测 prompt 较长，需要充足上下文窗口保证精度评测不被截断 |
 
-3. **显存约束**：如果启动 OOM，降级 `max_model_len`（thinking model 最低 16384），并更新 context.yaml
+3. **显存约束**：如果启动 OOM，降级 `max_model_len`（最低 16384），并更新 context.yaml
 
 4. **验证**：启动后 `wait_for_service.sh` 输出实际 `max_model_len`，确认与预期一致
 
@@ -366,7 +365,7 @@ vllm serve ${MODEL_PATH} \
     --tensor-parallel-size ${TP_SIZE} \
     --max-num-batched-tokens ${MAX_BATCHED_TOKENS:-16384} \
     --max-num-seqs ${MAX_NUM_SEQS:-256} \
-    --max-model-len ${MAX_MODEL_LEN:-8192} \
+    --max-model-len ${MAX_MODEL_LEN:-32768} \
     --trust-remote-code
 ```
 
