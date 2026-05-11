@@ -2,14 +2,14 @@
 # FlagOS 全自动迁移流程 — 一键启动脚本（V1+V2+V3 算子调优）
 #
 # 用法:
-#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose]
+#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--proxy proxy1,proxy2,...]
 #
 # 自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址
 # 模型路径：仅需模型名，自动搜索宿主机路径；未找到则容器内自动下载
 #
 # 示例:
 #   bash prompts/run_pipeline.sh qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass
-#   bash prompts/run_pipeline.sh harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass
+#   bash prompts/run_pipeline.sh harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --proxy http://10.1.12.192:80
 #
 # 向后兼容（已弃用）:
 #   bash prompts/run_pipeline.sh --image <镜像地址> <模型名> [<宿主机模型路径>] <tokens...>
@@ -32,6 +32,7 @@ fi
 IMAGE_MODE=false
 MODEL_PATH=""
 FILTER_FLAGS=""
+PROXY_LIST=""
 
 if [[ "${1:-}" == "--image" ]]; then
     # 向后兼容：旧 --image 格式
@@ -64,19 +65,19 @@ if [[ "${1:-}" == "--image" ]]; then
             FILTER_FLAGS="--verbose"
         fi
     else
-        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose]"
+        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--proxy proxy1,proxy2,...]"
         exit 1
     fi
 else
     # 统一格式：7 个位置参数
     if [ $# -lt 7 ]; then
-        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose]"
+        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--proxy proxy1,proxy2,...]"
         echo ""
         echo "自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址"
         echo ""
         echo "示例:"
         echo "  $0 qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass"
-        echo "  $0 harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass"
+        echo "  $0 harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --proxy http://10.1.12.192:80"
         echo "  加 --verbose 显示全量终端输出（调试用）"
         exit 1
     fi
@@ -88,9 +89,15 @@ else
     export GITHUB_TOKEN="$5"
     export HARBOR_USER="$6"
     export HARBOR_PASSWORD="$7"
-    if [[ "${8:-}" == "--verbose" ]]; then
-        FILTER_FLAGS="--verbose"
-    fi
+    shift 7
+    # 解析可选参数
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --verbose) FILTER_FLAGS="--verbose"; shift ;;
+            --proxy) PROXY_LIST="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
 
     # 自动识别：含冒号(:)或斜杠(/)的视为镜像地址，否则尝试 docker inspect 判断
     if [[ "$TARGET" == *":"* ]] || [[ "$TARGET" == *"/"* ]]; then
@@ -161,6 +168,40 @@ echo "  权限: --permission-mode auto + settings.local.json allowlist (89 rules
 echo "============================================================"
 echo ""
 
+# ========== 网络预检 ==========
+# 如果未传 --proxy，从环境变量读取
+if [ -z "$PROXY_LIST" ]; then
+    CURRENT_PROXY="${https_proxy:-${http_proxy:-}}"
+    [ -n "$CURRENT_PROXY" ] && PROXY_LIST="$CURRENT_PROXY"
+fi
+
+if [ -n "$PROXY_LIST" ]; then
+    echo "[pre-flight] 网络连通性检测..."
+    NETWORK_JSON=$(bash prompts/check_network.sh --proxies "${PROXY_LIST}" --json 2>/dev/null) || NETWORK_JSON=""
+    if [ -n "$NETWORK_JSON" ]; then
+        BEST_PROXY=$(echo "$NETWORK_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['recommended_proxy'])" 2>/dev/null) || BEST_PROXY=""
+        ALL_FAILED=$(echo "$NETWORK_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['all_failed'])" 2>/dev/null) || ALL_FAILED="false"
+
+        if [ "$ALL_FAILED" = "true" ] || [ "$ALL_FAILED" = "True" ]; then
+            echo "  ✗ 所有代理均不可用，流程终止"
+            echo "  代理列表: ${PROXY_LIST}"
+            exit 1
+        fi
+
+        if [ -n "$BEST_PROXY" ] && [ "$BEST_PROXY" != "direct" ]; then
+            export http_proxy="$BEST_PROXY"
+            export https_proxy="$BEST_PROXY"
+            echo "  ✓ 推荐代理: ${BEST_PROXY}"
+        elif [ "$BEST_PROXY" = "direct" ]; then
+            echo "  ✓ 直连可用，无需代理"
+        fi
+    else
+        echo "  ⚠ 网络检测脚本执行失败，使用默认代理继续"
+    fi
+    export FLAGOS_PROXY_LIST="${PROXY_LIST}"
+    echo ""
+fi
+
 # ========== 构造 Prompt ==========
 # 公共部分：tokens、执行模式、进度输出要求、步骤2-6
 COMMON_TOKENS=$(cat <<TOKENS_EOF
@@ -171,6 +212,12 @@ COMMON_TOKENS=$(cat <<TOKENS_EOF
   GITHUB_TOKEN=${GITHUB_TOKEN}
   HARBOR_USER=${HARBOR_USER}
   HARBOR_PASSWORD=${HARBOR_PASSWORD}
+
+**网络代理**（已通过 setup_workspace.sh 写入容器 /flagos-workspace/.proxy）：
+  FLAGOS_PROXY_LIST=${FLAGOS_PROXY_LIST:-}
+  FLAGOS_ACTIVE_PROXY=${http_proxy:-}
+  所有需要外网的 docker exec 命令必须传入代理: docker exec -e http_proxy=${http_proxy:-} -e https_proxy=${https_proxy:-} ...
+  网络操作失败时，从 FLAGOS_PROXY_LIST 中逐个切换代理重试
 TOKENS_EOF
 )
 

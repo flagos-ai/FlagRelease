@@ -1,5 +1,1 @@
-harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 | internlm/internlm3-8b-instruct
-harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 | XiaomiMiMo/MiMo-7B-RL
-harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 | meta-llama/Llama-3.2-1B-Instruct
-harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 | tencent/Hunyuan-7B-Instruct
-harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 | THUDM/glm-4-9b-chat
+harbor.baai.ac.cn/flagrelease-public/hw_gems_tree:2605081025 | google/gemma-3-1b-it

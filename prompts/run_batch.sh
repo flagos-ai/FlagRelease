@@ -2,7 +2,7 @@
 # FlagOS 批量串行迁移 — 逐个调用 run_pipeline.sh
 #
 # 用法:
-#   bash prompts/run_batch.sh <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force]
+#   bash prompts/run_batch.sh <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--proxy proxy1,proxy2,...]
 #
 # 任务列表文件格式（每行一个任务，| 分隔）:
 #   # 注释行和空行自动跳过
@@ -35,12 +35,14 @@ MS_TOKEN="$1"; HF_TOKEN="$2"; GH_TOKEN="$3"; HARBOR_USER="$4"; HARBOR_PASS="$5";
 STOP_ON_ERROR=false
 FORCE=false
 VERBOSE_FLAG=""
-for arg in "$@"; do
-    case "$arg" in
-        --stop-on-error) STOP_ON_ERROR=true ;;
-        --force) FORCE=true ;;
-        --verbose) VERBOSE_FLAG="--verbose" ;;
-        *) echo "未知参数: $arg"; exit 1 ;;
+PROXY_FLAG=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --stop-on-error) STOP_ON_ERROR=true; shift ;;
+        --force) FORCE=true; shift ;;
+        --verbose) VERBOSE_FLAG="--verbose"; shift ;;
+        --proxy) PROXY_FLAG="--proxy $2"; shift 2 ;;
+        *) echo "未知参数: $1"; exit 1 ;;
     esac
 done
 
@@ -119,7 +121,7 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
     echo "╚══════════════════════════════════════════════════════════════╝"
 
     TASK_START_TS=$(date +%s)
-    bash prompts/run_pipeline.sh "$TARGET" "$MODEL" "$MS_TOKEN" "$HF_TOKEN" "$GH_TOKEN" "$HARBOR_USER" "$HARBOR_PASS" $VERBOSE_FLAG < /dev/null
+    bash prompts/run_pipeline.sh "$TARGET" "$MODEL" "$MS_TOKEN" "$HF_TOKEN" "$GH_TOKEN" "$HARBOR_USER" "$HARBOR_PASS" $VERBOSE_FLAG $PROXY_FLAG < /dev/null
     EXIT_CODE=$?
     TASK_ELAPSED=$(( $(date +%s) - TASK_START_TS ))
     TASK_MIN=$(( TASK_ELAPSED / 60 ))

@@ -169,14 +169,17 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。
 | Plugin issue 路由 | 步骤 9-13 所有 issue → `flagos-ai/vllm-plugin-FL` | 非 FlagGems 仓库 |
 | Plugin 镜像命名 | 原 tag 追加 `-plugin` 后缀 | 自动生成 |
 | Plugin 算子集 | 复用主流程已达标的算子集（含步骤 5/7 禁用列表） | 不重新调优 |
+| 网络代理切换 | 从 `FLAGOS_PROXY_LIST` 逐个尝试 | 网络操作失败时自动切换代理重试，全部失败才终止 |
+| 容器内代理传递 | `docker exec -e http_proxy=<proxy> -e https_proxy=<proxy>` | 所有需要外网的 docker exec 命令必须传入代理 |
 
 ---
 
 ## 用户交互规则
 
-**1-13 全自动执行，零交互。** 网络失败自动尝试备选镜像源，全部失败则终止任务，不询问用户。
+**1-13 全自动执行，零交互。** 网络失败自动切换代理重试，全部代理失败则终止任务，不询问用户。
 
 凭证均通过环境变量提供：`HARBOR_USER`/`HARBOR_PASSWORD`、`MODELSCOPE_TOKEN`、`HF_TOKEN`、`GITHUB_TOKEN`。
+代理通过 `--proxy` 参数或环境变量 `http_proxy`/`https_proxy` 提供。
 
 ---
 
@@ -300,6 +303,15 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 ## 网络问题处理策略
 
+### 代理切换机制
+
+流程启动时通过 `--proxy` 参数传入代理列表（逗号分隔），自动检测选出最佳代理。运行中网络操作失败时，从 `FLAGOS_PROXY_LIST` 逐个切换代理重试，全部失败才终止。
+
+- 宿主机代理：通过环境变量 `http_proxy`/`https_proxy` 生效（docker push、modelscope/hf 上传）
+- 容器内代理：通过 `docker exec -e http_proxy=<proxy> -e https_proxy=<proxy>` 传入
+- 容器内代理列表文件：`/flagos-workspace/.proxy`（每行一个代理地址）
+- 所有需要外网的 `docker exec` 命令必须传入代理环境变量
+
 ### pip install 失败
 
 按以下顺序自动尝试镜像源，**不询问用户**：
@@ -310,7 +322,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 ### 其他网络操作失败
 
-第一次失败且错误包含网络关键词 → 自动重试一次。重试仍失败 → 终止任务。
+第一次失败且错误包含网络关键词 → 切换代理重试。所有代理均失败 → 终止任务。
 
 ---
 
