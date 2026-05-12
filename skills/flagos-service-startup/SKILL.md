@@ -516,6 +516,9 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 # 保存初始全开算子列表的 txt 副本到 results/（供事后查看和对比）
 docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/initial_oplist.txt
+
+# 保存初始控制文件副本（供报告中配置 vs 运行时 txt 对比，仅首次启动时保存）
+docker exec $CONTAINER bash -c '[ ! -f /flagos-workspace/results/ops_control_initial.json ] && cp /root/flaggems_ops_control.json /flagos-workspace/results/ops_control_initial.json 2>/dev/null || true'
 ```
 
 **关键原则**：

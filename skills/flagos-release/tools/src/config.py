@@ -130,7 +130,9 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     # evaluation_results
     ev = ctx.get('eval', {})
     if ev.get('v1_score') is not None and ev.get('v2_score') is not None:
-        method = ev.get('eval_method', 'GPQA_Diamond')
+        mode = ev.get('mode', 'gpqa_diamond')
+        mode_to_metric = {'gpqa_diamond': 'GPQA_Diamond', 'erqa': 'ERQA', 'aime24': 'Aime24'}
+        method = mode_to_metric.get(mode, 'GPQA_Diamond')
         config.model_info.evaluation_results = [
             {'metric': method, 'origin': ev['v1_score'], 'flagos': ev['v2_score']}
         ]
@@ -140,7 +142,10 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     runtime = ctx.get('runtime', {})
     port = svc.get('port', 8000)
     tp = runtime.get('tp_size') or 1
-    model_path = model.get('container_path', '')
+    # 用户下载路径 /data/{flagrelease_name}，与 README 模板的 modelscope download 一致
+    model_short = model.get('name', '').split('/')[-1] if model.get('name') else ''
+    flagrelease_name = f"{model_short}-FlagOS" if model_short else ''
+    model_path = f"/data/{flagrelease_name}" if flagrelease_name else model.get('container_path', '')
     max_model_len = svc.get('max_model_len', '')
     cmd_parts = [f"vllm serve {model_path}",
                  f"--host 0.0.0.0 --port {port}",

@@ -68,7 +68,7 @@ DEFAULT_APPLY_CONFIG_SCRIPT = "/flagos-workspace/scripts/apply_op_config.py"
 SERVICE_STOP_CMD = "pkill -f 'vllm.entrypoints|sglang.launch_server'"
 SERVICE_WAIT_TIMEOUT = 300  # 秒
 GPU_MEM_FREE_THRESHOLD = 0.95  # GPU 显存空闲比例阈值（>95% 视为已释放）
-GPU_RELEASE_TIMEOUT = 30       # GPU 显存释放等待超时（秒）
+GPU_RELEASE_TIMEOUT = 60       # GPU 显存释放等待超时（秒）
 GPU_RELEASE_POLL_INTERVAL = 2  # 轮询间隔（秒）
 
 
@@ -196,8 +196,8 @@ def wait_gpu_memory_release(timeout: int = GPU_RELEASE_TIMEOUT,
         required_free: 需要的空闲 GPU 数量（默认 1）
     """
     print(f"  等待 GPU 显存释放 (最多 {timeout}s, 需要 {required_free} 张)...")
-    elapsed = 0
-    while elapsed < timeout:
+    start = time.time()
+    while (time.time() - start) < timeout:
         gpus = _parse_gpu_memory()
         if not gpus:
             print("  WARNING: 无法读取 GPU 信息，跳过显存检查")
@@ -208,7 +208,6 @@ def wait_gpu_memory_release(timeout: int = GPU_RELEASE_TIMEOUT,
                   f"(如 GPU {free_gpus[0]['index']}: {free_gpus[0]['used_mib']:.0f}/{free_gpus[0]['total_mib']:.0f} MiB)")
             return True
         time.sleep(GPU_RELEASE_POLL_INTERVAL)
-        elapsed += GPU_RELEASE_POLL_INTERVAL
     # 超时：打印当前状态
     gpus = _parse_gpu_memory()
     for g in gpus:
@@ -574,7 +573,8 @@ def restart_service(stop_cmd: str, startup_cmd: str,
                     env_inline: Optional[str] = None,
                     port: Optional[int] = None,
                     model_name: Optional[str] = None,
-                    max_timeout: Optional[int] = None) -> bool:
+                    max_timeout: Optional[int] = None,
+                    service_log_path: Optional[str] = None) -> bool:
     """重启服务：停止 → 启动 → 等待就绪"""
     print("\n[重启服务]")
 
@@ -599,19 +599,39 @@ def restart_service(stop_cmd: str, startup_cmd: str,
             print("  WARNING: 强制清理后 GPU 显存仍未释放，继续启动（可能使用其他空闲 GPU）")
 
     # 启动（后台执行，避免 vllm 等服务进程阻塞脚本）
-    log_path = "/flagos-workspace/logs/startup_search.log"
+    nohup_log = "/flagos-workspace/logs/startup_search.log"
     if env_inline:
         # env_inline 必须在 nohup 前面，否则 nohup 会把 VAR=val 当命令名
-        bg_cmd = f"{env_inline} nohup {startup_cmd} > {log_path} 2>&1 &"
+        bg_cmd = f"{env_inline} nohup {startup_cmd} > {nohup_log} 2>&1 &"
         print(f"  启动服务（内联 env vars，后台）...")
     else:
-        bg_cmd = f"nohup {startup_cmd} > {log_path} 2>&1 &"
+        bg_cmd = f"nohup {startup_cmd} > {nohup_log} 2>&1 &"
         print("  启动服务（后台）...")
     run_cmd(bg_cmd, check=False)
 
+    # 确定 wait_for_service 应监控的日志路径：
+    # start_service.sh 内部会将 vllm 输出重定向到 startup_<mode>.log，
+    # 导致 nohup_log 只有 shell echo，无 vllm 启动进度。
+    # 优先使用显式指定的 service_log_path，否则从 nohup_log 输出中自动探测。
+    monitor_log = service_log_path
+    if not monitor_log:
+        time.sleep(1)
+        try:
+            with open(nohup_log, "r") as f:
+                for line in f:
+                    if "log=" in line:
+                        monitor_log = line.split("log=")[-1].strip()
+                        break
+        except (FileNotFoundError, IOError):
+            pass
+    if not monitor_log:
+        monitor_log = nohup_log
+    if monitor_log != nohup_log:
+        print(f"  监控实际服务日志: {monitor_log}")
+
     # 传递 --log-path 启用动态超时模式（监控日志活动而非固定超时）
     wait_cmd = f"bash {wait_script} --timeout {wait_timeout}"
-    wait_cmd += f" --log-path {log_path}"
+    wait_cmd += f" --log-path {monitor_log}"
     if max_timeout:
         wait_cmd += f" --max-timeout {max_timeout}"
     else:
@@ -732,7 +752,8 @@ def preflight_framework_check(service_startup_cmd: str,
                                wait_script: str = DEFAULT_WAIT_SCRIPT,
                                benchmark_script: str = DEFAULT_BENCHMARK_SCRIPT,
                                model_name: Optional[str] = None,
-                               max_timeout: Optional[int] = None) -> Dict[str, Any]:
+                               max_timeout: Optional[int] = None,
+                               service_log_path: Optional[str] = None) -> Dict[str, Any]:
     """
     Plugin 模式搜索前预检：验证 plugin 框架本身是否有性能开销。
 
@@ -751,7 +772,8 @@ def preflight_framework_check(service_startup_cmd: str,
     svc_port = _read_service_port()
     if not restart_service(SERVICE_STOP_CMD, service_startup_cmd, wait_script,
                            env_inline=env_inline, port=svc_port,
-                           model_name=model_name, max_timeout=max_timeout):
+                           model_name=model_name, max_timeout=max_timeout,
+                           service_log_path=service_log_path):
         return {"pass": False, "ratio": 0, "throughput": 0,
                 "message": "ERROR: 框架预检服务启动失败"}
 
@@ -855,7 +877,8 @@ def run_search_step(state_path: str, perf_config: str,
                     wait_script: str = DEFAULT_WAIT_SCRIPT,
                     apply_config_script: str = DEFAULT_APPLY_CONFIG_SCRIPT,
                     model_name: Optional[str] = None,
-                    max_timeout: Optional[int] = None) -> Dict[str, Any]:
+                    max_timeout: Optional[int] = None,
+                    service_log_path: Optional[str] = None) -> Dict[str, Any]:
     """执行单轮搜索步骤"""
 
     step_timing = {}
@@ -902,7 +925,8 @@ def run_search_step(state_path: str, perf_config: str,
     svc_port = _read_service_port()
     if not restart_service(SERVICE_STOP_CMD, service_startup_cmd, wait_script,
                            env_inline=env_inline, port=svc_port,
-                           model_name=model_name, max_timeout=max_timeout):
+                           model_name=model_name, max_timeout=max_timeout,
+                           service_log_path=service_log_path):
         return {"action": "error", "message": "服务重启失败"}
     step_timing["restart_seconds"] = round(time.time() - t0, 1)
 
@@ -981,8 +1005,11 @@ def run_full_search(state_path: str, perf_config: str,
         _state = load_json(state_path)
         search_direction = _state.get("search_direction", "forward")
         # 防御：上次失败后残留 status=completed 但无有效搜索结果，自动重置
-        if _state.get("status") == "completed" and not _state.get("completed_at"):
-            print("  ⚠ 检测到残留 status=completed（无 completed_at），自动重置为 in_progress")
+        # 额外检查 disabled_ops 为空，避免误重置正常完成但 completed_at 写入失败的情况
+        if (_state.get("status") == "completed"
+                and not _state.get("completed_at")
+                and not _state.get("disabled_ops")):
+            print("  ⚠ 检测到残留 status=completed（无 completed_at 且无 disabled_ops），自动重置为 in_progress")
             _state["status"] = "in_progress"
             _state["current_step"] = 0
             save_json(_state, state_path)
@@ -1018,6 +1045,7 @@ def run_full_search(state_path: str, perf_config: str,
                 benchmark_script=kwargs.get("benchmark_script", DEFAULT_BENCHMARK_SCRIPT),
                 model_name=model_name,
                 max_timeout=max_timeout,
+                service_log_path=kwargs.get("service_log_path"),
             )
             preflight_elapsed = round(time.time() - t_pf, 1)
             if not framework_check.get("pass") and framework_check.get("ratio", 1.0) < 0.80:
@@ -1156,6 +1184,7 @@ def main():
     common.add_argument("--apply-config-script", default=DEFAULT_APPLY_CONFIG_SCRIPT)
     common.add_argument("--model-name", help="模型名称（传递给 wait_for_service.sh 精确验证）")
     common.add_argument("--max-timeout", type=int, default=1800, help="服务启动绝对超时上限（秒）")
+    common.add_argument("--service-log-path", help="服务实际日志路径（start_service.sh 内部重定向的目标文件，用于 wait_for_service 动态超时监控）")
 
     # run — 完整搜索
     run_parser = subparsers.add_parser("run", parents=[common], help="运行完整搜索循环")
@@ -1186,6 +1215,7 @@ def main():
             toggle_script=args.toggle_script,
             wait_script=args.wait_script,
             apply_config_script=args.apply_config_script,
+            service_log_path=args.service_log_path,
         )
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
@@ -1204,6 +1234,7 @@ def main():
             toggle_script=args.toggle_script,
             wait_script=args.wait_script,
             apply_config_script=args.apply_config_script,
+            service_log_path=args.service_log_path,
         )
         print(json.dumps(result, indent=2, ensure_ascii=False))
 

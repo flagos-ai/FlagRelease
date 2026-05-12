@@ -196,7 +196,8 @@ class ProgressBar:
     SYM_FAIL = '✗'
     SYM_SKIP = '⚠'
 
-    def __init__(self, colors: Colors, enabled: bool = True, start_step: int = 1):
+    def __init__(self, colors: Colors, enabled: bool = True, start_step: int = 1,
+                 load_durations: str = None):
         self.colors = colors
         self.enabled = enabled
         # 每步状态: pending / running / done / fail
@@ -209,6 +210,17 @@ class ProgressBar:
         if start_step > 1:
             for i in range(min(start_step - 1, len(PIPELINE_STEPS))):
                 self.states[i] = 'done'
+        # 加载前序段的耗时数据
+        if load_durations and os.path.isfile(load_durations):
+            try:
+                with open(load_durations) as f:
+                    prev = json.load(f)
+                for k, v in prev.items():
+                    idx = int(k) - 1
+                    if 0 <= idx < len(self.step_durations) and v is not None:
+                        self.step_durations[idx] = v
+            except Exception:
+                pass
 
     def _normalize(self, step_id: str) -> int:
         """步骤标识 → 索引 (0-based)"""
@@ -352,6 +364,20 @@ class ProgressBar:
             elif state == 'skip':
                 line = c.yellow(line)
             print(line, flush=True)
+
+    def save_durations(self, filepath: str):
+        """将当前所有步骤耗时写入 JSON 文件，供后续段加载"""
+        if not filepath:
+            return
+        data = {}
+        for i, (sid, _, _) in enumerate(PIPELINE_STEPS):
+            data[sid] = self.step_durations[i]
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            with open(filepath, 'w') as f:
+                json.dump(data, f)
+        except Exception:
+            pass
 
 
 # ============================================================================
@@ -705,6 +731,8 @@ def main():
                         help='分段执行时的起始步骤编号（1-13），之前的步骤标记为已完成')
     parser.add_argument('--cost-file', help='写入本段费用和耗时的文件路径（供 run_pipeline.sh 汇总）')
     parser.add_argument('--terminal-log', help='记录处理后的终端输出到文件（去除 ANSI 颜色码）')
+    parser.add_argument('--load-durations', help='加载前序段的步骤耗时 JSON 文件')
+    parser.add_argument('--durations-file', help='段结束时写入本段步骤耗时到此 JSON 文件')
     args = parser.parse_args()
 
     verbose = args.verbose
@@ -718,7 +746,8 @@ def main():
     logger = PipelineLogger(args.pipeline_log)
     logger.open()
 
-    progress = ProgressBar(colors, enabled=not verbose, start_step=args.start_step)
+    progress = ProgressBar(colors, enabled=not verbose, start_step=args.start_step,
+                           load_durations=args.load_durations)
 
     # 跟踪上一个 tool_use 是否应该显示结果（精简模式用）
     last_tool_visible = False
@@ -875,6 +904,9 @@ def main():
 
                 # 输出各步骤耗时汇总
                 progress.render_summary()
+
+                # 保存耗时数据供后续段加载
+                progress.save_durations(args.durations_file)
 
                 dur = event.get("duration_ms", 0) or 0
                 cost = event.get("total_cost_usd", 0) or 0
