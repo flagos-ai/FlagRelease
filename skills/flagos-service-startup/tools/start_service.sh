@@ -133,6 +133,18 @@ if [ "$MODE" = "native" ]; then
     unset FLAGGEMS_CONTROL_MODE 2>/dev/null || true
 fi
 
+# plugin 场景：显式指定 VLLM_PLUGINS 避免多 platform plugin 冲突（ascend vs fl）
+if [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
+    HAS_PLUGIN=$(PATH=/opt/conda/bin:$PATH python3 -c "
+import importlib.util
+print('yes' if importlib.util.find_spec('vllm_fl') else 'no')
+" 2>/dev/null || echo "no")
+    if [ "$HAS_PLUGIN" = "yes" ]; then
+        export VLLM_PLUGINS="fl"
+        echo "[start_service.sh] plugin 场景：设置 VLLM_PLUGINS=fl"
+    fi
+fi
+
 LOG_FILE="/flagos-workspace/logs/startup_${MODE}.log"
 
 # FlagGems 模式启动前清理 Triton/FlagGems 编译缓存（约束39：避免旧缓存隐藏问题算子）
