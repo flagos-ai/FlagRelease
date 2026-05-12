@@ -93,9 +93,14 @@ def update_ledger(ctx, step_id, status, notes=None, fail_reason=None, skip_reaso
                 s["finished_at"] = now
                 if s.get("started_at"):
                     try:
-                        start = datetime.datetime.fromisoformat(s["started_at"])
+                        started_str = s["started_at"].replace("Z", "+00:00")
+                        start = datetime.datetime.fromisoformat(started_str)
                         end = datetime.datetime.fromisoformat(now)
-                        s["duration_seconds"] = int((end - start).total_seconds())
+                        if start.tzinfo and not end.tzinfo:
+                            end = end.replace(tzinfo=datetime.timezone.utc)
+                        elif end.tzinfo and not start.tzinfo:
+                            start = start.replace(tzinfo=datetime.timezone.utc)
+                        s["duration_seconds"] = max(0, int((end - start).total_seconds()))
                     except (ValueError, TypeError):
                         pass
             if notes is not None:

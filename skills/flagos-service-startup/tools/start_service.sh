@@ -95,19 +95,49 @@ if [ -z "$MODEL_PATH" ]; then
     exit 1
 fi
 
+# 端口占用检测与自动递增（最多尝试 +10）
+ORIGINAL_PORT="$PORT"
+for i in $(seq 0 10); do
+    CANDIDATE_PORT=$((ORIGINAL_PORT + i))
+    if ! ss -tlnp 2>/dev/null | grep -qE ":${CANDIDATE_PORT}\b" && \
+       ! netstat -tlnp 2>/dev/null | grep -qE ":${CANDIDATE_PORT}\b"; then
+        PORT="$CANDIDATE_PORT"
+        break
+    fi
+    if [ $i -eq 10 ]; then
+        echo "ERROR: 端口 ${ORIGINAL_PORT}-${CANDIDATE_PORT} 全部被占用" >&2
+        exit 1
+    fi
+done
+if [ "$PORT" != "$ORIGINAL_PORT" ]; then
+    echo "[start_service.sh] 端口 ${ORIGINAL_PORT} 被占用，自动递增到 ${PORT}"
+fi
+
 # 设置 GPU 可见设备（根据厂商使用对应环境变量名）
 if [ -n "$CUDA_VISIBLE" ]; then
-    export "${VISIBLE_ENV}=${CUDA_VISIBLE}"
+    if [[ "$VISIBLE_ENV" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        export "${VISIBLE_ENV}=${CUDA_VISIBLE}"
+    else
+        echo "WARNING: VISIBLE_ENV='${VISIBLE_ENV}' 不是合法变量名，使用 CUDA_VISIBLE_DEVICES" >&2
+        export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE}"
+    fi
 fi
 
 # 确保 conda 环境在 PATH 中
 export PATH=/opt/conda/bin:$PATH
 
-# 加载持久化的环境变量（FLAGGEMS_CONTROL_MODE 等）
+# 加载持久化的 FlagGems 相关环境变量（只提取相关变量，避免覆盖 PATH 等系统变量）
 if [ -f /etc/environment ]; then
-    set -a
-    . /etc/environment
-    set +a
+    while IFS='=' read -r key val; do
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        case "$key" in
+            USE_FLAGGEMS|FLAGGEMS_*|VLLM_FL_*)
+                val="${val%\"}" ; val="${val#\"}"
+                val="${val%\'}" ; val="${val#\'}"
+                export "$key=$val"
+                ;;
+        esac
+    done < /etc/environment
 fi
 
 # 从控制文件推断 FLAGGEMS_CONTROL_MODE（兜底：docker exec 不继承宿主进程环境变量）
@@ -134,6 +164,10 @@ if [ "$MODE" = "native" ]; then
 fi
 
 LOG_FILE="/flagos-workspace/logs/startup_${MODE}.log"
+
+# 创建 startup_default.log 符号链接指向当前 mode 的日志
+# 崩溃诊断脚本统一引用 startup_default.log，确保路径一致
+ln -sf "startup_${MODE}.log" /flagos-workspace/logs/startup_default.log
 
 # FlagGems 模式启动前清理 Triton/FlagGems 编译缓存（约束39：避免旧缓存隐藏问题算子）
 if [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
@@ -176,4 +210,19 @@ echo "[start_service.sh] CMD: ${CMD}"
 
 # 后台启动，日志写入文件
 nohup bash -c "cd /flagos-workspace && ${CMD}" > "${LOG_FILE}" 2>&1 &
-echo "[start_service.sh] PID=$!, log=${LOG_FILE}"
+SVC_PID=$!
+echo "${SVC_PID}" > /flagos-workspace/logs/service.pid
+echo "[start_service.sh] PID=${SVC_PID}, log=${LOG_FILE}"
+
+# 保存控制文件副本到 results/（供报告对比配置 vs 运行时算子，仅首次启动时保存）
+if [ "$USE_FLAGGEMS_FLAG" = "1" ] && [ -f /root/flaggems_ops_control.json ] && [ ! -f /flagos-workspace/results/ops_control_initial.json ]; then
+    cp /root/flaggems_ops_control.json /flagos-workspace/results/ops_control_initial.json 2>/dev/null || true
+fi
+
+# 短暂等待后验证进程是否存活（快速发现启动参数错误导致的立即崩溃）
+sleep 2
+if ! kill -0 "${SVC_PID}" 2>/dev/null; then
+    echo "ERROR: 服务进程 ${SVC_PID} 启动后立即退出，请检查日志: ${LOG_FILE}" >&2
+    tail -20 "${LOG_FILE}" 2>/dev/null >&2
+    exit 1
+fi

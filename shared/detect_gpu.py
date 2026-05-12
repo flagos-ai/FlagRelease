@@ -38,7 +38,7 @@ GPU_VENDORS: List[Tuple[str, str, str, str]] = [
     ("mthreads",  "mthreads-gmi", "mthreads-gmi -q",                        "MUSA_VISIBLE_DEVICES"),
     ("kunlunxin", "xpu_smi",     "xpu_smi",                                 "XPU_VISIBLE_DEVICES"),
     ("tianshu",   "ixsmi",       "ixsmi -q",                                "CUDA_VISIBLE_DEVICES"),
-    ("metax",     "mxsmi",       "mxsmi -q",                                "CUDA_VISIBLE_DEVICES"),
+    ("metax",     "mx-smi",      "mx-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits", "CUDA_VISIBLE_DEVICES"),
 ]
 
 # GPU name → vendor 推断（用于 torch 检测到 GPU 但无法确定厂商时）
