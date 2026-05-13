@@ -99,6 +99,7 @@ class PipelineConfig:
     host_workspace_base: str = ""  # /data/flagos-workspace/<model>，由 context.yaml workspace.host_path 填充
     config_persisted: bool = False
     plugin_image_mode: bool = False  # plugin 模式：镜像 tag 追加 -plugin，仓库名追加 -plugin
+    plugin_qualified: bool = False   # plugin 精度+性能均达标时为 True，否则跳过 README 更新
 
     # 各阶段配置
     chip: ChipConfig = field(default_factory=ChipConfig)
@@ -257,6 +258,11 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
             parts = hf_url.rstrip('/').split('hf-mirror.com/')
             if len(parts) == 2:
                 config.publish.base_huggingface_repo_id = parts[1]
+
+    # plugin_workflow.qualified → plugin_qualified
+    plugin_wf = ctx.get('plugin_workflow', {})
+    if plugin_wf.get('qualified', False):
+        config.plugin_qualified = True
 
     return config
 

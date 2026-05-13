@@ -625,7 +625,7 @@ ISSUE_EOF"
 - 推理测试通过
 - 已输出服务连接信息
 - gems.txt 已检查（flagos 模式）
-- context.yaml 已更新
+- context.yaml 已更新（必须包含 `workflow.service_ok=true`，无论是首次启动成功还是崩溃重试后成功）
 - 对应 trace 文件已写入：
   - 步骤3初始启动 → `traces/03_service_startup.json`
   - 步骤4/6中的 native/flagos 模式切换 → 记录在 `traces/04_quick_accuracy.json` 或 `traces/06_quick_performance.json` 的 actions 中
@@ -654,6 +654,11 @@ ISSUE_EOF"
 ---
 
 ## 编排层指令（步骤3 — 固化决策）
+
+**FlagGems 模式启动成功处理**（正常路径）：
+- FlagGems 模式服务启动成功且推理验证通过 → **必须设置 `workflow.service_ok = true`**
+- 通过 `update_context.py --set workflow.service_ok=true` 更新
+- 此设置是段间流转的关键判定字段，遗漏会导致后续步骤被跳过
 
 **FlagGems 模式启动失败处理**（不含超时，超时属于正常等待）：
 1. 备份崩溃日志：`cp startup_default.log startup_default_crashed.log`

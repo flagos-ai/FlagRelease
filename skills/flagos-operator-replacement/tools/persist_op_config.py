@@ -140,6 +140,31 @@ OPS_CONTROL_FILE = "/root/flaggems_ops_control.json"
 FLAGGEMS_INJECT_MARKER = "FLAGGEMS_CONTROL_MODE"
 
 
+def _normalize_ops_for_persist(ops):
+    """将算子名从大写显示名转换为小写函数名"""
+    if not ops:
+        return ops
+    if all(op == op.lower() and ' ' not in op for op in ops):
+        return ops
+    try:
+        from toggle_flaggems import normalize_ops_to_func_names
+        return normalize_ops_to_func_names(ops)
+    except ImportError:
+        result = []
+        for op in ops:
+            s = re.sub(r'\s*\(.*?\)', '', op)
+            s = s.split(',')[0].strip()
+            s = re.sub(r'-hopper$', '', s, flags=re.IGNORECASE)
+            s = s.replace('.STABLE', '_stable')
+            s = re.sub(r'\s+FORWARD$', '', s, flags=re.IGNORECASE)
+            s = re.sub(r'\s+BACKWARD$', '', s, flags=re.IGNORECASE)
+            s = s.lower().replace(' ', '_')
+            if s.startswith('_'):
+                s = s[1:]
+            result.append(s)
+        return result
+
+
 def _is_code_injected():
     """检查源码是否已注入环境变量驱动代码"""
     try:
@@ -161,6 +186,10 @@ def _is_code_injected():
 def _persist_control_file_and_env(disabled_ops, enabled_ops):
     """已注入场景：持久化控制文件和环境变量"""
     print("\n[环境变量驱动固化] 持久化控制文件和环境变量...")
+
+    # 将大写显示名转换为小写函数名
+    enabled_ops = _normalize_ops_for_persist(enabled_ops)
+    disabled_ops = _normalize_ops_for_persist(disabled_ops)
 
     # 确定 control_mode：有禁用算子 → only_enable（白名单）；全开 → unused
     if disabled_ops:

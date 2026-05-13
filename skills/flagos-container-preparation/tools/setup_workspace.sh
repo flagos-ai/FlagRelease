@@ -266,6 +266,8 @@ SCRIPT_MAP=(
     "skills/flagos-log-analyzer/tools/diagnose_failure.py:scripts/diagnose_failure.py"
     # 报告生成工具
     "shared/generate_report.py:scripts/generate_report.py"
+    # 越位执行数据清理工具
+    "shared/rollback_overflow.py:scripts/rollback_overflow.py"
 )
 
 for entry in "${SCRIPT_MAP[@]}"; do

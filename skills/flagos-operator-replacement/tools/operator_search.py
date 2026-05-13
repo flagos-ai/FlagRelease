@@ -407,9 +407,39 @@ def _persist_control_mode(control_mode: str):
         print(f"  WARN: 持久化环境变量失败: {e}")
 
 
+def _normalize_ops_for_control_file(ops: List[str]) -> List[str]:
+    """将算子名从大写显示名转换为小写函数名（供控制文件使用）"""
+    if not ops:
+        return ops
+    if all(op == op.lower() and ' ' not in op for op in ops):
+        return ops
+    try:
+        from toggle_flaggems import normalize_ops_to_func_names
+        return normalize_ops_to_func_names(ops)
+    except ImportError:
+        import re
+        result = []
+        for op in ops:
+            s = re.sub(r'\s*\(.*?\)', '', op)
+            s = s.split(',')[0].strip()
+            s = re.sub(r'-hopper$', '', s, flags=re.IGNORECASE)
+            s = s.replace('.STABLE', '_stable')
+            s = re.sub(r'\s+FORWARD$', '', s, flags=re.IGNORECASE)
+            s = re.sub(r'\s+BACKWARD$', '', s, flags=re.IGNORECASE)
+            s = s.lower().replace(' ', '_')
+            if s.startswith('_'):
+                s = s[1:]
+            result.append(s)
+        return result
+
+
 def _apply_via_control_file(test_enabled: List[str], test_disabled: List[str],
                              control_mode: str) -> bool:
     """已注入场景：写控制文件 + 设置环境变量，不改源码"""
+    # 将大写显示名转换为小写函数名
+    test_enabled = _normalize_ops_for_control_file(test_enabled)
+    test_disabled = _normalize_ops_for_control_file(test_disabled)
+
     data = {}
     if control_mode == "only_enable":
         data["include"] = sorted(test_enabled)
