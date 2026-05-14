@@ -126,7 +126,9 @@ class PublishStage(BaseStage):
 
         # 3. 生成 README
         readme_path = None
-        if publish_config.generate_readme:
+        if self.config.plugin_image_mode and not self.config.plugin_qualified:
+            self.skip_step("生成 README", "Plugin 不达标，跳过 README 更新")
+        elif publish_config.generate_readme:
             readme_path = self._generate_readme()
             if not readme_path:
                 return self.make_result(False, "生成 README 失败")
@@ -135,8 +137,10 @@ class PublishStage(BaseStage):
 
         # 4. 发布到 ModelScope
         ms_failed = False
-        if self.config.plugin_image_mode:
-            # plugin 模式：只更新步骤8原仓库的 README，不创建新仓库、不上传权重
+        if self.config.plugin_image_mode and not self.config.plugin_qualified:
+            self.skip_step("更新 ModelScope README", "Plugin 不达标，跳过")
+        elif self.config.plugin_image_mode:
+            # plugin 达标：更新步骤8原仓库的 README，不创建新仓库、不上传权重
             if publish_config.base_modelscope_model_id and readme_path:
                 success = self._update_repo_readme(
                     publish_config.base_modelscope_model_id, "modelscope", readme_path)
@@ -155,8 +159,10 @@ class PublishStage(BaseStage):
 
         # 5. 发布到 HuggingFace
         hf_failed = False
-        if self.config.plugin_image_mode:
-            # plugin 模式：只更新步骤8原仓库的 README
+        if self.config.plugin_image_mode and not self.config.plugin_qualified:
+            self.skip_step("更新 HuggingFace README", "Plugin 不达标，跳过")
+        elif self.config.plugin_image_mode:
+            # plugin 达标：更新步骤8原仓库的 README
             if publish_config.base_huggingface_repo_id and readme_path:
                 success = self._update_repo_readme(
                     publish_config.base_huggingface_repo_id, "huggingface", readme_path)
@@ -856,6 +862,12 @@ class PublishStage(BaseStage):
         rows = [header, separator]
         for metric in fixed_metrics:
             data = scores.get(metric, {})
+            if not data:
+                normalized = metric.lower().replace('_', '')
+                for k, v in scores.items():
+                    if k.lower().replace('_', '').replace(' ', '').replace('(', '').replace(')', '') == normalized:
+                        data = v
+                        break
             origin = data.get('origin', '-')
             flagos = data.get('flagos', '-')
             if origin is None or origin == 'N/A':
@@ -883,7 +895,7 @@ class PublishStage(BaseStage):
             plugin_score = self._read_json_field(gpqa_plugin_path, "score")
             if native_score is not None or plugin_score is not None:
                 results.append({
-                    "metric": "GPQA (plugin)",
+                    "metric": "GPQA_Diamond",
                     "origin": native_score if native_score is not None else "N/A",
                     "flagos": plugin_score if plugin_score is not None else "N/A",
                 })
@@ -894,9 +906,8 @@ class PublishStage(BaseStage):
             optimized_score = self._read_json_field(gpqa_optimized_path, "score")
             flagos_score = optimized_score if optimized_score is not None else self._read_json_field(gpqa_flagos_path, "score")
             if native_score is not None or flagos_score is not None:
-                metric_label = "GPQA (tuned)" if optimized_score is not None else "GPQA"
                 results.append({
-                    "metric": metric_label,
+                    "metric": "GPQA_Diamond",
                     "origin": native_score if native_score is not None else "N/A",
                     "flagos": flagos_score if flagos_score is not None else "N/A",
                 })

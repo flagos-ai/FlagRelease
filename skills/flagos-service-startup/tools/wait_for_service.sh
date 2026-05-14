@@ -163,8 +163,8 @@ PROGRESS = [
     (re.compile(r'Graph capturing finished', re.I), 'cuda_graph_done'),
     (re.compile(r'GEMS\s+\w+', re.I), 'flaggems_op_register'),
     (re.compile(r'flag_gems\.enable|import flag_gems', re.I), 'flaggems_init'),
-    (re.compile(r'triton|Compiling\s+\w+', re.I), 'triton_compile'),
-    (re.compile(r'torch\.compile|inductor', re.I), 'torch_compile'),
+    (re.compile(r'triton.*(?:compil|autotuning|kernel\s*cache)', re.I), 'triton_compile'),
+    (re.compile(r'(?<!disabling )torch\.compile|Dynamo.*(?:bytecode|transform)|profiling.*warmup|Compiling a graph for', re.I), 'torch_compile'),
     (re.compile(r'Uvicorn running on|Listening on|Serving on', re.I), 'port_bound'),
     (re.compile(r'Application startup complete|Ready to serve', re.I), 'service_ready'),
 ]
@@ -184,6 +184,9 @@ for line in lines:
     if not s:
         continue
 
+    # ERROR 行标记（仍检测致命信号，但跳过进度匹配）
+    is_error_line = bool(re.match(r'^(?:\([^)]+\)\s+)?ERROR\s', s))
+
     # 致命信号
     for pat, label in FATAL:
         if pat.search(s):
@@ -202,12 +205,13 @@ for line in lines:
             fatal_line = s[:200]
             break
 
-    # 进度信号
-    for pat, label in PROGRESS:
-        if pat.search(s):
-            latest_phase = label
-            progress = True
-            break
+    # 进度信号（跳过 ERROR 行，避免误匹配）
+    if not is_error_line:
+        for pat, label in PROGRESS:
+            if pat.search(s):
+                latest_phase = label
+                progress = True
+                break
 
 print(json.dumps({
     'fatal': fatal_signal,
@@ -234,6 +238,73 @@ fatal_label() {
         traceback_error) echo "Python 异常" ;;
         *)              echo "$1" ;;
     esac
+}
+
+# ============================================================
+# 进程活跃度探测（编译阶段替代日志超时）
+# ============================================================
+# 上一次采样的 CPU ticks（跨迭代保持）
+_LAST_CPU_TICKS=0
+_LAST_CPU_SAMPLE_TIME=0
+
+check_process_activity() {
+    # 返回: active:<cpu_delta> / idle:<cpu_delta> / dead
+    # 通过比较两次迭代间的 CPU ticks 差值判断活跃度（无需 sleep）
+    local PID=""
+    if [ -f /flagos-workspace/logs/service.pid ]; then
+        PID=$(cat /flagos-workspace/logs/service.pid 2>/dev/null)
+        if [ -n "$PID" ] && ! kill -0 "$PID" 2>/dev/null; then
+            PID=""
+        fi
+    fi
+    if [ -z "$PID" ]; then
+        PID=$(ps -ef | grep -E "vllm.entrypoints|sglang.srt|multiproc_worker" | grep -v grep | awk '{print $2}' | head -1)
+    fi
+    if [ -z "$PID" ]; then
+        echo "dead"
+        return
+    fi
+
+    # 1. CPU 活跃度：读取 /proc/<pid>/stat 的 utime+stime+cutime+cstime
+    #    与上次采样比较，差值 > 0 表示有 CPU 消耗
+    local CPU_DELTA=0
+    if [ -f "/proc/$PID/stat" ]; then
+        local CURRENT_TICKS=$(awk '{print $14+$15+$16+$17}' "/proc/$PID/stat" 2>/dev/null || echo 0)
+        local NOW_SEC=$(date +%s)
+        if [ "$_LAST_CPU_TICKS" -gt 0 ] && [ "$_LAST_CPU_SAMPLE_TIME" -gt 0 ]; then
+            local TIME_DELTA=$((NOW_SEC - _LAST_CPU_SAMPLE_TIME))
+            if [ "$TIME_DELTA" -gt 0 ]; then
+                CPU_DELTA=$(( (CURRENT_TICKS - _LAST_CPU_TICKS) / TIME_DELTA ))
+            fi
+        fi
+        _LAST_CPU_TICKS=$CURRENT_TICKS
+        _LAST_CPU_SAMPLE_TIME=$NOW_SEC
+    else
+        # 回退：ps 累计 CPU
+        CPU_DELTA=$(ps -p "$PID" -o %cpu= 2>/dev/null | awk '{printf "%.0f", $1+0}' || echo 0)
+        CPU_DELTA=${CPU_DELTA:-0}
+    fi
+
+    # 2. Triton/FlagGems cache 写入检测（2分钟内有新文件）
+    local CACHE_ACTIVE=false
+    for CACHE_DIR in /root/.triton/cache /tmp/triton_cache /root/.flaggems/code_cache; do
+        if [ -d "$CACHE_DIR" ]; then
+            if find "$CACHE_DIR" -maxdepth 3 -mmin -2 -type f -print -quit 2>/dev/null | grep -q .; then
+                CACHE_ACTIVE=true
+                break
+            fi
+        fi
+    done
+
+    # 3. 子进程活跃度（编译通常有多个 worker）
+    local CHILD_COUNT=$(ps --ppid "$PID" -o pid= 2>/dev/null | wc -l || ps -ef | awk -v ppid="$PID" '$3==ppid' | wc -l || echo 0)
+
+    # 4. 综合判定：任一信号表明活跃
+    if [ "$CPU_DELTA" -gt 3 ] || [ "$CACHE_ACTIVE" = true ] || [ "${CHILD_COUNT:-0}" -gt 3 ]; then
+        echo "active:${CPU_DELTA}"
+    else
+        echo "idle:${CPU_DELTA}"
+    fi
 }
 
 # ============================================================
@@ -544,19 +615,26 @@ print(json.dumps({
     fi
 
     # === CHECK 4: 无活动超时（仅动态模式） ===
+    PROC_STATUS=""
+    PROC_CPU=""
     if [ "$DYNAMIC_MODE" = true ]; then
         NOW=$(date +%s)
         SINCE_ACTIVITY=$((NOW - LAST_ACTIVITY_TIME))
 
-        # 已知长编译阶段（torch.compile / CUDA graph）允许更长的无活动时间
-        # 这些阶段编译期间不输出日志是正常行为，只要进程还活着就继续等
         EFFECTIVE_STALL_TIMEOUT=$TIMEOUT
         case "$CURRENT_PHASE" in
             torch_compile|cuda_graph_capture|triton_compile)
-                # 编译阶段：无活动超时至少 300s，取 max(TIMEOUT, 300)
-                if [ "$EFFECTIVE_STALL_TIMEOUT" -lt 300 ]; then
-                    EFFECTIVE_STALL_TIMEOUT=300
+                # 编译阶段：用进程活跃度探测代替固定超时
+                PROC_STATE=$(check_process_activity)
+                PROC_STATUS="${PROC_STATE%%:*}"
+                PROC_CPU="${PROC_STATE#*:}"
+                if [ "$PROC_STATUS" = "active" ]; then
+                    # 进程在干活（CPU>5% 或 cache 有写入），重置计时器
+                    LAST_ACTIVITY_TIME=$NOW
+                    SINCE_ACTIVITY=0
                 fi
+                # idle 或无法判定时用 120s 短超时快速发现真正卡死
+                EFFECTIVE_STALL_TIMEOUT=120
                 ;;
         esac
 
@@ -597,11 +675,23 @@ print(json.dumps({
         PHASE_TEXT=$(phase_label "$CURRENT_PHASE")
         NOW=$(date +%s)
         SINCE_ACTIVITY=$((NOW - LAST_ACTIVITY_TIME))
-        if [ "$SINCE_ACTIVITY" -gt 30 ]; then
-            echo "[${ELAPSED}s] 阶段: ${PHASE_TEXT} (${SINCE_ACTIVITY}s 无新日志)"
-        else
-            echo "[${ELAPSED}s] 阶段: ${PHASE_TEXT}"
-        fi
+        case "$CURRENT_PHASE" in
+            torch_compile|cuda_graph_capture|triton_compile)
+                # 编译阶段显示进程活跃度
+                if [ -n "${PROC_STATUS:-}" ]; then
+                    echo "[${ELAPSED}s] 阶段: ${PHASE_TEXT} (进程${PROC_STATUS}, CPU活跃度 ${PROC_CPU:-0})"
+                else
+                    echo "[${ELAPSED}s] 阶段: ${PHASE_TEXT}"
+                fi
+                ;;
+            *)
+                if [ "$SINCE_ACTIVITY" -gt 30 ]; then
+                    echo "[${ELAPSED}s] 阶段: ${PHASE_TEXT} (${SINCE_ACTIVITY}s 无新日志)"
+                else
+                    echo "[${ELAPSED}s] 阶段: ${PHASE_TEXT}"
+                fi
+                ;;
+        esac
     else
         echo "[${ELAPSED}s] 服务未就绪，${INTERVAL}s 后重试..."
     fi

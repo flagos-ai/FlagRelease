@@ -145,6 +145,11 @@ def main():
         help="Plugin 发布模式：镜像 tag 追加 -plugin，仓库名追加 -plugin，发布后更新已发布仓库 README"
     )
     parser.add_argument(
+        "--plugin-qualified",
+        action="store_true",
+        help="Plugin 达标时传入，允许更新 ModelScope/HuggingFace README；不传则跳过 README 更新"
+    )
+    parser.add_argument(
         "--only-harbor",
         action="store_true",
         help="只执行 Harbor 推送（commit→tag→push），跳过 README/ModelScope/HuggingFace"
@@ -184,6 +189,8 @@ def main():
     if args.plugin_mode:
         config.plugin_image_mode = True
         config.publish.existing_harbor_image = ""
+        if args.plugin_qualified:
+            config.plugin_qualified = True
 
     if args.only_harbor:
         config.stages_to_run = ["publish"]
