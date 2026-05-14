@@ -363,12 +363,15 @@ FLAGGEMS_INJECT_MARKER = "FLAGGEMS_CONTROL_MODE"
 
 
 def _write_ops_control_file(enabled_ops=None, disabled_ops=None):
-    """写入算子控制文件，配合注入的环境变量分支代码使用"""
+    """写入算子控制文件，配合注入的环境变量分支代码使用
+
+    自动将大写显示名转换为小写函数名，确保 flag_gems.only_enable() 能识别。
+    """
     data = {}
     if enabled_ops is not None:
-        data["include"] = sorted(enabled_ops)
+        data["include"] = sorted(normalize_ops_to_func_names(enabled_ops))
     if disabled_ops is not None:
-        data["unused"] = sorted(disabled_ops)
+        data["unused"] = sorted(normalize_ops_to_func_names(disabled_ops))
     with open(OPS_CONTROL_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     print(f"  ✓ 算子控制文件已写入: {OPS_CONTROL_FILE}")
@@ -426,59 +429,164 @@ def _persist_env_vars(env_vars):
         print(f"  WARN: 写入 {BASHRC} 失败: {e}")
 
 
+def _parse_gems_txt_debug(path):
+    """从 gems.txt debug 格式中解析函数名列表和映射表
+
+    格式: [DEBUG] flag_gems.ops.add.add: GEMS ADD
+    返回: (func_names_list, display_to_func_map)
+    """
+    func_names = []
+    display_to_func = {}
+    pattern = re.compile(r'\[DEBUG\]\s+([\w._]+):\s+GEMS\s+(.*)')
+
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            m = pattern.match(line)
+            if m:
+                module_path = m.group(1)
+                display_name = m.group(2).strip()
+                func_name = module_path.rsplit('.', 1)[-1]
+                func_names.append(func_name)
+                clean_display = re.sub(r'\s*\(.*?\)', '', display_name)
+                clean_display = clean_display.split(',')[0].strip()
+                clean_display = re.sub(r'-hopper$', '', clean_display, flags=re.IGNORECASE)
+                display_to_func[clean_display] = func_name
+                display_to_func[display_name] = func_name
+            else:
+                if ' ' not in line and len(line) < 40:
+                    func_names.append(line)
+
+    return func_names, display_to_func
+
+
+def _subtract_ops_fuzzy(all_ops, disabled_ops):
+    """从全量算子列表中移除禁用算子，支持模糊匹配。
+
+    处理名称不一致场景：disabled_ops 可能是 "fill" 而全量列表中是 "fill_scalar_"。
+    匹配规则：精确匹配 > 前缀匹配（disabled 是 all 中某项的前缀）> 包含匹配。
+    """
+    disabled_normalized = set()
+    for d in disabled_ops:
+        d_lower = d.lower().strip().rstrip("_")
+        disabled_normalized.add(d_lower)
+
+    to_remove = set()
+    for op in all_ops:
+        op_lower = op.lower().rstrip("_")
+        # 精确匹配（含忽略尾部下划线）
+        if op_lower in disabled_normalized or op.lower() in set(d.lower() for d in disabled_ops):
+            to_remove.add(op)
+            continue
+        # 前缀匹配：disabled "fill" 匹配 "fill_scalar_"（要求下划线分隔，防止 "add" 误匹配 "addmm"）
+        for d in disabled_normalized:
+            if op_lower.startswith(d + "_") and len(d) >= 3:
+                to_remove.add(op)
+                break
+
+    removed = to_remove & set(all_ops)
+    if removed:
+        print(f"  ✓ 模糊匹配禁用: {sorted(removed)}")
+    enabled = sorted(set(all_ops) - to_remove)
+    return enabled if enabled else None
+
+
 def _compute_enabled_from_disabled(disabled_ops):
-    """从 disabled_ops 反推 enabled_ops（需要全量算子列表）"""
-    all_ops = None
+    """从 disabled_ops 反推 enabled_ops（需要全量算子列表）
+
+    严格依赖运行时 txt 文件作为唯一权威来源（约束27）。
+    支持两种 gems.txt 格式：
+    - 纯算子名（每行一个小写函数名）
+    - debug 格式（[DEBUG] module.path.func: GEMS DISPLAY_NAME）
+    """
     candidates = ["/tmp/flaggems_enable_oplist.txt", "/root/gems.txt", "/tmp/gems.txt"]
     for path in candidates:
-        if os.path.isfile(path):
-            try:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                first_line = f.readline().strip()
+            if not first_line:
+                continue
+
+            if first_line.startswith('[DEBUG]'):
+                func_names, display_to_func = _parse_gems_txt_debug(path)
+                if func_names:
+                    print(f"  ✓ 全量算子列表来源: {path} (debug格式, {len(func_names)} 个)")
+                    disabled_funcs = set()
+                    for op in disabled_ops:
+                        if op in display_to_func:
+                            disabled_funcs.add(display_to_func[op])
+                        elif op.lower() in set(func_names):
+                            disabled_funcs.add(op.lower())
+                        else:
+                            disabled_funcs.add(op)
+                    return sorted(set(func_names) - disabled_funcs)
+            else:
                 with open(path, 'r', encoding='utf-8') as f:
                     ops = [l.strip() for l in f if l.strip()]
                 if ops:
-                    all_ops = ops
                     print(f"  ✓ 全量算子列表来源: {path} ({len(ops)} 个)")
-                    break
-            except Exception:
-                continue
-    if not all_ops:
-        try:
-            import flag_gems
-            if hasattr(flag_gems, "all_registered_ops"):
-                all_ops = list(flag_gems.all_registered_ops())
-            elif hasattr(flag_gems, "all_ops"):
-                all_ops = list(flag_gems.all_ops())
-            if all_ops:
-                print(f"  ✓ 全量算子列表来源: flag_gems API ({len(all_ops)} 个)")
+                    return sorted(set(ops) - set(disabled_ops))
         except Exception:
-            pass
-    # 静态 fallback：从 flag_gems 包的 OPS_REGISTRY 或 __init__ 中提取
-    if not all_ops:
-        try:
-            import flag_gems
-            # 尝试从 flag_gems 的内部注册表获取
-            for attr in ("OPS_REGISTRY", "_ops_registry", "REGISTERED_OPS", "_registered_ops"):
-                reg = getattr(flag_gems, attr, None)
-                if reg and hasattr(reg, '__iter__'):
-                    all_ops = sorted(set(str(k) for k in reg))
-                    if all_ops:
-                        print(f"  ✓ 全量算子列表来源: flag_gems.{attr} ({len(all_ops)} 个)")
-                        break
-            # 尝试从 enable 函数的默认参数或文档中提取
-            if not all_ops and hasattr(flag_gems, 'enable'):
-                import inspect as _insp
-                src = _insp.getsource(flag_gems.enable)
-                # 搜索源码中的算子列表定义
-                op_match = re.findall(r'"(\w+)"', src)
-                if len(op_match) > 5:
-                    all_ops = sorted(set(op_match))
-                    print(f"  ✓ 全量算子列表来源: flag_gems.enable() 源码解析 ({len(all_ops)} 个)")
-        except Exception:
-            pass
-    if not all_ops:
-        print("  ✗ 无法获取全量算子列表（运行时文件为空/不存在，flag_gems API 无可用接口）")
-        return None
-    return sorted(set(all_ops) - set(disabled_ops))
+            continue
+
+    # Fallback 1: 从 flag_gems 包注册表直接查询（首次启动崩溃场景，gems.txt 尚未生成）
+    try:
+        import flag_gems
+        ops = None
+        if hasattr(flag_gems, "all_registered_ops"):
+            ops = sorted(flag_gems.all_registered_ops())
+        elif hasattr(flag_gems, "all_ops"):
+            ops = sorted(flag_gems.all_ops())
+        if ops:
+            print(f"  ✓ 全量算子列表来源: flag_gems 包注册表 ({len(ops)} 个，首次崩溃 fallback)")
+            enabled = _subtract_ops_fuzzy(ops, disabled_ops)
+            return enabled
+    except (ImportError, Exception):
+        pass
+
+    # Fallback 2: 从 ops_constants 静态分组获取（flag_gems 包也无法导入时）
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from ops_constants import OPERATOR_GROUPS
+        ops = []
+        for group_ops in OPERATOR_GROUPS.values():
+            ops.extend(group_ops)
+        ops = sorted(set(ops))
+        if ops:
+            print(f"  ⚠ 全量算子列表来源: ops_constants 静态列表 ({len(ops)} 个，可能不完整)")
+            enabled = _subtract_ops_fuzzy(ops, disabled_ops)
+            return enabled
+    except (ImportError, Exception):
+        pass
+
+    print("  ✗ 无法获取全量算子列表（运行时 txt / flag_gems 包 / 静态列表均不可用）")
+    return None
+
+
+def normalize_ops_to_func_names(ops):
+    """将算子名列表从大写显示名转换为小写函数名（纯规则转换，不依赖 gems.txt）"""
+    if not ops:
+        return ops
+    if all(op == op.lower() and ' ' not in op for op in ops):
+        return ops
+
+    result = []
+    for op in ops:
+        s = re.sub(r'\s*\(.*?\)', '', op)
+        s = s.split(',')[0].strip()
+        s = re.sub(r'-hopper$', '', s, flags=re.IGNORECASE)
+        s = s.replace('.STABLE', '_stable')
+        s = re.sub(r'\s+FORWARD$', '', s, flags=re.IGNORECASE)
+        s = re.sub(r'\s+BACKWARD$', '', s, flags=re.IGNORECASE)
+        s = s.lower().replace(' ', '_')
+        if s.startswith('_'):
+            s = s[1:]
+        result.append(s)
+    return result
 
 
 def _replace_enable_call_balanced(content, replacement):

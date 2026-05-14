@@ -99,6 +99,7 @@ class PipelineConfig:
     host_workspace_base: str = ""  # /data/flagos-workspace/<model>，由 context.yaml workspace.host_path 填充
     config_persisted: bool = False
     plugin_image_mode: bool = False  # plugin 模式：镜像 tag 追加 -plugin，仓库名追加 -plugin
+    plugin_qualified: bool = False   # plugin 精度+性能均达标时为 True，否则跳过 README 更新
 
     # 各阶段配置
     chip: ChipConfig = field(default_factory=ChipConfig)
@@ -130,7 +131,9 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     # evaluation_results
     ev = ctx.get('eval', {})
     if ev.get('v1_score') is not None and ev.get('v2_score') is not None:
-        method = ev.get('eval_method', 'GPQA_Diamond')
+        mode = ev.get('mode', 'gpqa_diamond')
+        mode_to_metric = {'gpqa_diamond': 'GPQA_Diamond', 'erqa': 'ERQA', 'aime24': 'Aime24'}
+        method = mode_to_metric.get(mode, 'GPQA_Diamond')
         config.model_info.evaluation_results = [
             {'metric': method, 'origin': ev['v1_score'], 'flagos': ev['v2_score']}
         ]
@@ -140,7 +143,10 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     runtime = ctx.get('runtime', {})
     port = svc.get('port', 8000)
     tp = runtime.get('tp_size') or 1
-    model_path = model.get('container_path', '')
+    # 用户下载路径 /data/{flagrelease_name}，与 README 模板的 modelscope download 一致
+    model_short = model.get('name', '').split('/')[-1] if model.get('name') else ''
+    flagrelease_name = f"{model_short}-FlagOS" if model_short else ''
+    model_path = f"/data/{flagrelease_name}" if flagrelease_name else model.get('container_path', '')
     max_model_len = svc.get('max_model_len', '')
     cmd_parts = [f"vllm serve {model_path}",
                  f"--host 0.0.0.0 --port {port}",
@@ -252,6 +258,11 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
             parts = hf_url.rstrip('/').split('hf-mirror.com/')
             if len(parts) == 2:
                 config.publish.base_huggingface_repo_id = parts[1]
+
+    # plugin_workflow.qualified → plugin_qualified
+    plugin_wf = ctx.get('plugin_workflow', {})
+    if plugin_wf.get('qualified', False):
+        config.plugin_qualified = True
 
     return config
 

@@ -515,6 +515,9 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 # 保存初始全开算子列表的 txt 副本到 results/（供事后查看和对比）
 docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/initial_oplist.txt
+
+# 保存初始控制文件副本（供报告中配置 vs 运行时 txt 对比，仅首次启动时保存）
+docker exec $CONTAINER bash -c '[ ! -f /flagos-workspace/results/ops_control_initial.json ] && cp /root/flaggems_ops_control.json /flagos-workspace/results/ops_control_initial.json 2>/dev/null || true'
 ```
 
 **关键原则**：
@@ -576,19 +579,30 @@ environment:
    ```bash
    ${CMD_PREFIX} bash -c "rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/ 2>/dev/null && echo 'Triton/FlagGems cache cleared'"
    ```
-3. **算子级诊断重试**（最多 2 轮）：
+3. **算子级诊断重试**（不限轮次，每轮暴露新算子就继续）：
+
+   **第一原则：禁用算子是启动崩溃的最高优先解。** 任何形式的崩溃（AICore 异常、Triton 编译错误、graph capture 失败、RuntimeError）都必须首先归因为算子问题并定位禁用。在穷尽所有算子定位手段之前，严禁尝试 enforce-eager、切 native、或判定不可恢复。
+
    ```bash
    ${CMD_PREFIX} python3 /flagos-workspace/scripts/diagnose_ops.py crash-log \
      --log-path /flagos-workspace/logs/startup_default_crashed.log --json
    ```
-   - `crashed_ops` 非空 → 禁用问题算子 → 重启服务（仍为 FlagGems 模式）：
+   - `crashed_ops` 非空 → 累积禁用问题算子 → 重启服务（仍为 FlagGems 模式）：
      ```bash
      ${CMD_PREFIX} python3 /flagos-workspace/scripts/toggle_flaggems.py \
-       --action modify-enable --disabled-ops "<crashed_op1>,<crashed_op2>" --json
+       --action modify-enable --disabled-ops "<所有已累积的问题算子>" --json
      ```
-   - 重启成功 → 记录 `disabled_ops` 到 context.yaml，继续正常流程
-   - 重启仍失败 → 再次 crash-log 解析，累积禁用算子，最多 2 轮（每轮重试前均需清理缓存）
-4. `crashed_ops` 为空或 2 轮重试全部失败 → 切回 Native 验证
+   - 重启成功（含推理验证通过）→ 记录 `disabled_ops` 到 context.yaml，继续正常流程
+   - 重启后再次崩溃（启动阶段或推理阶段均算）→ 备份日志 → 清缓存 → 再次 crash-log 解析 → 累积禁用新算子 → 继续重试
+   - **`diagnose_ops.py` 返回空时的算子定位方法**（工具返回空 ≠ 无问题算子，必须人工定位）：
+     1. 查看 traceback 中的 `flag_gems/` 路径，提取文件名即为算子名
+     2. 查看崩溃前最后编译的 Triton kernel 名（通常在 `Compiling ...` 日志行中）
+     3. 查看 `q.xxx_()` 或 `torch.xxx()` 调用栈中紧邻 flag_gems 的函数名
+     4. 如果崩溃发生在 graph capture 阶段，查看 capture 前最后注册/编译的算子
+     5. 如果以上均无法定位，逐步禁用最近一轮新启用的算子组（二分法排查）
+   - **停止条件**：连续 2 轮重试后服务仍崩溃，且上述 5 种定位手段均无法识别新的问题算子，判定为不可恢复
+   - 注意：推理阶段崩溃也属于"重试失败"，需要同样走 diagnose → 禁用 → 重启流程，不单独计数
+4. 连续 2 轮确认无新可禁用算子（5 种定位手段均无结果）→ 最后尝试添加 `--enforce-eager` 重启一次 → 仍失败 → 切回 Native 验证
 5. Native 也失败 → 报告环境问题；Native 成功 → 确认是 FlagGems 问题
 
 ### 问题日志写入
@@ -621,7 +635,7 @@ ISSUE_EOF"
 - 推理测试通过
 - 已输出服务连接信息
 - gems.txt 已检查（flagos 模式）
-- context.yaml 已更新
+- context.yaml 已更新（必须包含 `workflow.service_ok=true`，无论是首次启动成功还是崩溃重试后成功）
 - 对应 trace 文件已写入：
   - 步骤3初始启动 → `traces/03_service_startup.json`
   - 步骤4/6中的 native/flagos 模式切换 → 记录在 `traces/04_quick_accuracy.json` 或 `traces/06_quick_performance.json` 的 actions 中
@@ -651,15 +665,30 @@ ISSUE_EOF"
 
 ## 编排层指令（步骤3 — 固化决策）
 
+**FlagGems 模式启动成功处理**（正常路径）：
+- FlagGems 模式服务启动成功且推理验证通过 → **必须设置 `workflow.service_ok = true`**
+- 通过 `update_context.py --set workflow.service_ok=true` 更新
+- 此设置是段间流转的关键判定字段，遗漏会导致后续步骤被跳过
+
 **FlagGems 模式启动失败处理**（不含超时，超时属于正常等待）：
+
+**第一原则：禁用算子是最高优先解。任何崩溃都必须首先定位并禁用具体算子，穷尽所有定位手段之前严禁走其他路径。**
+
 1. 备份崩溃日志：`cp startup_default.log startup_default_crashed.log`
 2. 清理 Triton/FlagGems 编译缓存：`rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/`
 3. 调用 `diagnose_ops.py crash-log` 解析崩溃日志
-4. `crashed_ops` 非空 → 禁用问题算子（`toggle_flaggems.py --action modify-enable --disabled-ops`）→ 重启（最多 2 轮，每轮重试前均需清理缓存）
-5. 重试成功 → 记录 `disabled_ops` 到 context.yaml，`workflow.service_ok = true`，继续正常流程
-6. 重试全部失败或 `crashed_ops` 为空 → 调用 `issue_reporter.py full --type operator-crash`
-7. 排除操作失误：native 模式也失败 → 环境问题，需人工介入
-8. 确认是 FlagGems 问题（非硬件）→ `workflow.service_ok = false` → 提交 issue 后**停止任务**，不继续步骤4/6/7 的精度性能评测（FlagGems 完全不可用时评测无意义）→ 直接到步骤8发布（私有，附带崩溃原因）
+4. `crashed_ops` 非空 → 累积禁用问题算子（`toggle_flaggems.py --action modify-enable --disabled-ops`）→ 重启（每轮重试前均需清理缓存）
+5. 重试成功（含推理验证通过）→ 记录 `disabled_ops` 到 context.yaml，`workflow.service_ok = true`，继续正常流程
+6. 重试后再次崩溃（启动或推理阶段）→ 备份日志 → 清缓存 → 再次 diagnose → 累积禁用新算子 → 继续重试。**不限轮次，只要每轮能定位到新问题算子就继续**
+7. **`diagnose_ops.py` 返回空时的算子定位**（返回空 ≠ 无问题算子，严禁跳过）：
+   - 查看 traceback 中 `flag_gems/` 路径，文件名即算子名
+   - 查看崩溃前最后编译的 Triton kernel 名（`Compiling ...` 日志行）
+   - 查看 `q.xxx_()` / `torch.xxx()` 调用栈中紧邻 flag_gems 的函数名
+   - 查看 graph capture 前最后注册/编译的算子
+   - 以上均无法定位 → 逐步禁用最近一轮新启用的算子组（二分法排查）
+8. **停止条件**：连续 2 轮重试后服务仍崩溃，且上述所有定位手段均无法识别新的问题算子 → 最后尝试 `--enforce-eager` 一次 → 仍失败 → 判定不可恢复 → 调用 `issue_reporter.py full --type operator-crash`
+9. 排除操作失误：native 模式也失败 → 环境问题，需人工介入
+10. 确认是 FlagGems 问题（非硬件）→ `workflow.service_ok = false` → 提交 issue 后**停止任务**，不继续步骤4/6/7 的精度性能评测（FlagGems 完全不可用时评测无意义）→ 直接到步骤8发布（私有，附带崩溃原因）
 
 **崩溃重试时的服务启动方式**：禁用算子后重启服务时，**必须使用 `start_service.sh`**（而非直接 `docker exec -d` 拼接 vllm 命令），确保 `FLAGGEMS_CONTROL_MODE` 等环境变量被正确加载：
 ```bash
