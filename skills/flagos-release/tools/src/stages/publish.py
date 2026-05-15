@@ -439,7 +439,7 @@ class PublishStage(BaseStage):
             success, stdout, stderr = self.run_command(
                 cmd=cmd,
                 step_name="Harbor 登录",
-                timeout=30,
+                timeout=60,
             )
             if not success:
                 print(f"  x Harbor 登录失败，请检查 HARBOR_USER / HARBOR_PASSWORD")
