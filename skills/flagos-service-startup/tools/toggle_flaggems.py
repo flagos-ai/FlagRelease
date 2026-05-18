@@ -462,6 +462,37 @@ def _parse_gems_txt_debug(path):
     return func_names, display_to_func
 
 
+def _subtract_ops_fuzzy(all_ops, disabled_ops):
+    """从全量算子列表中移除禁用算子，支持模糊匹配。
+
+    处理名称不一致场景：disabled_ops 可能是 "fill" 而全量列表中是 "fill_scalar_"。
+    匹配规则：精确匹配 > 前缀匹配（disabled 是 all 中某项的前缀）> 包含匹配。
+    """
+    disabled_normalized = set()
+    for d in disabled_ops:
+        d_lower = d.lower().strip().rstrip("_")
+        disabled_normalized.add(d_lower)
+
+    to_remove = set()
+    for op in all_ops:
+        op_lower = op.lower().rstrip("_")
+        # 精确匹配（含忽略尾部下划线）
+        if op_lower in disabled_normalized or op.lower() in set(d.lower() for d in disabled_ops):
+            to_remove.add(op)
+            continue
+        # 前缀匹配：disabled "fill" 匹配 "fill_scalar_"（要求下划线分隔，防止 "add" 误匹配 "addmm"）
+        for d in disabled_normalized:
+            if op_lower.startswith(d + "_") and len(d) >= 3:
+                to_remove.add(op)
+                break
+
+    removed = to_remove & set(all_ops)
+    if removed:
+        print(f"  ✓ 模糊匹配禁用: {sorted(removed)}")
+    enabled = sorted(set(all_ops) - to_remove)
+    return enabled if enabled else None
+
+
 def _compute_enabled_from_disabled(disabled_ops):
     """从 disabled_ops 反推 enabled_ops（需要全量算子列表）
 
@@ -502,8 +533,37 @@ def _compute_enabled_from_disabled(disabled_ops):
         except Exception:
             continue
 
-    print("  ✗ 无法获取全量算子列表（运行时 txt 文件为空或不存在）")
-    print("  提示: 需要先启动一次全量 FlagGems 服务生成 gems.txt，再执行算子控制")
+    # Fallback 1: 从 flag_gems 包注册表直接查询（首次启动崩溃场景，gems.txt 尚未生成）
+    try:
+        import flag_gems
+        ops = None
+        if hasattr(flag_gems, "all_registered_ops"):
+            ops = sorted(flag_gems.all_registered_ops())
+        elif hasattr(flag_gems, "all_ops"):
+            ops = sorted(flag_gems.all_ops())
+        if ops:
+            print(f"  ✓ 全量算子列表来源: flag_gems 包注册表 ({len(ops)} 个，首次崩溃 fallback)")
+            enabled = _subtract_ops_fuzzy(ops, disabled_ops)
+            return enabled
+    except (ImportError, Exception):
+        pass
+
+    # Fallback 2: 从 ops_constants 静态分组获取（flag_gems 包也无法导入时）
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from ops_constants import OPERATOR_GROUPS
+        ops = []
+        for group_ops in OPERATOR_GROUPS.values():
+            ops.extend(group_ops)
+        ops = sorted(set(ops))
+        if ops:
+            print(f"  ⚠ 全量算子列表来源: ops_constants 静态列表 ({len(ops)} 个，可能不完整)")
+            enabled = _subtract_ops_fuzzy(ops, disabled_ops)
+            return enabled
+    except (ImportError, Exception):
+        pass
+
+    print("  ✗ 无法获取全量算子列表（运行时 txt / flag_gems 包 / 静态列表均不可用）")
     return None
 
 

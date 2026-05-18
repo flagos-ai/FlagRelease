@@ -2,6 +2,7 @@
 阶段基类
 定义所有阶段的通用接口和功能
 """
+import os
 import re
 import subprocess
 import time
@@ -79,7 +80,13 @@ class BaseStage(ABC):
         run_args: Any = cmd
         if in_container:
             container = container_name or self.config.container_name
-            run_args = ["docker", "exec", container, "bash", "-c", cmd]
+            docker_cmd = ["docker", "exec"]
+            for env_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+                val = os.environ.get(env_var)
+                if val:
+                    docker_cmd.extend(["-e", f"{env_var}={val}"])
+            docker_cmd.extend([container, "bash", "-c", cmd])
+            run_args = docker_cmd
             shell = False
 
         display_cmd = cmd if isinstance(cmd, str) else " ".join(cmd)

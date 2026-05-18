@@ -54,7 +54,7 @@ model_name = ctx.get('model', {}).get('name', '').split('/')[-1]
 port = ctx.get('service', {}).get('port', 8000)
 tp_size = ctx.get('runtime', {}).get('tp_size', 0)
 gpu_count = ctx.get('runtime', {}).get('gpu_count', ctx.get('gpu', {}).get('count', 0))
-max_model_len = ctx.get('service', {}).get('max_model_len', 8192)
+max_model_len = ctx.get('service', {}).get('max_model_len', 32768)
 framework = ctx.get('runtime', {}).get('framework', 'vllm')
 cuda_visible = ctx.get('runtime', {}).get('cuda_visible_devices', '')
 visible_devices_env = ctx.get('gpu', {}).get('visible_devices_env', 'CUDA_VISIBLE_DEVICES')
@@ -161,6 +161,18 @@ export USE_FLAGGEMS="$USE_FLAGGEMS_FLAG"
 # native 模式下清除 FlagGems 控制变量，避免残留配置干扰
 if [ "$MODE" = "native" ]; then
     unset FLAGGEMS_CONTROL_MODE 2>/dev/null || true
+fi
+
+# plugin 场景：显式指定 VLLM_PLUGINS 避免多 platform plugin 冲突（ascend vs fl）
+if [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
+    HAS_PLUGIN=$(PATH=/opt/conda/bin:$PATH python3 -c "
+import importlib.util
+print('yes' if importlib.util.find_spec('vllm_fl') else 'no')
+" 2>/dev/null || echo "no")
+    if [ "$HAS_PLUGIN" = "yes" ]; then
+        export VLLM_PLUGINS="fl"
+        echo "[start_service.sh] plugin 场景：设置 VLLM_PLUGINS=fl"
+    fi
 fi
 
 LOG_FILE="/flagos-workspace/logs/startup_${MODE}.log"

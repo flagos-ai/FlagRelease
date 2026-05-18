@@ -257,8 +257,8 @@ def scan_flaggems_integration():
         if val is not None:
             integration["env_vars"][var] = val
 
-    # 维度2：vllm/sglang 代码扫描
-    for framework in ["vllm", "sglang"]:
+    # 维度2：vllm/sglang 及其平台适配层代码扫描
+    for framework in ["vllm", "sglang", "vllm_ascend"]:
         try:
             mod = importlib.import_module(framework)
             fw_path = mod.__path__[0]

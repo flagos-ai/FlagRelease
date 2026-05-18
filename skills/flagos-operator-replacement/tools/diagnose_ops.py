@@ -95,6 +95,26 @@ CRASH_PATTERNS = [
         "type": "triton_compile",
         "description": "Triton kernel 编译失败",
     },
+    # 模式 6: Ascend AICore 硬件异常（DDR 越界、aicore exception）
+    {
+        "pattern": re.compile(
+            r"(?:aicore.*?(?:exception|abnormal|error)|DDR.*?out of range|"
+            r"AclrtSynchronize.*?error.code.is.507015)",
+            re.IGNORECASE,
+        ),
+        "type": "aicore_error",
+        "description": "Ascend AICore 硬件执行异常（通常由 FlagGems 编译的 kernel 触发）",
+    },
+    # 模式 7: NPU graph capture 阶段崩溃
+    {
+        "pattern": re.compile(
+            r"(?:capture_model|_capture_cudagraphs|acl_graph).*?(?:error|fail|exception)|"
+            r"torch\.npu\.(?:graph|synchronize).*?(?:error|fail)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+        "type": "graph_capture_error",
+        "description": "NPU/CUDA graph capture 阶段崩溃（FlagGems kernel 在 graph 模式下不兼容）",
+    },
     # 通用 CUDA error
     {
         "pattern": re.compile(
@@ -114,28 +134,53 @@ CRASH_PATTERNS = [
 ]
 
 # 从 stack trace / 错误信息中提取算子名的模式
-OP_EXTRACT_PATTERNS = [
+# 前几个模式标记为"高置信度"——匹配到 flag_gems 路径时即使不在 known_ops 中也信任
+OP_EXTRACT_PATTERNS_TRUSTED = [
     # flag_gems.ops.softmax / flag_gems/ops/softmax.py
     re.compile(r"flag_gems[./]ops[./](\w+)"),
     # flag_gems.runtime.backend ... op_name
     re.compile(r"flag_gems.*?(?:backend|runtime).*?[/.](\w+)\.py"),
-    # triton kernel: xxx_kernel / xxx_jit
-    re.compile(r"triton.*?(\w+?)(?:_kernel|_jit)"),
-    # vllm_fl.ops.oot.xxx
-    re.compile(r"vllm_fl[./]ops[./](?:oot[./])?(\w+)"),
-    # "Error in operator: xxx" / "failed op: xxx"
-    re.compile(r"(?:operator|op|算子)[:\s]+['\"]?(\w+)['\"]?", re.IGNORECASE),
     # File "xxx/flag_gems/xxx/softmax.py"
     re.compile(r'File\s+"[^"]*flag_gems[^"]*?/(\w+)\.py"'),
+    # vllm_fl.ops.oot.xxx
+    re.compile(r"vllm_fl[./]ops[./](?:oot[./])?(\w+)"),
+]
+
+OP_EXTRACT_PATTERNS_HEURISTIC = [
+    # triton kernel: xxx_kernel / xxx_jit
+    re.compile(r"triton.*?(\w+?)(?:_kernel|_jit)"),
+    # "Error in operator: xxx" / "failed op: xxx"
+    re.compile(r"(?:operator|op|算子)[:\s]+['\"]?(\w+)['\"]?", re.IGNORECASE),
     # Triton 内联代码中的 FlagGems 函数调用: xxx_func_tensor_scalar / xxx_func
     re.compile(r"(\w+?)_func(?:_tensor_scalar|_scalar_tensor|_tensor_tensor)?\s*\("),
 ]
+
+# 合并列表保持向后兼容
+OP_EXTRACT_PATTERNS = OP_EXTRACT_PATTERNS_TRUSTED + OP_EXTRACT_PATTERNS_HEURISTIC
+
+# 从 flag_gems 路径中提取时需要排除的非算子文件名
+_FLAGGEMS_NON_OPS = {"__init__", "__pycache__", "utils", "runtime", "backend",
+                     "device_info", "config", "testing", "conftest", "setup"}
 
 
 def extract_ops_from_text(text: str, known_ops: set) -> List[str]:
     """从一段文本中提取所有可能的算子名"""
     found = set()
-    for pattern in OP_EXTRACT_PATTERNS:
+    # 高置信度模式：flag_gems 路径中的文件名直接信任为算子名
+    for pattern in OP_EXTRACT_PATTERNS_TRUSTED:
+        for match in pattern.finditer(text):
+            op_name = match.group(1).lower().strip("_")
+            op_raw = match.group(1)
+            if op_name in _FLAGGEMS_NON_OPS:
+                continue
+            # 信任 flag_gems 路径中的名字，即使不在 known_ops 中
+            if op_name in known_ops or op_raw in known_ops:
+                found.add(op_name if op_name in known_ops else op_raw)
+            elif len(op_name) > 2:
+                found.add(op_raw.lower().rstrip("_") if op_raw.endswith("_") else op_name)
+
+    # 启发式模式：需要在 known_ops 中才信任
+    for pattern in OP_EXTRACT_PATTERNS_HEURISTIC:
         for match in pattern.finditer(text):
             op_name = match.group(1).lower().strip("_")
             if op_name in known_ops:
@@ -143,8 +188,6 @@ def extract_ops_from_text(text: str, known_ops: set) -> List[str]:
             op_raw = match.group(1)
             if op_raw in known_ops:
                 found.add(op_raw)
-            # fallback: xxx_func_tensor_scalar 等 FlagGems 特征模式，即使不在 known_ops 中也提取
-            # 仅限带 _tensor_scalar/_scalar_tensor/_tensor_tensor 后缀的匹配，避免 compile_func 等误报
             if "_func" in match.re.pattern and op_name and len(op_name) > 2:
                 full_match = match.group(0)
                 if any(s in full_match for s in ("_tensor_scalar", "_scalar_tensor", "_tensor_tensor")):
@@ -268,6 +311,32 @@ def analyze_crash_log(log_path: str, ops_file: Optional[str] = None) -> Dict[str
                             "error_message": stripped.strip()[:200],
                         })
 
+    # AICore/graph_capture 特殊处理：如果检测到硬件异常但未定位到具体算子，
+    # 扫描崩溃点之前的 FlagGems kernel 编译/加载记录，推断可能的问题算子
+    has_hw_error = any(e["error_type"] in ("aicore_error", "graph_capture_error") for e in evidence)
+    if has_hw_error and not crashed_ops:
+        # 找到第一个硬件错误的行号
+        hw_error_line = None
+        for e in evidence:
+            if e["error_type"] in ("aicore_error", "graph_capture_error"):
+                hw_error_line = e["line_start"]
+                break
+        if hw_error_line:
+            # 向前扫描最近 200 行，查找 FlagGems 算子编译/加载痕迹
+            scan_start = max(0, hw_error_line - 200)
+            scan_region = "\n".join(log_lines[scan_start:hw_error_line])
+            nearby_ops = extract_ops_from_text(scan_region, known_ops)
+            if nearby_ops:
+                crashed_ops.update(nearby_ops)
+                evidence.append({
+                    "ops": nearby_ops,
+                    "line_start": scan_start + 1,
+                    "line_end": hw_error_line,
+                    "error_type": "inferred_from_context",
+                    "error_description": "从 AICore 崩溃前的上下文推断的可能问题算子",
+                    "error_message": f"硬件异常前 {hw_error_line - scan_start} 行内发现的 FlagGems 算子",
+                })
+
     return {
         "log_path": log_path,
         "log_lines": len(log_lines),
@@ -281,10 +350,20 @@ def analyze_crash_log(log_path: str, ops_file: Optional[str] = None) -> Dict[str
 def _crash_suggestion(crashed_ops: set, evidence: list) -> str:
     """根据崩溃分析结果给出建议"""
     if not crashed_ops and not evidence:
-        return "未从日志中识别出明确的算子问题，建议人工检查日志"
+        return "未从日志中识别出明确的算子问题，但禁用算子仍是最高优先解——必须人工从日志 traceback 中定位问题算子并禁用"
     if not crashed_ops and evidence:
-        return "检测到错误但无法定位到具体算子，建议查看 evidence 中的错误行"
+        has_hw = any(e["error_type"] in ("aicore_error", "graph_capture_error") for e in evidence)
+        if has_hw:
+            return ("检测到 AICore/graph capture 异常但工具无法自动定位算子。"
+                    "必须人工从日志中定位：1) 查看崩溃前最后编译的 Triton kernel 名；"
+                    "2) 查看 graph capture 前最后注册的算子；"
+                    "3) 逐步禁用最近一轮新启用的算子组排查。"
+                    "只有穷尽算子定位手段后仍无法定位，才可尝试 --enforce-eager 作为最后手段")
+        return "检测到错误但无法自动定位算子，必须人工从 evidence 中的错误行定位问题算子并禁用"
+    has_inferred = any(e["error_type"] == "inferred_from_context" for e in evidence)
     ops_str = ", ".join(sorted(crashed_ops))
+    if has_inferred:
+        return f"从崩溃上下文推断的可能问题算子（非确定性）: {ops_str}，建议逐个禁用验证"
     return f"建议禁用以下算子后重启: {ops_str}"
 
 
