@@ -346,6 +346,15 @@ else
     echo "  ⚠ 宿主机未设置任何 token 环境变量，跳过 .env 写入"
 fi
 
+# 4.55. 写入代理配置到容器（供容器内脚本自动切换代理）
+if [ -n "${FLAGOS_PROXY_LIST:-}" ]; then
+    echo "[4.55/6] 写入代理配置到容器..."
+    echo "${FLAGOS_PROXY_LIST}" | tr ',' '\n' | docker exec -i "${CONTAINER}" \
+        bash -c "cat > /flagos-workspace/.proxy && chmod 600 /flagos-workspace/.proxy"
+    PROXY_COUNT=$(echo "${FLAGOS_PROXY_LIST}" | tr ',' '\n' | wc -l)
+    echo "  ✓ /flagos-workspace/.proxy 已写入 (${PROXY_COUNT} 个代理)"
+fi
+
 # 4.6. 预装评测依赖（避免评测阶段首次 pip install 浪费 2-3 分钟）
 echo "[4.6/6] 预装评测依赖..."
 docker exec "${CONTAINER}" bash -c "PATH=/opt/conda/bin:\$PATH pip install evalscope pyyaml requests -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>&1 | tail -3" && \

@@ -51,6 +51,31 @@ class PublishStage(BaseStage):
         super().__init__(config)
         self.env_info: Optional[EnvironmentInfo] = None
 
+    def _get_proxy_list(self) -> List[str]:
+        """从环境变量获取代理列表"""
+        proxy_str = os.environ.get("FLAGOS_PROXY_LIST", "")
+        if proxy_str:
+            return [p.strip() for p in proxy_str.split(",") if p.strip()]
+        current = os.environ.get("https_proxy") or os.environ.get("http_proxy", "")
+        return [current] if current else []
+
+    def _with_proxy_fallback(self, operation_name: str, func, *args, **kwargs) -> bool:
+        """执行操作，失败时切换代理重试"""
+        proxies = self._get_proxy_list()
+        if not proxies:
+            return func(*args, **kwargs)
+
+        for i, proxy in enumerate(proxies):
+            os.environ["http_proxy"] = proxy
+            os.environ["https_proxy"] = proxy
+            result = func(*args, **kwargs)
+            if result:
+                return True
+            if i < len(proxies) - 1:
+                next_proxy = proxies[i + 1]
+                print(f"  ⚠ [{operation_name}] 代理 {proxy} 失败，切换到 {next_proxy}")
+        return False
+
     @property
     def name(self) -> str:
         return "发布阶段"
@@ -90,9 +115,9 @@ class PublishStage(BaseStage):
             else:
                 self.skip_step("镜像打 tag", "配置跳过")
 
-            # 2. 推送到 Harbor
+            # 2. 推送到 Harbor（支持代理切换重试）
             if publish_config.push_harbor:
-                success = self._push_to_harbor()
+                success = self._with_proxy_fallback("Harbor push", self._push_to_harbor)
                 if not success:
                     harbor_failed = True
                     print("  ⚠ Harbor 推送失败，继续执行后续步骤（README 生成、数据回传）")
@@ -125,7 +150,7 @@ class PublishStage(BaseStage):
             else:
                 self.skip_step("更新 ModelScope README", "无步骤8仓库信息或无 README")
         elif publish_config.publish_modelscope:
-            success = self._publish_to_modelscope(readme_path)
+            success = self._with_proxy_fallback("ModelScope", self._publish_to_modelscope, readme_path)
             if not success:
                 ms_failed = True
                 print("  ⚠ ModelScope 发布失败，继续执行 HuggingFace 上传")
@@ -147,7 +172,7 @@ class PublishStage(BaseStage):
             else:
                 self.skip_step("更新 HuggingFace README", "无步骤8仓库信息或无 README")
         elif publish_config.publish_huggingface:
-            success = self._publish_to_huggingface(readme_path)
+            success = self._with_proxy_fallback("HuggingFace", self._publish_to_huggingface, readme_path)
             if not success:
                 hf_failed = True
                 print("  ⚠ HuggingFace 发布失败")
@@ -414,7 +439,7 @@ class PublishStage(BaseStage):
             success, stdout, stderr = self.run_command(
                 cmd=cmd,
                 step_name="Harbor 登录",
-                timeout=30,
+                timeout=60,
             )
             if not success:
                 print(f"  x Harbor 登录失败，请检查 HARBOR_USER / HARBOR_PASSWORD")

@@ -145,15 +145,27 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 | 仓库可见性 | qualified=true 公开 / 不合格私有 | 由 workflow 状态自动判定 |
 | 容器内模型搜索路径 | `/data,/models,/root,/home,/workspace,/mnt,/opt` | 不询问 |
 | 容器内模型下载目录 | 镜像模式：下载到已挂载的 `${CONTAINER_MODEL_PATH}`；容器模式：优先已挂载宿主机卷路径 | 镜像模式下模型权重保证落在宿主机 |
-| 镜像模式容器名冲突 | 追加时间戳后缀 `_MMDD_HHMM` 创建新容器，禁止复用已有容器 | 不询问 |
+| 镜像模式容器名冲突 | 追加时间戳后缀 `_MMDD_HHMM` 创建新容器 | 禁止复用已有容器 |
+| 精度调优触发 | `accuracy_ok=false` 且 `env_type≠native` 时自动触发 | 不询问 |
+| 性能调优触发 | `performance_ok=false` 且 `env_type≠native` 时自动触发 | 不询问 |
+| V3 验证 benchmark | quick 模式 | 不询问策略 |
+| Plugin 流程触发 | `workflow.qualified=true` 后自动进入步骤 9-13 | 不询问是否安装 plugin |
+| Plugin 安装失败 | 写 issue 到 `flagos-ai/vllm-plugin-FL` → 停止任务 | 不尝试恢复 |
+| Plugin 服务崩溃 | 写 issue 到 `flagos-ai/vllm-plugin-FL` → 停止任务 | 不切回非 plugin 模式 |
+| Plugin issue 路由 | 步骤 9-13 所有 issue → `flagos-ai/vllm-plugin-FL` | 非 FlagGems 仓库 |
+| Plugin 镜像命名 | 原 tag 追加 `-plugin` 后缀 | 自动生成 |
+| Plugin 算子集 | 复用主流程已达标的算子集（含步骤 5/7 禁用列表） | 不重新调优 |
+| 网络代理切换 | 从 `FLAGOS_PROXY_LIST` 逐个尝试 | 网络操作失败时自动切换代理重试，全部失败才终止 |
+| 容器内代理传递 | `docker exec -e http_proxy=<proxy> -e https_proxy=<proxy>` | 所有需要外网的 docker exec 命令必须传入代理 |
 
 ---
 
 ## 用户交互规则
 
-**1-13 全自动执行，零交互。** 网络失败自动尝试备选镜像源，全部失败则终止任务，不询问用户。
+**1-13 全自动执行，零交互。** 网络失败自动切换代理重试，全部代理失败则终止任务，不询问用户。
 
 凭证均通过环境变量提供：`HARBOR_USER`/`HARBOR_PASSWORD`、`MODELSCOPE_TOKEN`、`HF_TOKEN`、`GITHUB_TOKEN`。
+代理通过 `--proxy` 参数或环境变量 `http_proxy`/`https_proxy` 提供。
 
 ---
 
@@ -278,6 +290,15 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 ## 网络问题处理策略
 
+### 代理切换机制
+
+流程启动时通过 `--proxy` 参数传入代理列表（逗号分隔），自动检测选出最佳代理。运行中网络操作失败时，从 `FLAGOS_PROXY_LIST` 逐个切换代理重试，全部失败才终止。
+
+- 宿主机代理：通过环境变量 `http_proxy`/`https_proxy` 生效（docker push、modelscope/hf 上传）
+- 容器内代理：通过 `docker exec -e http_proxy=<proxy> -e https_proxy=<proxy>` 传入
+- 容器内代理列表文件：`/flagos-workspace/.proxy`（每行一个代理地址）
+- 所有需要外网的 `docker exec` 命令必须传入代理环境变量
+
 ### pip install 失败
 
 按以下顺序自动尝试镜像源，**不询问用户**：
@@ -288,7 +309,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 ### 其他网络操作失败
 
-第一次失败且错误包含网络关键词 → 自动重试一次。重试仍失败 → 终止任务。
+第一次失败且错误包含网络关键词 → 切换代理重试。所有代理均失败 → 终止任务。
 
 ---
 
@@ -322,7 +343,8 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 ### 流程约束
 
-18. **流程不可中途终止**。精度/性能不达标不是终止理由，标记 `ok=false` 继续下一步，最终走到步骤8（私有发布）。唯一允许终止：Claude API 本身不可用。**例外**：步骤3 FlagGems 启动崩溃（算子诊断重试仍失败或非算子原因），设 `workflow.service_ok=false` → 提交 issue 后跳过步骤4-7，直接到步骤8（私有发布）
+18. **流程不可中途终止**。精度/性能不达标不是终止理由，标记 `ok=false` 继续下一步，最终走到步骤8（私有发布）。唯一允许终止：Claude API 本身不可用。**例外**：步骤3 FlagGems 崩溃且算子诊断重试连续 2 轮确认无任何可归因算子的新错误（工具 + 人工日志分析均无结果），设 `workflow.service_ok=false` → 提交 issue 后跳过步骤4-7，直接到步骤8（私有发布）。崩溃诊断不限轮次——每轮能定位到新问题算子就继续禁用并重试。`diagnose_ops.py` 返回空不等于"无新算子"，必须自行从日志中分析
+18a. **启动崩溃第一原则：禁用算子是最高优先解**。步骤3 遇到任何形式的崩溃（AICore 异常、Triton 编译错误、graph capture 失败、RuntimeError 等），必须首先定位并禁用具体算子。在穷尽所有算子定位手段（diagnose_ops.py + 人工日志分析 + traceback 中 flag_gems 路径 + 崩溃前编译的 kernel 名）之前，**严禁**尝试 enforce-eager、切 native、或判定不可恢复。enforce-eager 仅作为"已禁用所有可疑算子后仍崩溃"时的最后辅助手段，不是替代算子排查的捷径
 19. **精度评测和性能测试严禁同时进行**，必须等一个完全结束后再启动另一个。整体串行：4 → 5 → 6 → 7
 20. **禁止添加 SKILL.md 未记录的 vLLM/sglang 启动参数**，遇到启动问题应分析日志找根因
 21. **V1 和 V2 精度评测必须使用完全相同的参数**。包括 max_tokens、题目数量、评测脚本版本，禁止任何一方使用不同配置

@@ -40,10 +40,6 @@
       "Bash(curl -s https://*)",
       "Bash(curl -X POST *)",
       "Bash(curl -X GET *)",
-      "Bash(curl -v *)",
-      "Bash(curl --connect-timeout *)",
-      "Bash(git ls-remote *)",
-      "Bash(ping *)",
 
       "Bash(mkdir -p /data/flagos-workspace/*)",
       "Bash(mkdir -p /data/flagos-logs/*)",
@@ -104,25 +100,7 @@
       "Bash(python3)",
       "Bash(python3 prompts/stream_filter.py *)",
       "WebSearch",
-      "Read(//tmp/**)",
-
-      "Read",
-      "Edit",
-      "Write",
-      "Glob",
-      "Grep",
-      "NotebookEdit",
-      "WebFetch",
-      "Agent",
-      "Skill",
-      "EnterPlanMode",
-      "ExitPlanMode",
-      "AskUserQuestion",
-      "TaskCreate",
-      "TaskUpdate",
-      "TaskList",
-      "TaskGet",
-      "TodoWrite"
+      "Read(//tmp/**)"
     ]
   }
 }

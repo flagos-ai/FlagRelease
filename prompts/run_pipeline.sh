@@ -2,14 +2,14 @@
 # FlagOS 全自动迁移流程 — 一键启动脚本（V1+V2+V3 算子调优）
 #
 # 用法:
-#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose]
+#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...]
 #
 # 自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址
 # 模型路径：仅需模型名，自动搜索宿主机路径；未找到则容器内自动下载。也可通过 --model-path 显式指定
 #
 # 示例:
 #   bash prompts/run_pipeline.sh qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass
-#   bash prompts/run_pipeline.sh harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass
+#   bash prompts/run_pipeline.sh harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --proxy http://10.1.12.192:80
 #   bash prompts/run_pipeline.sh harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --model-path /data/models/Qwen3-8B
 #
 # 向后兼容（已弃用）:
@@ -57,6 +57,7 @@ fi
 IMAGE_MODE=false
 MODEL_PATH=""
 FILTER_FLAGS=""
+PROXY_LIST=""
 
 if [[ "${1:-}" == "--image" ]]; then
     # 向后兼容：旧 --image 格式
@@ -89,19 +90,19 @@ if [[ "${1:-}" == "--image" ]]; then
             FILTER_FLAGS="--verbose"
         fi
     else
-        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose]"
+        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--proxy proxy1,proxy2,...]"
         exit 1
     fi
 else
     # 统一格式：7 个位置参数
     if [ $# -lt 7 ]; then
-        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose]"
+        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...]"
         echo ""
         echo "自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址"
         echo ""
         echo "示例:"
         echo "  $0 qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass"
-        echo "  $0 harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass"
+        echo "  $0 harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --proxy http://10.1.12.192:80"
         echo "  $0 harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --model-path /data/models/Qwen3-8B"
         echo "  加 --verbose 显示全量终端输出（调试用）"
         exit 1
@@ -115,12 +116,11 @@ else
     export HARBOR_USER="$6"
     export HARBOR_PASSWORD="$7"
     shift 7
-    while [ $# -gt 0 ]; do
+    # 解析可选参数
+    while [[ $# -gt 0 ]]; do
         case "$1" in
-            --verbose)
-                FILTER_FLAGS="--verbose"
-                shift
-                ;;
+            --verbose) FILTER_FLAGS="--verbose"; shift ;;
+            --proxy) PROXY_LIST="$2"; shift 2 ;;
             --model-path)
                 if [ -z "${2:-}" ]; then
                     echo "错误: --model-path 需要指定路径"
@@ -225,6 +225,40 @@ echo "  权限: --permission-mode auto + settings.local.json allowlist (89 rules
 echo "============================================================"
 echo ""
 
+# ========== 网络预检 ==========
+# 如果未传 --proxy，从环境变量读取
+if [ -z "$PROXY_LIST" ]; then
+    CURRENT_PROXY="${https_proxy:-${http_proxy:-}}"
+    [ -n "$CURRENT_PROXY" ] && PROXY_LIST="$CURRENT_PROXY"
+fi
+
+if [ -n "$PROXY_LIST" ]; then
+    echo "[pre-flight] 网络连通性检测..."
+    NETWORK_JSON=$(bash prompts/check_network.sh --proxies "${PROXY_LIST}" --json 2>/dev/null) || NETWORK_JSON=""
+    if [ -n "$NETWORK_JSON" ]; then
+        BEST_PROXY=$(echo "$NETWORK_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['recommended_proxy'])" 2>/dev/null) || BEST_PROXY=""
+        ALL_FAILED=$(echo "$NETWORK_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['all_failed'])" 2>/dev/null) || ALL_FAILED="false"
+
+        if [ "$ALL_FAILED" = "true" ] || [ "$ALL_FAILED" = "True" ]; then
+            echo "  ✗ 所有代理均不可用，流程终止"
+            echo "  代理列表: ${PROXY_LIST}"
+            exit 1
+        fi
+
+        if [ -n "$BEST_PROXY" ] && [ "$BEST_PROXY" != "direct" ]; then
+            export http_proxy="$BEST_PROXY"
+            export https_proxy="$BEST_PROXY"
+            echo "  ✓ 推荐代理: ${BEST_PROXY}"
+        elif [ "$BEST_PROXY" = "direct" ]; then
+            echo "  ✓ 直连可用，无需代理"
+        fi
+    else
+        echo "  ⚠ 网络检测脚本执行失败，使用默认代理继续"
+    fi
+    export FLAGOS_PROXY_LIST="${PROXY_LIST}"
+    echo ""
+fi
+
 # ========== 构造 Prompt ==========
 # 公共部分：tokens、执行模式、进度输出要求、步骤2-6
 COMMON_TOKENS=$(cat <<TOKENS_EOF
@@ -235,6 +269,12 @@ COMMON_TOKENS=$(cat <<TOKENS_EOF
   GITHUB_TOKEN=${GITHUB_TOKEN}
   HARBOR_USER=${HARBOR_USER}
   HARBOR_PASSWORD=${HARBOR_PASSWORD}
+
+**网络代理**（已通过 setup_workspace.sh 写入容器 /flagos-workspace/.proxy）：
+  FLAGOS_PROXY_LIST=${FLAGOS_PROXY_LIST:-}
+  FLAGOS_ACTIVE_PROXY=${http_proxy:-}
+  所有需要外网的 docker exec 命令必须传入代理: docker exec -e http_proxy=${http_proxy:-} -e https_proxy=${https_proxy:-} ...
+  网络操作失败时，从 FLAGOS_PROXY_LIST 中逐个切换代理重试
 TOKENS_EOF
 )
 
@@ -651,7 +691,6 @@ claude -p "${PROMPT_SEG1}" \
     --verbose \
     --debug-file "${DEBUG_FILE}.seg1" \
     --max-turns 100 \
-    < /dev/null \
     2>&1 | tee "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" > "${FULL_LOG}") \
          | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --cost-file "${LOG_DIR}/seg1_cost.txt" --durations-file "${LOG_DIR}/seg1_durations.json" ${FILTER_FLAGS} || true
@@ -982,7 +1021,6 @@ claude -p "${PROMPT_SEG2}" \
     --verbose \
     --debug-file "${DEBUG_FILE}.seg2" \
     --max-turns 250 \
-    < /dev/null \
     2>&1 | tee -a "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
          | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 4 --cost-file "${LOG_DIR}/seg2_cost.txt" --load-durations "${LOG_DIR}/seg1_durations.json" --durations-file "${LOG_DIR}/seg2_durations.json" ${FILTER_FLAGS} || true
@@ -1027,7 +1065,6 @@ if [ "$SEG2_STATUS" != "complete" ]; then
         --verbose \
         --debug-file "${DEBUG_FILE}.seg2_retry" \
         --max-turns 250 \
-        < /dev/null \
         2>&1 | tee -a "${LOG_FILE}" \
              | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
              | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 4 --cost-file "${LOG_DIR}/seg2_retry_cost.txt" --load-durations "${LOG_DIR}/seg1_durations.json" --durations-file "${LOG_DIR}/seg2_durations.json" ${FILTER_FLAGS} || true
@@ -1176,11 +1213,6 @@ ${SEG3_CTX_SUMMARY}
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
 （如果 mount_mode=mounted，也可：cp /data/flagos-workspace/${MODEL}/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml）
 发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
-
-**Token 传递规则**：发布工具 main.py 自动从容器内 /flagos-workspace/.env 读取所有 token（HARBOR_USER、HARBOR_PASSWORD、MODELSCOPE_TOKEN、HF_TOKEN）。
-**禁止**在命令前添加内联环境变量（如 \`HARBOR_USER=xxx python3 ...\`），会被权限系统拦截。
-正确用法: python3 skills/flagos-release/tools/main.py --from-context <path>
-
 完成后通过 docker cp 回传最终 context：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
 
@@ -1229,7 +1261,6 @@ claude -p "${PROMPT_SEG3}" \
     --verbose \
     --debug-file "${DEBUG_FILE}.seg3" \
     --max-turns 100 \
-    < /dev/null \
     2>&1 | tee -a "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
          | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 8 --cost-file "${LOG_DIR}/seg3_cost.txt" --load-durations "${LOG_DIR}/seg2_durations.json" --durations-file "${LOG_DIR}/seg3_durations.json" ${FILTER_FLAGS} || true
@@ -1422,11 +1453,6 @@ ${SEG4_CTX_SUMMARY}
 发布前同步 context 到宿主机：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
 发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --plugin-mode
-
-**Token 传递规则**：发布工具 main.py 自动从容器内 /flagos-workspace/.env 读取所有 token（HARBOR_USER、HARBOR_PASSWORD、MODELSCOPE_TOKEN、HF_TOKEN）。
-**禁止**在命令前添加内联环境变量（如 \`HARBOR_USER=xxx python3 ...\`），会被权限系统拦截。
-正确用法: python3 skills/flagos-release/tools/main.py --from-context <path> --plugin-mode
-
 完成后通过 docker cp 回传最终 context：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
 
@@ -1472,7 +1498,6 @@ print('no')
         --verbose \
         --debug-file "${DEBUG_FILE}.seg4" \
         --max-turns 200 \
-        < /dev/null \
         2>&1 | tee -a "${LOG_FILE}" \
              | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
              | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 9 --cost-file "${LOG_DIR}/seg4_cost.txt" --load-durations "${LOG_DIR}/seg3_durations.json" --durations-file "${LOG_DIR}/seg4_durations.json" ${FILTER_FLAGS} || true
