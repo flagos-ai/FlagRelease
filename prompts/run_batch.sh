@@ -104,7 +104,29 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
     [[ -z "$TARGET" || "$TARGET" == \#* ]] && continue
     ((IDX++))
 
-    # 断点续跑
+    # 归档旧数据（与 run_pipeline.sh 逻辑一致：先归档再判断断点）
+    HOST_BASE="/data/flagos-workspace/${MODEL}"
+    if [ -d "${HOST_BASE}" ]; then
+        TASK_HAS_HISTORY=0
+        for d in results traces logs config reports eval; do
+            if [ -d "${HOST_BASE}/${d}" ] && [ "$(ls -A "${HOST_BASE}/${d}" 2>/dev/null)" ]; then
+                TASK_HAS_HISTORY=1; break
+            fi
+        done
+        if [ "${TASK_HAS_HISTORY}" = "1" ]; then
+            ARCHIVE_TS="$(date +%Y%m%d_%H%M%S)"
+            TASK_ARCHIVE="${HOST_BASE}/archive/${ARCHIVE_TS}"
+            mkdir -p "${TASK_ARCHIVE}"
+            for d in results traces logs config reports eval; do
+                if [ -d "${HOST_BASE}/${d}" ] && [ "$(ls -A "${HOST_BASE}/${d}" 2>/dev/null)" ]; then
+                    mv "${HOST_BASE}/${d}" "${TASK_ARCHIVE}/${d}"
+                fi
+            done
+            echo "  归档旧数据: ${TASK_ARCHIVE}/"
+        fi
+    fi
+
+    # 断点续跑（归档后 context_snapshot.yaml 已不存在，仅对未归档的中间状态生效）
     if ! $FORCE && is_task_done "$MODEL"; then
         echo "[${IDX}/${TOTAL}] ${MODEL} — 已完成，跳过"
         ((SKIP++))
