@@ -212,18 +212,29 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     config.publish.modelscope_token = os.environ.get('MODELSCOPE_TOKEN', '')
     config.publish.huggingface_token = os.environ.get('HF_TOKEN', '')
 
-    if (not config.publish.modelscope_token or not config.publish.huggingface_token) and config.container_name:
-        for env_var, attr in [('MODELSCOPE_TOKEN', 'modelscope_token'), ('HF_TOKEN', 'huggingface_token')]:
-            if not getattr(config.publish, attr):
-                try:
-                    result = subprocess.run(
-                        ["docker", "exec", config.container_name, "printenv", env_var],
-                        capture_output=True, text=True, timeout=5
-                    )
-                    if result.returncode == 0 and result.stdout.strip():
-                        setattr(config.publish, attr, result.stdout.strip())
-                except Exception:
-                    pass
+    if (not config.publish.modelscope_token or not config.publish.huggingface_token
+            or not os.environ.get('HARBOR_USER') or not os.environ.get('HARBOR_PASSWORD')) and config.container_name:
+        try:
+            result = subprocess.run(
+                ["docker", "exec", config.container_name, "cat", "/flagos-workspace/.env"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                env_map = {}
+                for line in result.stdout.strip().splitlines():
+                    if '=' in line and not line.startswith('#'):
+                        k, v = line.split('=', 1)
+                        env_map[k.strip()] = v.strip()
+                if not config.publish.modelscope_token:
+                    config.publish.modelscope_token = env_map.get('MODELSCOPE_TOKEN', '')
+                if not config.publish.huggingface_token:
+                    config.publish.huggingface_token = env_map.get('HF_TOKEN', '')
+                if not os.environ.get('HARBOR_USER') and 'HARBOR_USER' in env_map:
+                    os.environ['HARBOR_USER'] = env_map['HARBOR_USER']
+                if not os.environ.get('HARBOR_PASSWORD') and 'HARBOR_PASSWORD' in env_map:
+                    os.environ['HARBOR_PASSWORD'] = env_map['HARBOR_PASSWORD']
+        except Exception:
+            pass
 
     # 有 token 则启用对应平台上传
     config.publish.publish_modelscope = bool(config.publish.modelscope_token)
