@@ -651,6 +651,7 @@ claude -p "${PROMPT_SEG1}" \
     --verbose \
     --debug-file "${DEBUG_FILE}.seg1" \
     --max-turns 100 \
+    < /dev/null \
     2>&1 | tee "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" > "${FULL_LOG}") \
          | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --cost-file "${LOG_DIR}/seg1_cost.txt" --durations-file "${LOG_DIR}/seg1_durations.json" ${FILTER_FLAGS} || true
@@ -981,6 +982,7 @@ claude -p "${PROMPT_SEG2}" \
     --verbose \
     --debug-file "${DEBUG_FILE}.seg2" \
     --max-turns 250 \
+    < /dev/null \
     2>&1 | tee -a "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
          | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 4 --cost-file "${LOG_DIR}/seg2_cost.txt" --load-durations "${LOG_DIR}/seg1_durations.json" --durations-file "${LOG_DIR}/seg2_durations.json" ${FILTER_FLAGS} || true
@@ -1025,6 +1027,7 @@ if [ "$SEG2_STATUS" != "complete" ]; then
         --verbose \
         --debug-file "${DEBUG_FILE}.seg2_retry" \
         --max-turns 250 \
+        < /dev/null \
         2>&1 | tee -a "${LOG_FILE}" \
              | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
              | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 4 --cost-file "${LOG_DIR}/seg2_retry_cost.txt" --load-durations "${LOG_DIR}/seg1_durations.json" --durations-file "${LOG_DIR}/seg2_durations.json" ${FILTER_FLAGS} || true
@@ -1173,6 +1176,11 @@ ${SEG3_CTX_SUMMARY}
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
 （如果 mount_mode=mounted，也可：cp /data/flagos-workspace/${MODEL}/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml）
 发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
+
+**Token 传递规则**：发布工具 main.py 自动从容器内 /flagos-workspace/.env 读取所有 token（HARBOR_USER、HARBOR_PASSWORD、MODELSCOPE_TOKEN、HF_TOKEN）。
+**禁止**在命令前添加内联环境变量（如 \`HARBOR_USER=xxx python3 ...\`），会被权限系统拦截。
+正确用法: python3 skills/flagos-release/tools/main.py --from-context <path>
+
 完成后通过 docker cp 回传最终 context：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
 
@@ -1221,6 +1229,7 @@ claude -p "${PROMPT_SEG3}" \
     --verbose \
     --debug-file "${DEBUG_FILE}.seg3" \
     --max-turns 100 \
+    < /dev/null \
     2>&1 | tee -a "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
          | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 8 --cost-file "${LOG_DIR}/seg3_cost.txt" --load-durations "${LOG_DIR}/seg2_durations.json" --durations-file "${LOG_DIR}/seg3_durations.json" ${FILTER_FLAGS} || true
@@ -1413,6 +1422,11 @@ ${SEG4_CTX_SUMMARY}
 发布前同步 context 到宿主机：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
 发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --plugin-mode
+
+**Token 传递规则**：发布工具 main.py 自动从容器内 /flagos-workspace/.env 读取所有 token（HARBOR_USER、HARBOR_PASSWORD、MODELSCOPE_TOKEN、HF_TOKEN）。
+**禁止**在命令前添加内联环境变量（如 \`HARBOR_USER=xxx python3 ...\`），会被权限系统拦截。
+正确用法: python3 skills/flagos-release/tools/main.py --from-context <path> --plugin-mode
+
 完成后通过 docker cp 回传最终 context：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
 
@@ -1458,6 +1472,7 @@ print('no')
         --verbose \
         --debug-file "${DEBUG_FILE}.seg4" \
         --max-turns 200 \
+        < /dev/null \
         2>&1 | tee -a "${LOG_FILE}" \
              | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
              | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 9 --cost-file "${LOG_DIR}/seg4_cost.txt" --load-durations "${LOG_DIR}/seg3_durations.json" --durations-file "${LOG_DIR}/seg4_durations.json" ${FILTER_FLAGS} || true
