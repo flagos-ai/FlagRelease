@@ -669,16 +669,15 @@ def generate_text_report(data: ReportData) -> str:
         if not (isinstance(release, dict) and release):
             lines.append("")
             lines.append("发布信息:")
-        visibility = "公开" if qualified else "私有"
-        lines.append(f"  发布方式: {visibility}")
+        lines.append(f"  发布方式: 私有")
         lines.append(f"  qualified: {qualified}")
 
     # 主流程结论
     lines.append("")
     if qualified is True:
-        lines.append("结论: qualified (公开发布)")
+        lines.append("结论: 达标 (qualified)")
     elif qualified is False:
-        lines.append("结论: 不合格 (私有发布)")
+        lines.append("结论: 未达标")
     elif not data.workflow_complete:
         lines.append("结论: 流程未完成，暂无最终判定")
     else:
@@ -1206,8 +1205,8 @@ def generate_summary(data: ReportData) -> str:
     qualified = wf.get("qualified")
     release = data.get("release", default={}) or {}
     if qualified is not None:
-        visibility = "公开" if qualified else "私有"
-        lines.append(f"发布: qualified={qualified} ({visibility})")
+        status = "达标" if qualified else "未达标"
+        lines.append(f"发布: qualified={qualified} ({status}, 私有)")
         if release.get("harbor_image"):
             lines.append(f"  Harbor: {release['harbor_image']}")
         if release.get("modelscope_url"):

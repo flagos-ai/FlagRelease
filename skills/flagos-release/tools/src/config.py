@@ -182,16 +182,9 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     # ---- publish ----
     config.publish.tag_image = True
     config.publish.push_harbor = True
-    # 从 workflow.qualified 判定发布可见性：qualified=true → 公开，否则私有
+    # 统一私有发布，达标与否在总结报告中注明
     workflow = ctx.get('workflow', {})
-    qualified = workflow.get('qualified', False)
-    if not qualified:
-        svc_ok = workflow.get('service_ok', False)
-        acc_ok = workflow.get('accuracy_ok', False)
-        perf_ok = workflow.get('performance_ok', False)
-        if svc_ok and acc_ok and perf_ok:
-            qualified = True
-    config.publish.private = not qualified
+    config.publish.private = True
     config.config_persisted = workflow.get('config_persisted', False)
     config.publish.upload_weights = True
     # 优先用 local_path（宿主机路径），其次 container_path（容器内路径）

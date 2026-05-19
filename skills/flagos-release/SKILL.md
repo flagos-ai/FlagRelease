@@ -125,29 +125,25 @@ python main.py --from-context /flagos-workspace/shared/context.yaml --only-readm
 
 ### 步骤 0 — 发布条件检查
 
-在执行任何发布操作之前，从 `context.yaml` 读取 `workflow.qualified` 判定发布可见性：
+从 `context.yaml` 读取 `workflow.qualified` 状态，用于报告生成。所有发布统一为私有。
 
 ```
 读取 workflow.qualified (= service_ok AND accuracy_ok AND performance_ok)
 
-if qualified == true:
-    publish.private = false   → 公开发布
-    日志: "全流程达标（服务✓ 精度✓ 性能✓），公开发布"
-else:
-    publish.private = true    → 私有发布
-    日志: "不合格，私有发布。原因: <不达标项>"
-    不达标项示例:
-      - service_ok=false: "服务启动失败"
-      - accuracy_ok=false: "精度不达标（3 轮优化后仍超阈值）"
-      - performance_ok=false: "性能不达标（3 轮优化后仍 <80%）"
+publish.private = true   → 统一私有发布
+日志: "发布模式: 私有"
+
+qualified 状态记录到报告中:
+  - qualified=true: "达标"
+  - qualified=false: "未达标"
 ```
 
-**判定细节**：
+**qualified 判定细节**（仅用于报告展示）：
 - `service_ok = true`：V1 和 V2 都能正常启动
 - `accuracy_ok = true`：V2精度下降 ≤5%，或经 ≤3 轮优化后达标
 - `performance_ok = true`：V2/V1 每个并发级别 ≥80%，或经 elimination 逐删优化后达标
 - 提交了 issue 但优化成功 → 仍算合格（qualified=true）
-- `skip_reason` 非空时（如 `"service_startup_failed"`）→ 跳过了3/4，直接私有发布
+- `skip_reason` 非空时（如 `"service_startup_failed"`）→ 跳过了3/4，qualified=false
 
 ### 发布（Publish）
 
@@ -213,7 +209,7 @@ output/
 # 完成条件
 
 **发布条件检查**：
-- `workflow.qualified` 已读取并决定发布可见性（公开/私有）
+- `workflow.qualified` 已读取并记录到报告中
 
 **镜像发布**：
 - 环境信息已自动检测

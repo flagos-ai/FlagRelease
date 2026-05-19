@@ -72,7 +72,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 5 精度算子调优       → [条件] env_type≠native 且 V2精度下降>5% 时分组排查定位问题算子（最多3轮）
 6 性能评测           → V1/V2 4k1k benchmark 对比 → 异常自动 issue
 7 性能算子调优       → [条件] env_type≠native 且 ratio<80% 时逐个禁用直到达标
-8 自动发布           → 打包 + 上传 → qualified 公开 / 不合格私有
+8 自动发布           → 打包 + 上传（统一私有发布，报告注明是否达标）
 --- Plugin 验证流程（仅 qualified=true 时触发）---
 9  Plugin 安装       → install_plugin.py 安装 vllm-plugin-FL → 失败则 issue + 停止
 10 Plugin 启服务     → 以达标算子集 + plugin 模式启动 → 崩溃则 issue + 停止
@@ -142,7 +142,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 | GPU 设备 | 启动前检测空闲 GPU（显存占用 <5%），仅使用空闲 GPU | 不询问使用哪些卡 |
 | Harbor 仓库地址 | `harbor.baai.ac.cn/flagrelease-public` | 无需用户提供 |
 | 模型仓库命名 | `FlagRelease/{Model}-{vendor}-FlagOS` | 自动生成 |
-| 仓库可见性 | qualified=true 公开 / 不合格私有 | 由 workflow 状态自动判定 |
+| 仓库可见性 | 全部私有发布 | 报告中注明是否达标 |
 | 容器内模型搜索路径 | `/data,/models,/root,/home,/workspace,/mnt,/opt` | 不询问 |
 | 容器内模型下载目录 | 镜像模式：下载到已挂载的 `${CONTAINER_MODEL_PATH}`；容器模式：优先已挂载宿主机卷路径 | 镜像模式下模型权重保证落在宿主机 |
 | 镜像模式容器名冲突 | 追加时间戳后缀 `_MMDD_HHMM` 创建新容器 | 禁止复用已有容器 |
