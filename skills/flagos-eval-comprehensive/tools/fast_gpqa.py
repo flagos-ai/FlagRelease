@@ -587,6 +587,7 @@ def run_fast_gpqa(
 
     # Step 9: 输出报告
     report = {
+        '_producer': 'fast_gpqa.py',
         'model': model_name,
         'benchmark': 'gpqa_diamond',
         'mode': mode_str,
@@ -707,8 +708,24 @@ def main():
     dataset_hub = config.get('dataset_hub', 'modelscope')
 
     if not model_name:
-        print("[ERROR] 必须指定模型名称: --model-name 或 config.yaml 中 model.name")
-        sys.exit(1)
+        # 自动从 /v1/models 探测
+        try:
+            base = api_base.rstrip('/')
+            if base.endswith('/v1'):
+                base_url = base
+            else:
+                base_url = base + '/v1'
+            resp = requests.get(f"{base_url}/models", timeout=10)
+            resp.raise_for_status()
+            models = resp.json().get('data', [])
+            if models:
+                model_name = models[0].get('id', '')
+                print(f"[INFO] 自动探测模型名: {model_name}")
+        except Exception:
+            pass
+        if not model_name:
+            print("[ERROR] 必须指定模型名称: --model-name 或 config.yaml 中 model.name")
+            sys.exit(1)
     if not api_base:
         print("[ERROR] 必须指定 API 地址: --api-base 或 config.yaml 中 model.api_base")
         sys.exit(1)
