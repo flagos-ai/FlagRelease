@@ -245,12 +245,15 @@ docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\
 docker exec $CONTAINER bash -c "bash /flagos-workspace/scripts/wait_for_service.sh --port $PORT --model-name '$MODEL_NAME' --timeout 120 --max-timeout 900 --log-path /flagos-workspace/logs/startup_native.log --mode native"
 ```
 
-3. 运行评测：
+3. 运行评测（通过 eval_wrapper.py 包装，自动监控服务状态和评测进度）：
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
-    PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --config fast_gpqa_config.yaml \
-    --output /flagos-workspace/results/gpqa_native.json"
+    PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py \
+    --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --output /flagos-workspace/results/gpqa_native.json' \
+    --service-log /flagos-workspace/logs/startup_native.log \
+    --stall-timeout 300 --max-timeout 3600"
 ```
+eval_wrapper.py 会阻塞直到评测完成或异常，无需轮询。退出码 0 表示成功（最后一行为结果 JSON），非 0 表示异常（输出 [EVAL_ERROR] 错误摘要）。
 
 4. **V1 评测完成后，必须停止服务释放 GPU**：
 ```bash
@@ -269,8 +272,10 @@ sleep 5
 2. 运行评测：
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
-    PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --config fast_gpqa_config.yaml \
-    --output /flagos-workspace/results/gpqa_flagos.json"
+    PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py \
+    --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --output /flagos-workspace/results/gpqa_flagos.json' \
+    --service-log /flagos-workspace/logs/startup_flagos.log \
+    --stall-timeout 300 --max-timeout 3600"
 ```
 
 **强制规则**：V1 和 V2 必须使用相同的 GPU 配置（`CUDA_VISIBLE_DEVICES` 和 `TP_SIZE`），复用 context.yaml 中首次启动时写入的值，禁止重新检测 GPU。
@@ -282,6 +287,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
 
 ```
 tools/
+├── eval_wrapper.py            ← 评测包装器（启动+监控，阻塞等待，无需轮询）
 ├── fast_gpqa.py              ← 快速 GPQA Diamond 评测（主入口）
 ├── fast_gpqa_config.yaml     ← 快速评测配置模板
 ├── accuracy_compare.py       ← V1 vs V2 精度对比与阈值判定

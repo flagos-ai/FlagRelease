@@ -894,26 +894,46 @@ def main():
 
             # --- 流程结束 ---
             elif etype == "result":
-                # 将所有未完成的 running 步骤标记为 done（兜底）
-                for i, s in enumerate(progress.states):
-                    if s == 'running':
-                        progress.states[i] = 'done'
+                # 检测是否有步骤仍在 running（说明会话异常中断）
+                interrupted_steps = [i for i, s in enumerate(progress.states) if s == 'running']
+                # 检测本段是否有步骤被 Claude 显式完成（start_time 非 None 且状态为终态）
+                has_new_completion = any(
+                    s in ('done', 'fail', 'skip') and progress.step_start_times[i] is not None
+                    for i, s in enumerate(progress.states)
+                )
+
+                if interrupted_steps:
+                    # 异常中断：标记为 fail，不伪装成 done
+                    for i in interrupted_steps:
+                        progress.states[i] = 'fail'
                         if progress.step_start_times[i]:
                             progress.step_durations[i] = time.time() - progress.step_start_times[i]
-                progress.render()
-
-                # 输出各步骤耗时汇总
-                progress.render_summary()
-
-                # 保存耗时数据供后续段加载
-                progress.save_durations(args.durations_file)
+                    progress.render()
 
                 dur = event.get("duration_ms", 0) or 0
                 cost = event.get("total_cost_usd", 0) or 0
                 minutes = int(dur // 60000)
                 seconds = int((dur % 60000) // 1000)
-                out(f"\n{'━' * 50}", colors)
-                out(f"完成 — 耗时 {minutes}m {seconds}s, 费用 ${cost:.2f}", colors)
+
+                if interrupted_steps:
+                    step_names = [PIPELINE_STEPS[i][1] for i in interrupted_steps]
+                    out(f"\n{'━' * 50}", colors)
+                    out(f"⚠ 会话中断 — 耗时 {minutes}m {seconds}s, 费用 ${cost:.2f}", colors)
+                    out(f"  未完成步骤: {', '.join(step_names)}", colors)
+                    out(f"  pipeline 将自动重试", colors)
+                elif not has_new_completion:
+                    out(f"\n{'━' * 50}", colors)
+                    out(f"⚠ 会话退出（无实质进展） — 耗时 {minutes}m {seconds}s, 费用 ${cost:.2f}", colors)
+                else:
+                    progress.render_summary()
+                    out(f"\n{'━' * 50}", colors)
+                    out(f"完成 — 耗时 {minutes}m {seconds}s, 费用 ${cost:.2f}", colors)
+
+                # 保存耗时数据：中断步骤不保存耗时，避免污染后续段
+                if interrupted_steps:
+                    for i in interrupted_steps:
+                        progress.step_durations[i] = None
+                progress.save_durations(args.durations_file)
                 logger.write_footer(duration_ms=dur, cost_usd=cost)
 
                 # 写入费用文件供 run_pipeline.sh 汇总
