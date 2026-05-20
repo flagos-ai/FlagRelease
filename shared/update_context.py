@@ -113,7 +113,33 @@ def update_ledger(ctx, step_id, status, notes=None, fail_reason=None, skip_reaso
     return False
 
 
+def convert_field_value_pairs(argv):
+    """将 --field KEY --value VAL 对转换为 --set KEY=VAL 格式（兼容 Claude 生成的变体语法）"""
+    converted = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--field" and i + 1 < len(argv):
+            field_key = argv[i + 1]
+            i += 2
+            if i < len(argv) and argv[i] == "--value" and i + 1 < len(argv):
+                field_val = argv[i + 1]
+                converted.append("--set")
+                converted.append(f"{field_key}={field_val}")
+                i += 2
+            else:
+                converted.append("--set")
+                converted.append(f"{field_key}=true")
+        else:
+            converted.append(argv[i])
+            i += 1
+    return converted
+
+
 def main():
+    raw_args = sys.argv[1:]
+    if "--field" in raw_args:
+        raw_args = convert_field_value_pairs(raw_args)
+
     parser = argparse.ArgumentParser(description="context.yaml 结构化更新工具")
     parser.add_argument("--context", default=DEFAULT_CONTEXT, help="context.yaml 路径")
     parser.add_argument("--set", action="append", dest="sets", metavar="KEY=VALUE",
@@ -131,7 +157,7 @@ def main():
     parser.add_argument("--set-timing", action="append", dest="timings", metavar="KEY=VALUE",
                         help="设置 timing 字段（如 steps.container_preparation=171）")
     parser.add_argument("--json", action="store_true", help="JSON 格式输出")
-    args = parser.parse_args()
+    args = parser.parse_args(raw_args)
 
     if not any([args.sets, args.json_sets, args.appends, args.ledger_step, args.timings]):
         parser.print_help()

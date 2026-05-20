@@ -5,6 +5,7 @@
 import json
 import os
 import time
+import base64
 import subprocess
 from typing import Optional, List, Tuple
 from pathlib import Path
@@ -1199,7 +1200,8 @@ api.upload_folder(repo_id=model_id, folder_path='{container_upload_dir}')
 print(f'已发布到 ModelScope: {{model_id}}')
 """
         token_env = f"MODELSCOPE_API_TOKEN={token} " if token else ""
-        cmd = f"{token_env}PATH=/opt/conda/bin:$PATH python3 -c {repr(sdk_script)}"
+        script_b64 = base64.b64encode(sdk_script.encode()).decode()
+        cmd = f"{token_env}PATH=/opt/conda/bin:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
         result, stdout, stderr = self.run_command(
             cmd=cmd, step_name="SDK 上传到 ModelScope",
             timeout=UPLOAD_TIMEOUT, in_container=True
@@ -1233,16 +1235,16 @@ print(f'已发布到 ModelScope: {{model_id}}')
 
     def _get_container_upload_dir(self) -> str:
         """获取容器内上传目录路径（模型权重所在路径）"""
-        # 优先使用 serve_start_cmd 中解析的容器内模型路径
+        # 优先使用 weights_dir（从 context.yaml model.local_path/container_path 读取的实际路径）
+        weights_dir = self.config.publish.weights_dir
+        if weights_dir:
+            return weights_dir
+        # 回退：从 serve_start_cmd 中解析
         serve_cmd = self.config.model_info.serve_start_cmd or ""
         if "vllm serve " in serve_cmd:
             parts = serve_cmd.split("vllm serve ", 1)[1].split()
             if parts:
                 return parts[0].strip().rstrip("\\")
-        # weights_dir 可能是宿主机路径，但在容器模式下通常与容器内路径一致
-        weights_dir = self.config.publish.weights_dir
-        if weights_dir:
-            return weights_dir
         return "/data/models"
 
     def _docker_cp_readme_to_container(self, readme_path: Optional[str], container_upload_dir: str) -> bool:
@@ -1390,7 +1392,8 @@ api.upload_folder(repo_id=repo_id, folder_path='{container_upload_dir}')
 print(f'已发布到 HuggingFace: {{repo_id}}')
 """
         token_env = f"HF_TOKEN={token} " if token else ""
-        cmd = f"{token_env}HF_ENDPOINT={hf_endpoint} PATH=/opt/conda/bin:$PATH python3 -c {repr(sdk_script)}"
+        script_b64 = base64.b64encode(sdk_script.encode()).decode()
+        cmd = f"{token_env}HF_ENDPOINT={hf_endpoint} PATH=/opt/conda/bin:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
         result, stdout, stderr = self.run_command(
             cmd=cmd, step_name="SDK 上传到 HuggingFace",
             timeout=UPLOAD_TIMEOUT, in_container=True
