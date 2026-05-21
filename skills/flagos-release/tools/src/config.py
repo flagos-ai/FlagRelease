@@ -141,29 +141,57 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     # serve_start_cmd
     svc = ctx.get('service', {})
     runtime = ctx.get('runtime', {})
-    port = svc.get('port', 8000)
-    tp = runtime.get('tp_size') or 1
-    # 用户下载路径 /data/{flagrelease_name}，与 README 模板的 modelscope download 一致
+    commands = ctx.get('commands', {})
     model_short = model.get('name', '').split('/')[-1] if model.get('name') else ''
     flagrelease_name = f"{model_short}-FlagOS" if model_short else ''
-    model_path = f"/data/{flagrelease_name}" if flagrelease_name else model.get('container_path', '')
-    max_model_len = svc.get('max_model_len', '')
-    cmd_parts = [f"vllm serve {model_path}",
-                 f"--host 0.0.0.0 --port {port}",
-                 f"--tensor-parallel-size {tp}"]
-    if max_model_len:
-        cmd_parts.append(f"--max-model-len {max_model_len}")
-    config.model_info.serve_start_cmd = " \\\n".join(cmd_parts)
+    user_model_path = f"/data/{flagrelease_name}" if flagrelease_name else model.get('container_path', '')
 
-    # container_run_cmd (通用模板，IMAGE 占位符由 auto_fill_config 替换)
-    config.model_info.container_run_cmd = (
-        "docker run --init --detach --net=host --uts=host --ipc=host "
-        "--security-opt=seccomp=unconfined --privileged=true "
-        "--ulimit stack=67108864 --ulimit memlock=-1 "
-        "--ulimit nofile=1048576:1048576 --shm-size=32G "
-        "-v /data:/data --gpus all --name flagos {{IMAGE}} sleep infinity\n"
-        "docker exec -it flagos /bin/bash"
-    )
+    if commands.get('serve_start'):
+        import re
+        serve_cmd = commands['serve_start']
+        # 替换模型路径为用户下载路径
+        container_path = model.get('container_path', '')
+        if container_path and user_model_path:
+            serve_cmd = serve_cmd.replace(container_path, user_model_path)
+        # 替换端口为默认 8000
+        serve_cmd = re.sub(r'--port\s+\d+', '--port 8000', serve_cmd)
+        config.model_info.serve_start_cmd = serve_cmd
+    else:
+        port = svc.get('port', 8000)
+        tp = runtime.get('tp_size') or 1
+        max_model_len = svc.get('max_model_len', '')
+        cmd_parts = [f"vllm serve {user_model_path}",
+                     f"--host 0.0.0.0 --port 8000",
+                     f"--tensor-parallel-size {tp}",
+                     f"--served-model-name {model_short}" if model_short else None,
+                     "--trust-remote-code"]
+        if max_model_len:
+            cmd_parts.append(f"--max-model-len {max_model_len}")
+        config.model_info.serve_start_cmd = " \\\n".join(p for p in cmd_parts if p)
+
+    # container_run_cmd (优先从 context commands 读取实际命令)
+    if commands.get('container_run'):
+        import re
+        run_cmd = commands['container_run']
+        # 替换镜像为 {{IMAGE}} 占位符（镜像通常是最后一个非选项参数或可通过已知镜像名匹配）
+        image_name = ctx.get('image', {}).get('name', '')
+        if image_name:
+            run_cmd = run_cmd.replace(image_name, '{{IMAGE}}')
+        # 移除 workspace 挂载（-v ...:/flagos-workspace）
+        run_cmd = re.sub(r'\s*-v\s+\S+:/flagos-workspace', '', run_cmd)
+        # 替换模型挂载为简化的 -v /data:/data
+        container_path = model.get('container_path', '')
+        local_path = model.get('local_path', '')
+        if container_path and local_path:
+            run_cmd = re.sub(r'-v\s+\S+:' + re.escape(container_path), '-v /data:/data', run_cmd)
+        # 替换容器名为通用名
+        run_cmd = re.sub(r'--name[= ]\S+', '--name flagos', run_cmd)
+        config.model_info.container_run_cmd = run_cmd
+    else:
+        config.model_info.container_run_cmd = (
+            "docker run -itd --gpus=all --network=host "
+            "-v /data:/data --name flagos {{IMAGE}}"
+        )
 
     # ---- chip ----
     gpu = ctx.get('gpu', {})
@@ -468,12 +496,13 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
         )
 
     if not config.model_info.serve_infer_cmd:
-        config.model_info.serve_infer_cmd = '''curl http://localhost:8000/v1/chat/completions \\
+        infer_model_name = model_short or "flagOS"
+        config.model_info.serve_infer_cmd = f'''curl http://localhost:8000/v1/chat/completions \\
   -H "Content-Type: application/json" \\
-  -d '{
-    "model": "flagOS",
-    "messages": [{"role": "user", "content": "你好"}]
-  }' '''
+  -d '{{
+    "model": "{infer_model_name}",
+    "messages": [{{"role": "user", "content": "你好"}}]
+  }}' '''
 
     # ==================== 上传文件列表 ====================
     if not config.publish.upload_files:

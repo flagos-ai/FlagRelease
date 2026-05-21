@@ -353,6 +353,8 @@ if $IMAGE_MODE; then
    - 镜像模式下禁止复用已有容器，必须 docker run 新建${DOWNLOAD_NOTE}
    - bash skills/flagos-container-preparation/tools/setup_workspace.sh \${CONTAINER} ${MODEL} --skip-archive 部署工具脚本（宿主机已归档，跳过容器内归档避免移走正在写入的日志）
    - 写入容器内 /flagos-workspace/shared/context.yaml（entry.type=new_container, image.name=${IMAGE}）+ traces/01_container_preparation.json
+   - **记录实际 docker run 命令到 context**：步骤1完成后，将实际成功执行的完整 docker run 命令写入 context.yaml：
+     docker exec \${CONTAINER} bash -c "PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set 'commands.container_run=<实际执行的完整 docker run 命令>'"
 STEP1_EOF
     )
     PROMPT_SEG1="镜像: ${IMAGE}，模型名: ${MODEL}
@@ -393,6 +395,8 @@ ${STEP1}
 
 **步骤3 FlagGems 崩溃后流程控制**：
 - FlagGems 模式启动成功（推理验证通过）→ **必须设置 workflow.service_ok=true**（通过 update_context.py --set workflow.service_ok=true）
+- **记录实际 vllm serve 命令到 context**：服务启动成功后，将实际执行的 vllm serve 命令（不含 docker exec 包装、不含 PATH= 前缀、不含环境变量）写入 context.yaml：
+  docker exec \${CONTAINER} bash -c "PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set 'commands.serve_start=<实际执行的 vllm serve 完整命令>'"
 - 算子诊断重试全部失败或 crashed_ops 为空 → 提交 issue 后设置 workflow.service_ok=false
 - 非算子原因（非硬件）导致的 FlagGems 崩溃 → 同样设置 workflow.service_ok=false
 - service_ok=false 时：用 USE_FLAGGEMS=0 启动 native 服务验证环境可用性，但不影响 service_ok 判定
@@ -421,6 +425,8 @@ else
      - 从输出 JSON 中提取 final_container_path 和 final_host_path，记录到容器内 /flagos-workspace/shared/context.yaml 的 model.container_path 和 model.local_path
    - bash skills/flagos-container-preparation/tools/setup_workspace.sh ${CONTAINER} ${MODEL} --skip-archive 部署工具脚本（宿主机已归档，跳过容器内归档避免移走正在写入的日志）
    - 写入容器内 /flagos-workspace/shared/context.yaml + traces/01_container_preparation.json
+   - **记录容器启动命令到 context**：容器模式下，通过 docker inspect 获取原始 docker run 命令并写入 context.yaml：
+     docker exec ${CONTAINER} bash -c "PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set 'commands.container_run=<从 docker inspect 还原的 docker run 命令>'"
 STEP1_EOF
     )
     PROMPT_SEG1="容器名: ${CONTAINER}，模型名: ${MODEL}
@@ -461,6 +467,8 @@ ${STEP1}
 
 **步骤3 FlagGems 崩溃后流程控制**：
 - FlagGems 模式启动成功（推理验证通过）→ **必须设置 workflow.service_ok=true**（通过 update_context.py --set workflow.service_ok=true）
+- **记录实际 vllm serve 命令到 context**：服务启动成功后，将实际执行的 vllm serve 命令（不含 docker exec 包装、不含 PATH= 前缀、不含环境变量）写入 context.yaml：
+  docker exec \${CONTAINER} bash -c "PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set 'commands.serve_start=<实际执行的 vllm serve 完整命令>'"
 - 算子诊断重试全部失败或 crashed_ops 为空 → 提交 issue 后设置 workflow.service_ok=false
 - 非算子原因（非硬件）导致的 FlagGems 崩溃 → 同样设置 workflow.service_ok=false
 - service_ok=false 时：用 USE_FLAGGEMS=0 启动 native 服务验证环境可用性，但不影响 service_ok 判定
