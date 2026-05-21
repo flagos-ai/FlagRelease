@@ -429,6 +429,9 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
         tag = datetime.datetime.now().strftime("%Y%m%d%H%M")
         config.chip.date_tag = f"{tag}-plugin" if config.plugin_image_mode else tag
 
+    if not config.publish.image_target_tag and config.publish.existing_harbor_image:
+        config.publish.image_target_tag = config.publish.existing_harbor_image
+
     if not config.publish.image_target_tag and config.chip.auto_generate_tag:
         from .chip_detector import ChipVersionInfo, generate_image_tag as _generate_tag
         chip_info = ChipVersionInfo(
@@ -496,11 +499,11 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
         )
 
     if not config.model_info.serve_infer_cmd:
-        infer_model_name = model_short or "flagOS"
+        _model_short = config.model_info.source_of_model_weights.split('/')[-1] if config.model_info.source_of_model_weights else "flagOS"
         config.model_info.serve_infer_cmd = f'''curl http://localhost:8000/v1/chat/completions \\
   -H "Content-Type: application/json" \\
   -d '{{
-    "model": "{infer_model_name}",
+    "model": "{_model_short}",
     "messages": [{{"role": "user", "content": "你好"}}]
   }}' '''
 
