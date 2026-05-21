@@ -2,7 +2,7 @@
 # FlagOS 批量串行迁移 — 逐个调用 run_pipeline.sh
 #
 # 用法:
-#   bash prompts/run_batch.sh <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--proxy proxy1,proxy2,...]
+#   bash prompts/run_batch.sh <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--proxy proxy1,proxy2,...] [--timeout seconds]
 #
 # 任务列表文件格式（每行一个任务，| 分隔）:
 #   # 注释行和空行自动跳过
@@ -36,12 +36,14 @@ STOP_ON_ERROR=false
 FORCE=false
 VERBOSE_FLAG=""
 PROXY_FLAG=""
+MODEL_TIMEOUT=36000  # 单模型超时（秒），默认 10 小时
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --stop-on-error) STOP_ON_ERROR=true; shift ;;
         --force) FORCE=true; shift ;;
         --verbose) VERBOSE_FLAG="--verbose"; shift ;;
         --proxy) PROXY_FLAG="--proxy $2"; shift 2 ;;
+        --timeout) MODEL_TIMEOUT="$2"; shift 2 ;;
         *) echo "未知参数: $1"; exit 1 ;;
     esac
 done
@@ -89,6 +91,7 @@ echo "  FlagOS 批量串行迁移"
 echo "============================================================"
 echo "  任务列表: ${TASK_FILE}"
 echo "  任务总数: ${TOTAL}"
+echo "  单模型超时: $(( MODEL_TIMEOUT / 3600 ))h$(( (MODEL_TIMEOUT % 3600) / 60 ))m"
 echo "  断点续跑: $( $FORCE && echo '关闭 (--force)' || echo '开启' )"
 echo "  失败策略: $( $STOP_ON_ERROR && echo '失败即停' || echo '继续下一个' )"
 echo "  开始时间: $(date '+%Y-%m-%d %H:%M:%S')"
@@ -143,14 +146,24 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
     echo "╚══════════════════════════════════════════════════════════════╝"
 
     TASK_START_TS=$(date +%s)
-    bash prompts/run_pipeline.sh "$TARGET" "$MODEL" "$MS_TOKEN" "$HF_TOKEN" "$GH_TOKEN" "$HARBOR_USER" "$HARBOR_PASS" $VERBOSE_FLAG $PROXY_FLAG < /dev/null
+    timeout --signal=TERM --kill-after=60 "$MODEL_TIMEOUT" \
+        bash prompts/run_pipeline.sh "$TARGET" "$MODEL" "$MS_TOKEN" "$HF_TOKEN" "$GH_TOKEN" "$HARBOR_USER" "$HARBOR_PASS" $VERBOSE_FLAG $PROXY_FLAG < /dev/null
     EXIT_CODE=$?
     TASK_ELAPSED=$(( $(date +%s) - TASK_START_TS ))
     TASK_MIN=$(( TASK_ELAPSED / 60 ))
     TASK_SEC=$(( TASK_ELAPSED % 60 ))
     ELAPSED_FMT="${TASK_MIN}m${TASK_SEC}s"
 
-    if [ $EXIT_CODE -eq 0 ]; then
+    if [ $EXIT_CODE -eq 124 ]; then
+        ((FAIL++))
+        RESULTS+=("⏱ | ${MODEL} | ${TARGET} | ${ELAPSED_FMT} | timeout")
+        echo "[${IDX}/${TOTAL}] ${MODEL} — ⏱ 超时 (>${MODEL_TIMEOUT}s, ${ELAPSED_FMT})"
+        if $STOP_ON_ERROR; then
+            echo ""
+            echo "⚠ --stop-on-error 已启用，终止批量执行"
+            break
+        fi
+    elif [ $EXIT_CODE -eq 0 ]; then
         ((PASS++))
         RESULTS+=("✓ | ${MODEL} | ${TARGET} | ${ELAPSED_FMT} | exit=0")
         echo "[${IDX}/${TOTAL}] ${MODEL} — ✓ 完成 (${ELAPSED_FMT})"
