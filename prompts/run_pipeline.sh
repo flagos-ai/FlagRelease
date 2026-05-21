@@ -396,7 +396,7 @@ ${STEP1}
 **步骤3 FlagGems 崩溃后流程控制**：
 - FlagGems 模式启动成功（推理验证通过）→ **必须设置 workflow.service_ok=true**（通过 update_context.py --set workflow.service_ok=true）
 - **记录实际 vllm serve 命令到 context**：服务启动成功后，将实际执行的 vllm serve 命令（不含 docker exec 包装、不含 PATH= 前缀、不含环境变量）写入 context.yaml：
-  docker exec \${CONTAINER} bash -c "PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set 'commands.serve_start=<实际执行的 vllm serve 完整命令>'"
+  docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set 'commands.serve_start=<实际执行的 vllm serve 完整命令>'\"
 - 算子诊断重试全部失败或 crashed_ops 为空 → 提交 issue 后设置 workflow.service_ok=false
 - 非算子原因（非硬件）导致的 FlagGems 崩溃 → 同样设置 workflow.service_ok=false
 - service_ok=false 时：用 USE_FLAGGEMS=0 启动 native 服务验证环境可用性，但不影响 service_ok 判定
@@ -468,7 +468,7 @@ ${STEP1}
 **步骤3 FlagGems 崩溃后流程控制**：
 - FlagGems 模式启动成功（推理验证通过）→ **必须设置 workflow.service_ok=true**（通过 update_context.py --set workflow.service_ok=true）
 - **记录实际 vllm serve 命令到 context**：服务启动成功后，将实际执行的 vllm serve 命令（不含 docker exec 包装、不含 PATH= 前缀、不含环境变量）写入 context.yaml：
-  docker exec \${CONTAINER} bash -c "PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set 'commands.serve_start=<实际执行的 vllm serve 完整命令>'"
+  docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set 'commands.serve_start=<实际执行的 vllm serve 完整命令>'\"
 - 算子诊断重试全部失败或 crashed_ops 为空 → 提交 issue 后设置 workflow.service_ok=false
 - 非算子原因（非硬件）导致的 FlagGems 崩溃 → 同样设置 workflow.service_ok=false
 - service_ok=false 时：用 USE_FLAGGEMS=0 启动 native 服务验证环境可用性，但不影响 service_ok 判定
