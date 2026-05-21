@@ -227,6 +227,11 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
 
 步骤4（快速精度评测）使用模块 A + C + D，模块 B（远端 flageval 正式评测）为独立工作，不参与主流程。
 
+> **⚠ 硬性规则：每次启动/重启 vLLM 服务前，必须先 `docker restart $CONTAINER && sleep 5`**
+>
+> 旧 vLLM 进程占用 GPU 显存和端口，不 restart 容器会导致新服务启动失败。
+> 推荐使用 `safe_restart_service.sh --container $CONTAINER --mode flagos` 一条命令完成。
+
 **步骤4 — V1 (Native) 精度**（始终执行）：
 
 1. 停止现有服务，释放 GPU 显存：
@@ -677,13 +682,25 @@ grep -iE "(CUDA|OOM|RuntimeError|operator.*not.*support|process.*exit)" \
 - 根据错误信息确定需要排除的算子
 - 执行替换并记录
 
-**第 4 步：重启服务**
+**第 4 步：重启服务（使用 safe_restart_service.sh）**
 
 ```bash
-docker restart $CONTAINER
-sleep 5
-# 重新启动服务（参考 flagos-service-startup）
+# 推荐：一条命令完成 restart + start + wait（宿主机执行）
+bash skills/flagos-service-startup/tools/safe_restart_service.sh \
+    --container $CONTAINER --mode flagos \
+    --log-name startup_round${ROUND}.log \
+    --model-name "$MODEL_NAME" --port $PORT \
+    --env "FLAGGEMS_CONTROL_MODE=only_enable"
 ```
+
+或手动三步（不推荐，容易遗漏）：
+```bash
+docker restart $CONTAINER && sleep 5
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH bash /flagos-workspace/scripts/start_service.sh --mode flagos > /flagos-workspace/logs/startup_round${ROUND}.log 2>&1"
+docker exec $CONTAINER bash -c "bash /flagos-workspace/scripts/wait_for_service.sh --port 8000 --model-name '$MODEL_NAME' --log-path /flagos-workspace/logs/startup_round${ROUND}.log --mode flagos"
+```
+
+> **禁止**：跳过 docker restart 直接启动新服务。
 
 **第 5 步：重新评测**
 

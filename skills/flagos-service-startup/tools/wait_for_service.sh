@@ -443,6 +443,8 @@ fi
 
 # 标记日志中是否观测到 service_ready 信号
 LOG_CONFIRMED_READY=false
+# 残留服务连续检测计数
+STALE_COUNT=0
 
 while [ "$ELAPSED" -lt "$EFFECTIVE_MAX" ]; do
 
@@ -547,13 +549,26 @@ except:
 
             # 残留服务检测：日志未确认 service_ready 时，端口响应视为可疑
             if [ "$LOG_CONFIRMED_READY" = false ] && [ "$DYNAMIC_MODE" = true ]; then
-                echo "[${ELAPSED}s] ⚠ 端口 ${PORT} 已响应但启动日志未确认 service_ready，疑似残留服务"
+                STALE_COUNT=$((STALE_COUNT + 1))
+                if [ "$STALE_COUNT" -ge 3 ]; then
+                    echo ""
+                    echo "=========================================="
+                    echo "✗ 检测到残留服务（端口 ${PORT} 响应但启动日志无 service_ready）"
+                    echo "=========================================="
+                    echo "  原因: 旧 vLLM 进程仍占用端口，新服务未能启动"
+                    echo "  修复: 先执行 docker restart \$CONTAINER && sleep 5，再重新启动服务"
+                    echo "  推荐: 使用 safe_restart_service.sh 一体化重启"
+                    echo "=========================================="
+                    echo ""
+                    echo "JSON_RESULT:"
+                    echo '{"success":false,"error":"stale_service","error_detail":"端口被残留服务占用，需要 docker restart 清理"}'
+                    exit 2
+                fi
+                echo "[${ELAPSED}s] ⚠ 端口 ${PORT} 已响应但启动日志未确认 service_ready，疑似残留服务 (${STALE_COUNT}/3)"
                 echo "  响应模型: ${MODEL_ID}"
                 echo "  等待日志确认或致命信号..."
                 sleep "$INTERVAL"
                 ELAPSED=$((ELAPSED + INTERVAL))
-                INTERVAL=$((INTERVAL * 2))
-                if [ "$INTERVAL" -gt "$MAX_INTERVAL" ]; then INTERVAL=$MAX_INTERVAL; fi
                 continue
             fi
 
@@ -633,8 +648,8 @@ print(json.dumps({
                     LAST_ACTIVITY_TIME=$NOW
                     SINCE_ACTIVITY=0
                 fi
-                # idle 或无法判定时用 120s 短超时快速发现真正卡死
-                EFFECTIVE_STALL_TIMEOUT=120
+                # idle 或无法判定时用 300s 超时（编译阶段耗时较长）
+                EFFECTIVE_STALL_TIMEOUT=300
                 ;;
         esac
 

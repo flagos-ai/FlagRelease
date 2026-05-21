@@ -1,0 +1,2 @@
+harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 | openbmb/MiniCPM4.1-8B
+harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 | tencent/Hunyuan-7B-Instruct

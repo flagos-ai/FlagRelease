@@ -364,6 +364,15 @@ ${STEP1}
 
 步骤2/3 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
 
+**步骤3 服务等待策略（硬性）**：
+- wait_for_service.sh 是阻塞脚本（最长运行 1800 秒），必须使用 Bash(timeout=600000) 前台执行（600000 毫秒 = 10 分钟）
+- **禁止**使用 TaskOutput 轮询，**禁止**每隔 N 秒手动 tail 日志检查状态
+- 脚本内部已实现日志监控、进度输出、早期失败检测，无需外部干预
+- 正确用法（一条命令，前台阻塞等待）：
+  docker exec \${CONTAINER} bash -c \"/flagos-workspace/scripts/wait_for_service.sh --port \$PORT --model-name '\$MODEL_NAME' --timeout 180 --max-timeout 1800 --log-path /flagos-workspace/logs/startup_default.log --mode default\"
+- 脚本退出码 0 = 服务就绪，非 0 = 失败（输出 JSON_RESULT 包含错误详情）
+- **注意**：Bash 工具的 timeout 参数单位是毫秒，不是秒。1800 秒 = 1800000 毫秒。设置过小会导致命令被转为后台任务
+
 **步骤3 FlagGems 启动崩溃算子诊断**：
 - FlagGems 模式启动崩溃时（不含超时），先备份崩溃日志再诊断：
   docker exec \${CONTAINER} bash -c \"cp /flagos-workspace/logs/startup_default.log /flagos-workspace/logs/startup_default_crashed.log 2>/dev/null; true\"
@@ -422,6 +431,15 @@ ${COMMON_PLAN_STEPS}
 ${STEP1}
 
 步骤2/3 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
+
+**步骤3 服务等待策略（硬性）**：
+- wait_for_service.sh 是阻塞脚本（最长运行 1800 秒），必须使用 Bash(timeout=600000) 前台执行（600000 毫秒 = 10 分钟）
+- **禁止**使用 TaskOutput 轮询，**禁止**每隔 N 秒手动 tail 日志检查状态
+- 脚本内部已实现日志监控、进度输出、早期失败检测，无需外部干预
+- 正确用法（一条命令，前台阻塞等待）：
+  docker exec \${CONTAINER} bash -c \"/flagos-workspace/scripts/wait_for_service.sh --port \$PORT --model-name '\$MODEL_NAME' --timeout 180 --max-timeout 1800 --log-path /flagos-workspace/logs/startup_default.log --mode default\"
+- 脚本退出码 0 = 服务就绪，非 0 = 失败（输出 JSON_RESULT 包含错误详情）
+- **注意**：Bash 工具的 timeout 参数单位是毫秒，不是秒。1800 秒 = 1800000 毫秒。设置过小会导致命令被转为后台任务
 
 **步骤3 FlagGems 启动崩溃算子诊断**：
 - FlagGems 模式启动崩溃时（不含超时），先备份崩溃日志再诊断：
@@ -904,6 +922,8 @@ else:
     if [ "${FALLBACK_CHECK}" = "True" ]; then
         echo "⚠ 兜底修正：服务实际运行中但 workflow.service_ok=false，自动修正为 true"
         SERVICE_OK="True"
+        # 同步修正到容器内 context.yaml（段2 Claude 会话读取容器内文件）
+        docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py --set workflow.service_ok=true --json" 2>/dev/null || true
     fi
 fi
 
@@ -1025,7 +1045,14 @@ GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
 - **绝对禁止**操作其他模型的容器（只允许操作 ${SEG_CTR}）
 - 步骤4精度评测包含 V1（native）和 V2（FlagGems）两轮，V1 完成后必须继续 V2，不得中断去做其他事情
 - 步骤4完成的标志是：V1 和 V2 结果都已写入 results/，且 ledger 04_quick_accuracy 状态更新为 success/failed
-- 步骤4完成后必须继续执行步骤5（如需）→步骤6→步骤7（如需），不得提前结束"
+- 步骤4完成后必须继续执行步骤5（如需）→步骤6→步骤7（如需），不得提前结束
+
+**服务重启硬性约束**：
+- 每次需要重启 vLLM 服务时（精度调优换算子、V1→V2 切换、任何服务重启场景），必须先 docker restart \$CONTAINER && sleep 5
+- 推荐使用 safe_restart_service.sh 一条命令完成重启（自动 restart + start + wait）
+- 禁止在不 restart 容器的情况下启动新的 vLLM 服务（旧进程会占用端口导致启动失败）
+- wait_for_service.sh 检测到残留服务会 exit 2 并提示需要 docker restart
+- **wait_for_service.sh 等待策略**：使用 Bash(timeout=600000) 前台执行，禁止 TaskOutput 轮询。Bash timeout 单位是毫秒，600000ms = 10 分钟"
 
 # native 场景追加硬性约束：只执行步骤4/6，跳过5/7
 if [ "${IS_NATIVE}" = "true" ]; then

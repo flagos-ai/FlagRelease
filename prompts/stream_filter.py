@@ -492,8 +492,11 @@ def _extract_ops_summary(cmd: str) -> str:
 def _detect_phase_banner(cmd: str) -> str:
     """检测命令是否对应关键阶段，返回标题（连续相同标题不重复）"""
     global _last_phase_banner
-    # 停止/检查命令不触发阶段标题
+    # 停止/检查/探测命令不触发阶段标题
     if any(p in cmd for p in ('pkill', 'kill -', 'pgrep', 'docker restart', 'docker stop')):
+        return ''
+    # 只是查看/grep/检查相关文件或进程，不是真正在运行评测/benchmark
+    if any(p in cmd for p in ('ps aux', 'grep ', 'cat ', 'head ', 'tail ', 'ls ', 'sed ', 'wc ')):
         return ''
     for pattern, banner in _PHASE_BANNERS:
         if pattern in cmd:
