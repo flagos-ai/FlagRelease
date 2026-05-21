@@ -55,6 +55,25 @@ def check_service_alive() -> bool:
     return False
 
 
+def check_service_healthy(api_base: str) -> bool:
+    """检查推理服务是否仍在正常响应（进程存活 + API 可达）"""
+    if not check_service_alive():
+        return False
+    import urllib.request
+    import urllib.error
+    base = api_base.rstrip("/")
+    if not base.endswith("/v1"):
+        base += "/v1"
+    try:
+        req = urllib.request.Request(f"{base}/models", headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            if resp.status == 200:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def scan_log_fatal(log_path: str, offset: int) -> tuple:
     """扫描日志文件新增内容，返回 (new_offset, fatal_info_or_None)"""
     if not log_path or not os.path.isfile(log_path):
@@ -197,6 +216,7 @@ def main():
     start_time = time.time()
     last_output_size = 0
     last_output_time = start_time
+    stall_extensions = 0
     service_dead_since = None
     grace_period = 60  # 前 60s 不检查服务（可能还在初始化）
 
@@ -229,17 +249,24 @@ def main():
             if current_size > last_output_size:
                 last_output_size = current_size
                 last_output_time = time.time()
+                stall_extensions = 0
             else:
                 stall_duration = time.time() - last_output_time
                 if stall_duration > stall_timeout:
-                    print(f"[WRAPPER] 评测输出停滞 ({int(stall_duration)}s)，疑似卡死，终止进程")
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                    time.sleep(3)
-                    if proc.poll() is None:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    proc.wait()
-                    emit_error("stall", f"评测输出停滞 {int(stall_duration)}s，进程已终止", get_tail(eval_log))
-                    return 1
+                    # 先检查服务是否仍在正常运行
+                    if check_service_healthy(api_base):
+                        stall_extensions += 1
+                        print(f"[WRAPPER] 输出停滞 {int(stall_duration)}s，但服务仍正常响应，延长等待 600s（第 {stall_extensions} 次延长）")
+                        last_output_time = time.time()
+                    else:
+                        print(f"[WRAPPER] 评测输出停滞 ({int(stall_duration)}s)，服务无响应，终止进程")
+                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                        time.sleep(3)
+                        if proc.poll() is None:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        proc.wait()
+                        emit_error("stall", f"评测输出停滞 {int(stall_duration)}s，服务无响应，进程已终止", get_tail(eval_log))
+                        return 1
 
             # 4. 服务日志致命信号
             if service_log and elapsed > grace_period:
