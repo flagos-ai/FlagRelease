@@ -1664,6 +1664,14 @@ SEG4_ELAPSED=0
 SEG4_MIN=0
 SEG4_SEC=0
 
+# 保存步骤8已推送的 Harbor 镜像地址（段4 plugin 流程可能污染容器，兜底发布需要回退到此镜像）
+SEG3_HARBOR_IMAGE=$(python3 -c "
+import yaml
+with open('${CTX_FILE}') as f:
+    ctx = yaml.safe_load(f)
+print(ctx.get('image', {}).get('registry_url', ''))
+" 2>/dev/null) || SEG3_HARBOR_IMAGE=""
+
 if [ "${QUALIFIED}" = "True" ]; then
     # 提取段4所需参数
     SEG4_CTX_SUMMARY=$(python3 -c "
@@ -1902,6 +1910,13 @@ try:
     if plugin_url:
         print('done')
         sys.exit(0)
+    # plugin 崩溃时，步骤8已推送的镜像仍然可用，不应重新 commit 被污染的容器
+    crash_stopped = ctx.get('plugin_workflow', {}).get('crash_stopped', False)
+    if crash_stopped:
+        reg_url = ctx.get('image', {}).get('registry_url', '') or '${SEG3_HARBOR_IMAGE}'
+        if reg_url:
+            print('done')
+            sys.exit(0)
     tag = ctx.get('image', {}).get('registry_url', '') or ctx.get('image', {}).get('harbor_tag', '')
     model_name = ctx.get('model', {}).get('name', '')
     # 简单校验：registry_url 非空，且包含当前模型关键词（排除其他模型的残留 tag）
@@ -1966,6 +1981,26 @@ with open('${CONTEXT_SNAP}', 'w') as f:
         fi
     else
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ context_snapshot.yaml 不存在，无法判断 Harbor 发布状态"
+    fi
+
+    # plugin 崩溃场景：确保 context_snapshot 中 registry_url 指向步骤8的干净镜像
+    if [ -n "${SEG3_HARBOR_IMAGE}" ] && [ -f "${CONTEXT_SNAP}" ]; then
+        CURRENT_REG_URL=$(python3 -c "
+import yaml
+with open('${CONTEXT_SNAP}') as f:
+    ctx = yaml.safe_load(f)
+print(ctx.get('image', {}).get('registry_url', ''))
+" 2>/dev/null) || CURRENT_REG_URL=""
+        if [ -z "${CURRENT_REG_URL}" ]; then
+            python3 -c "
+import yaml
+with open('${CONTEXT_SNAP}') as f:
+    ctx = yaml.safe_load(f) or {}
+ctx.setdefault('image', {})['registry_url'] = '${SEG3_HARBOR_IMAGE}'
+with open('${CONTEXT_SNAP}', 'w') as f:
+    yaml.dump(ctx, f, default_flow_style=False, allow_unicode=True)
+" 2>/dev/null && echo "  ✓ 恢复 image.registry_url = ${SEG3_HARBOR_IMAGE}（步骤8原始镜像）"
+        fi
     fi
 
     # ========== 兜底：ModelScope/HuggingFace 上传（如 Claude 未完成） ==========
