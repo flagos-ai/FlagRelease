@@ -431,10 +431,10 @@ def _resolve_disabled_ops(data: ReportData) -> tuple:
     optimized_ratio = None
     if data.op_config and isinstance(data.op_config, dict) and data.op_config.get("current_ratio"):
         r = data.op_config["current_ratio"]
-        optimized_ratio = r * 100 if r < 1 else r
+        optimized_ratio = r * 100 if r < 2 else r
     elif isinstance(optimization, dict) and optimization.get("current_ratio"):
         r = optimization["current_ratio"]
-        optimized_ratio = r * 100 if r < 1 else r
+        optimized_ratio = r * 100 if r < 2 else r
     elif data.get("perf", "optimized_ratio_pct", default=None):
         optimized_ratio = data.get("perf", "optimized_ratio_pct")
 
@@ -527,7 +527,7 @@ def generate_text_report(data: ReportData) -> str:
                 for i, entry in enumerate(search_log, 1):
                     disabled_op = entry.get("op", entry.get("disabled_op", entry.get("tested_op", "?")))
                     ratio = entry.get("ratio") or entry.get("min_ratio")
-                    if ratio is not None and ratio < 1:
+                    if ratio is not None and ratio < 2:
                         ratio = ratio * 100
                     passed = entry.get("passed", entry.get("met_target", False))
                     if not passed and ratio is not None:
@@ -619,10 +619,14 @@ def generate_text_report(data: ReportData) -> str:
     elif data.native_perf or data.flagos_perf:
         perf = data.get("perf", default={}) or {}
         min_ratio = perf.get("ratio_pct") if perf.get("ratio_pct") is not None else perf.get("min_ratio")
-        if min_ratio is not None:
+        optimized_ratio = perf.get("optimized_ratio_pct")
+        if min_ratio is not None or optimized_ratio is not None:
             lines.append("")
             lines.append("性能对比:")
-            lines.append(f"  V2/V1 min ratio: {min_ratio}%")
+            if min_ratio is not None:
+                lines.append(f"  V2/V1 min ratio: {min_ratio}%")
+            if optimized_ratio is not None:
+                lines.append(f"  V3/V1 optimized ratio: {optimized_ratio}%")
 
     # 流程耗时
     steps = data.ledger_steps()
@@ -841,7 +845,7 @@ def _build_operator_tuning_json(data: ReportData, wf: dict, eval_sec: dict) -> d
     for i, entry in enumerate(search_log, 1):
         disabled_op = entry.get("op", entry.get("disabled_op", entry.get("tested_op", "")))
         ratio = entry.get("ratio") or entry.get("min_ratio")
-        if ratio is not None and ratio < 1:
+        if ratio is not None and ratio < 2:
             ratio = ratio * 100
         passed = entry.get("passed", entry.get("met_target", False))
         if not passed and ratio is not None:
@@ -1002,6 +1006,7 @@ def generate_json_report(data: ReportData) -> dict:
         },
         "performance": {
             "min_ratio": perf.get("ratio_pct") if perf.get("ratio_pct") is not None else perf.get("min_ratio"),
+            "optimized_ratio": perf.get("optimized_ratio_pct"),
             "target_ratio": optimization.get("target_ratio", 80.0),
             "ok": wf.get("performance_ok"),
         },
@@ -1128,7 +1133,7 @@ def generate_summary(data: ReportData) -> str:
             for i, entry in enumerate(search_log, 1):
                 disabled_op = entry.get("op", entry.get("disabled_op", entry.get("tested_op", "?")))
                 ratio = entry.get("ratio") or entry.get("min_ratio")
-                if ratio is not None and ratio < 1:
+                if ratio is not None and ratio < 2:
                     ratio = ratio * 100
                 passed = entry.get("passed", entry.get("met_target", False))
                 if not passed and ratio is not None:
