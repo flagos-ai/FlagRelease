@@ -381,16 +381,16 @@ vllm serve ${MODEL_PATH} \
 
 ```bash
 # Default（不修改环境，原样启动）
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH vllm serve ... > /flagos-workspace/logs/startup_default.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH bash /flagos-workspace/scripts/start_service.sh --mode flagos > /flagos-workspace/logs/startup_default.log 2>&1"
 
 # Native（关闭 FlagGems）
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=0 VLLM_FL_PREFER_ENABLED=false vllm serve ... > /flagos-workspace/logs/startup_native.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=0 bash /flagos-workspace/scripts/start_service.sh --mode native > /flagos-workspace/logs/startup_native.log 2>&1"
 
 # FlagOS Full（全量 FlagGems）
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true vllm serve ... > /flagos-workspace/logs/startup_flagos.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=1 bash /flagos-workspace/scripts/start_service.sh --mode flagos > /flagos-workspace/logs/startup_flagos.log 2>&1"
 
-# FlagOS Optimized（自定义 blacklist）
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true VLLM_FL_FLAGOS_BLACKLIST='mm,softmax' vllm serve ... > /flagos-workspace/logs/startup_flagos.log 2>&1"
+# FlagOS Optimized（自定义算子集）
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=1 bash /flagos-workspace/scripts/start_service.sh --mode flagos_optimized > /flagos-workspace/logs/startup_flagos.log 2>&1"
 ```
 
 四种模式差异仅在内联环境变量前缀（由 `toggle_flaggems.py` 或 `apply_op_config.py` 的 JSON 输出中的 `env_inline` 提供）。
