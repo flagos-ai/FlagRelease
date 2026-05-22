@@ -716,7 +716,7 @@ claude -p "${PROMPT_SEG1}" \
     --output-format stream-json \
     --verbose \
     --debug-file "${DEBUG_FILE}.seg1" \
-    --max-turns 100 \
+    --max-turns 500 \
     2>&1 | tee "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" > "${FULL_LOG}") \
          | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --cost-file "${LOG_DIR}/seg1_cost.txt" --durations-file "${LOG_DIR}/seg1_durations.json" ${FILTER_FLAGS} || true
@@ -1094,7 +1094,7 @@ claude -p "${PROMPT_SEG2}" \
     --output-format stream-json \
     --verbose \
     --debug-file "${DEBUG_FILE}.seg2" \
-    --max-turns 250 \
+    --max-turns 500 \
     2>&1 | tee -a "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
          | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 4 --cost-file "${LOG_DIR}/seg2_cost.txt" --load-durations "${LOG_DIR}/seg1_durations.json" --durations-file "${LOG_DIR}/seg2_durations.json" ${FILTER_FLAGS} || true
@@ -1268,7 +1268,7 @@ if v1_score is not None:
         --output-format stream-json \
         --verbose \
         --debug-file "${DEBUG_FILE}.seg2_retry" \
-        --max-turns 250 \
+        --max-turns 500 \
         2>&1 | tee -a "${LOG_FILE}" \
              | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
              | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 4 --cost-file "${LOG_DIR}/seg2_retry_cost.txt" --load-durations "${LOG_DIR}/seg1_durations.json" --durations-file "${LOG_DIR}/seg2_durations.json" ${FILTER_FLAGS} || true
@@ -1295,7 +1295,7 @@ if v1_score is not None:
             --output-format stream-json \
             --verbose \
             --debug-file "${DEBUG_FILE}.seg2_retry2" \
-            --max-turns 250 \
+            --max-turns 500 \
             2>&1 | tee -a "${LOG_FILE}" \
                  | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
                  | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 4 --cost-file "${LOG_DIR}/seg2_retry2_cost.txt" --load-durations "${LOG_DIR}/seg1_durations.json" --durations-file "${LOG_DIR}/seg2_durations.json" ${FILTER_FLAGS} || true
@@ -1306,6 +1306,70 @@ if v1_score is not None:
             docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
         fi
         echo "  段2 二次重试后 ledger 状态:"
+        print_ledger_summary "${CTX_FILE}"
+        CTX_INFO=$(read_context "${MODEL}" 2>/dev/null) || true
+        [ -n "$(echo "$CTX_INFO" | cut -d'|' -f1)" ] && SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
+    fi
+fi
+
+# ===== 段2 步骤7 补充检查：performance_ok=false 且步骤7未执行时，补一次重试 =====
+if [ "${IS_NATIVE:-false}" != "true" ]; then
+    SEG2_NEED_STEP7=$(python3 -c "
+import yaml
+try:
+    with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
+        ctx = yaml.safe_load(f)
+    wf = ctx.get('workflow', {})
+    # performance_ok=false 说明需要步骤7
+    if wf.get('performance_ok') == False or str(wf.get('performance_ok','')).lower() == 'false':
+        ledger = ctx.get('workflow_ledger', {}).get('steps', {})
+        step7_done = False
+        items = ledger.items() if isinstance(ledger, dict) else [(i, s) for i, s in enumerate(ledger)] if isinstance(ledger, list) else []
+        for key, s in items:
+            if not isinstance(s, dict): continue
+            step = str(s.get('step', key)).lower()
+            status = s.get('status', '')
+            if ('07' in step or 'performance_tun' in step or 'perf_tun' in step) and status in ('success', 'skipped'):
+                step7_done = True
+                break
+        if not step7_done:
+            print('needed')
+        else:
+            print('done')
+    else:
+        print('not_needed')
+except Exception as e:
+    print('not_needed')
+" 2>/dev/null) || SEG2_NEED_STEP7="not_needed"
+
+    if [ "$SEG2_NEED_STEP7" = "needed" ]; then
+        echo ""
+        echo "  ⚠ performance_ok=false 但步骤7（性能算子调优）未执行，补充执行..."
+        PROMPT_SEG2_STEP7="${PROMPT_SEG2}
+
+**⚠ 步骤4/5/6 已全部完成（禁止重跑），只需执行步骤7（性能算子调优）**：
+- V1/V2 精度评测已完成，性能评测已完成，performance_ok=false
+- 直接执行步骤7：operator_search.py run（elimination 逐删策略）
+- 步骤7完成后更新 context 并结束"
+        SEG2_START_TS=$(date +%s)
+        claude -p "${PROMPT_SEG2_STEP7}" \
+            --permission-mode auto \
+            --output-format stream-json \
+            --verbose \
+            --debug-file "${DEBUG_FILE}.seg2_step7" \
+            --max-turns 500 \
+            2>&1 | tee -a "${LOG_FILE}" \
+                 | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
+                 | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 7 --cost-file "${LOG_DIR}/seg2_step7_cost.txt" --load-durations "${LOG_DIR}/seg2_durations.json" --durations-file "${LOG_DIR}/seg2_step7_durations.json" ${FILTER_FLAGS} || true
+        # 同步 context
+        CTX_FILE="/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+        SHARED_CTX="/data/flagos-workspace/${MODEL}/shared/context.yaml"
+        if [ -f "${SHARED_CTX}" ]; then
+            cp "${SHARED_CTX}" "${CTX_FILE}"
+        elif [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+            docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+        fi
+        echo "  段2 步骤7补充执行后 ledger 状态:"
         print_ledger_summary "${CTX_FILE}"
         CTX_INFO=$(read_context "${MODEL}" 2>/dev/null) || true
         [ -n "$(echo "$CTX_INFO" | cut -d'|' -f1)" ] && SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
@@ -1499,7 +1563,7 @@ claude -p "${PROMPT_SEG3}" \
     --output-format stream-json \
     --verbose \
     --debug-file "${DEBUG_FILE}.seg3" \
-    --max-turns 100 \
+    --max-turns 500 \
     2>&1 | tee -a "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
          | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 8 --cost-file "${LOG_DIR}/seg3_cost.txt" --load-durations "${LOG_DIR}/seg2_durations.json" --durations-file "${LOG_DIR}/seg3_durations.json" ${FILTER_FLAGS} || true
@@ -1736,7 +1800,7 @@ print('no')
         --output-format stream-json \
         --verbose \
         --debug-file "${DEBUG_FILE}.seg4" \
-        --max-turns 200 \
+        --max-turns 500 \
         2>&1 | tee -a "${LOG_FILE}" \
              | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
              | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 9 --cost-file "${LOG_DIR}/seg4_cost.txt" --load-durations "${LOG_DIR}/seg3_durations.json" --durations-file "${LOG_DIR}/seg4_durations.json" ${FILTER_FLAGS} || true

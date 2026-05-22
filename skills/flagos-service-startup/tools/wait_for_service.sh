@@ -494,6 +494,8 @@ print(json.dumps({
     'phases_observed': phases,
 }, indent=2))
 " "${ELAPSED}" "${FATAL_SIGNAL}" "${FATAL_LINE}" "${CURRENT_PHASE}" "${PHASES_OBSERVED}" "${BASE_URL}"
+                rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/ 2>/dev/null || true
+                echo "[wait_for_service.sh] 已清理 Triton/FlagGems 编译缓存"
                 exit 1
             fi
 
@@ -681,6 +683,8 @@ print(json.dumps({
     'phases_observed': phases,
 }, indent=2))
 " "${ELAPSED}" "${SINCE_ACTIVITY}" "${CURRENT_PHASE}" "${BASE_URL}" "${PHASES_OBSERVED}"
+            rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/ 2>/dev/null || true
+            echo "[wait_for_service.sh] 已清理 Triton/FlagGems 编译缓存"
             exit 1
         fi
     fi
@@ -755,4 +759,6 @@ print(json.dumps({
 }, indent=2))
 " "${ELAPSED}" "${CURRENT_PHASE}" "${BASE_URL}" "${PHASES_OBSERVED}"
 
+rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/ 2>/dev/null || true
+echo "[wait_for_service.sh] 已清理 Triton/FlagGems 编译缓存"
 exit 1
