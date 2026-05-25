@@ -65,7 +65,7 @@ DEFAULT_OPTIMIZER_SCRIPT = "/flagos-workspace/scripts/operator_optimizer.py"
 DEFAULT_WAIT_SCRIPT = "/flagos-workspace/scripts/wait_for_service.sh"
 DEFAULT_APPLY_CONFIG_SCRIPT = "/flagos-workspace/scripts/apply_op_config.py"
 
-SERVICE_STOP_CMD = "pkill -f 'vllm.entrypoints|sglang.launch_server'"
+SERVICE_STOP_CMD = "pkill -f 'vllm|sglang'"
 SERVICE_WAIT_TIMEOUT = 300  # 秒
 GPU_MEM_FREE_THRESHOLD = 0.95  # GPU 显存空闲比例阈值（>95% 视为已释放）
 GPU_RELEASE_TIMEOUT = 60       # GPU 显存释放等待超时（秒）
@@ -408,29 +408,56 @@ def _persist_control_mode(control_mode: str):
 
 
 def _normalize_ops_for_control_file(ops: List[str]) -> List[str]:
-    """将算子名从大写显示名转换为小写函数名（供控制文件使用）"""
+    """将算子名从大写显示名或 debug 行格式转换为 FlagGems 注册键名（供控制文件使用）"""
     if not ops:
         return ops
-    if all(op == op.lower() and ' ' not in op for op in ops):
+    if all(op == op.lower() and ' ' not in op and 'flag_gems' not in op for op in ops):
         return ops
+    import re
+    # Load FlagGems keys for validation
+    fg_keys = set()
     try:
-        from toggle_flaggems import normalize_ops_to_func_names
-        return normalize_ops_to_func_names(ops)
-    except ImportError:
-        import re
-        result = []
-        for op in ops:
-            s = re.sub(r'\s*\(.*?\)', '', op)
-            s = s.split(',')[0].strip()
-            s = re.sub(r'-hopper$', '', s, flags=re.IGNORECASE)
-            s = s.replace('.STABLE', '_stable')
-            s = re.sub(r'\s+FORWARD$', '', s, flags=re.IGNORECASE)
-            s = re.sub(r'\s+BACKWARD$', '', s, flags=re.IGNORECASE)
-            s = s.lower().replace(' ', '_')
-            if s.startswith('_'):
-                s = s[1:]
-            result.append(s)
-        return result
+        import flag_gems
+        if hasattr(flag_gems, 'FULL_CONFIG_BY_FUNC'):
+            fg_keys = set(flag_gems.FULL_CONFIG_BY_FUNC.keys())
+    except Exception:
+        pass
+
+    result = []
+    for op in ops:
+        # Handle [DEBUG] flag_gems.ops.X.Y: GEMS Z format
+        m = re.match(r'\[DEBUG\]\s*flag_gems\.ops\.(\w+)\.(\w+):', op, re.IGNORECASE)
+        if m:
+            module_name = m.group(1)
+            func_name = m.group(2)
+            # Try func_name first, then module_name, then prefix match
+            if func_name in fg_keys:
+                result.append(func_name)
+            elif module_name in fg_keys:
+                result.append(module_name)
+            elif fg_keys:
+                pfx = [k for k in fg_keys if k.startswith(func_name)]
+                if pfx:
+                    result.extend(pfx)
+                else:
+                    pfx2 = [k for k in fg_keys if k.startswith(module_name + '_') or k == module_name + '_']
+                    result.extend(pfx2) if pfx2 else result.append(func_name)
+            else:
+                result.append(func_name)
+            continue
+        # Fallback: display name format (e.g., "GEMS ADD", "ADD")
+        s = re.sub(r'\s*\(.*?\)', '', op)
+        s = s.split(',')[0].strip()
+        s = re.sub(r'^GEMS\s+', '', s, flags=re.IGNORECASE)
+        s = re.sub(r'-hopper$', '', s, flags=re.IGNORECASE)
+        s = s.replace('.STABLE', '_stable')
+        s = re.sub(r'\s+FORWARD$', '', s, flags=re.IGNORECASE)
+        s = re.sub(r'\s+BACKWARD$', '', s, flags=re.IGNORECASE)
+        s = s.lower().replace(' ', '_')
+        if s.startswith('_'):
+            s = s[1:]
+        result.append(s)
+    return list(dict.fromkeys(result))
 
 
 def _apply_via_control_file(test_enabled: List[str], test_disabled: List[str],
@@ -619,16 +646,39 @@ def restart_service(stop_cmd: str, startup_cmd: str,
     run_cmd(stop_cmd, check=False)
     time.sleep(3)
 
+    # 等待端口释放（确保旧服务完全退出）
+    svc_port = port or _read_service_port() or 8000
+    port_wait_start = time.time()
+    for _ in range(30):
+        try:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1)
+            s.connect(("127.0.0.1", svc_port))
+            s.close()
+            time.sleep(2)
+        except (ConnectionRefusedError, OSError):
+            break
+    else:
+        print(f"  WARNING: 端口 {svc_port} 仍被占用，强制 kill...")
+        run_cmd("pkill -9 -f 'vllm|sglang' 2>/dev/null", check=False)
+        time.sleep(5)
+    port_wait_elapsed = time.time() - port_wait_start
+    if port_wait_elapsed > 5:
+        print(f"  端口释放等待: {port_wait_elapsed:.0f}s")
+
     # 等待 GPU 显存释放（需要所有服务使用的 GPU 都释放）
     required_gpus = _read_gpu_count()
     if not wait_gpu_memory_release(required_free=required_gpus):
         print("  WARNING: GPU 显存未完全释放，尝试强制清理...")
-        run_cmd("pkill -9 -f 'vllm\\|sglang' 2>/dev/null", check=False)
+        run_cmd("pkill -9 -f 'vllm|sglang' 2>/dev/null", check=False)
         time.sleep(5)
         if not wait_gpu_memory_release(timeout=15, required_free=required_gpus):
             print("  WARNING: 强制清理后 GPU 显存仍未释放，继续启动（可能使用其他空闲 GPU）")
 
     # 启动（后台执行，避免 vllm 等服务进程阻塞脚本）
+    # 清除旧启动日志，避免 wait_for_service.sh 误判残留服务
+    run_cmd("rm -f /flagos-workspace/logs/startup_flagos.log /flagos-workspace/logs/startup_search.log 2>/dev/null", check=False)
     nohup_log = "/flagos-workspace/logs/startup_search.log"
     if env_inline:
         # env_inline 必须在 nohup 前面，否则 nohup 会把 VAR=val 当命令名
@@ -755,9 +805,10 @@ def update_optimizer_result(state_path: str, optimizer_script: str,
                             native_throughput: float) -> Dict[str, Any]:
     """调用 operator_optimizer.py update 更新结果"""
     tp_json = json.dumps(throughputs)
+    import shlex
     result = run_cmd(
         f"python {optimizer_script} update "
-        f"--op-name {op_name} "
+        f"--op-name {shlex.quote(op_name)} "
         f"--throughputs '{tp_json}' "
         f"--native-throughput {native_throughput} "
         f"--state-path {state_path}",
@@ -1098,7 +1149,7 @@ def run_full_search(state_path: str, perf_config: str,
             if not gpu_check["available"]:
                 # 尝试清理残留进程
                 print("  尝试清理残留推理进程...")
-                run_cmd("pkill -9 -f 'vllm\\|sglang' 2>/dev/null", check=False)
+                run_cmd("pkill -9 -f 'vllm|sglang' 2>/dev/null", check=False)
                 time.sleep(10)
                 gpu_check = check_gpu_availability(required_gpus=required_gpus)
                 if not gpu_check["available"]:
