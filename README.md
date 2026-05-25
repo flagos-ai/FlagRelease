@@ -1,6 +1,6 @@
 # FlagRelease — FlagOS 自动化发布框架
 
-FlagOS 模型迁移与发布的全自动化工作流框架，基于 Claude Code 驱动，支持 NVIDIA 和华为昇腾平台。
+FlagOS 模型迁移与发布的全自动化工作流框架，基于 Claude Code 驱动，支持 NVIDIA 、华为昇腾、沐曦、摩尔线程、海光等多款AI芯片平台。
 
 ## 功能概览
 
@@ -55,23 +55,9 @@ bash prompts/run_pipeline.sh --image <image:tag> --model <model_name>
 bash prompts/run_batch.sh
 ```
 
-## 支持平台
-
-- NVIDIA GPU（推荐：vllm >= 0.7.3 + flaggems >= 5.1.0 + flagtree >= 0.5.0）
-- 华为昇腾 NPU（vllm_ascend 适配层）
-
 ## 环境要求
 
 - Claude Code CLI
 - Docker
 - 环境变量：`HARBOR_USER`、`HARBOR_PASSWORD`、`MODELSCOPE_TOKEN`、`HF_TOKEN`、`GITHUB_TOKEN`（按需）
 
-## 分支说明
-
-| 分支 | 用途 |
-|------|------|
-| main | 稳定版本 |
-| huawei | 华为昇腾适配开发 |
-| test | 集成测试 |
-| hygon | 海光适配开发 |
-| metax | 沐曦适配开发 |
