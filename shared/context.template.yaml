@@ -1,0 +1,493 @@
+# ============================================================================
+# context.template.yaml — 模板文件，仅用于初始化
+# ============================================================================
+# 此文件是 context.yaml 的模板，由 setup_workspace.sh 复制到每个容器内
+# 作为 /flagos-workspace/shared/context.yaml 的初始状态。
+#
+# ⚠ 禁止直接读写此文件作为运行时状态！
+# 运行时 context 位于容器内 /flagos-workspace/shared/context.yaml，每个容器独立。
+# ============================================================================
+#
+# Skill 间共享上下文
+# 由上游 skill 写入，下游 skill 读取
+#
+# 使用说明:
+#   - flagos-container-preparation 写入模型、容器和 GPU 信息
+#   - flagos-pre-service-inspection 写入环境检查信息
+#   - flagos-service-startup 写入服务信息
+#   - flagos-operator-replacement 写入算子替换信息
+#   - flagos-performance-testing 读取服务连接信息
+
+# ============================================================================
+# 网络环境 (首次网络操作失败时由编排层写入)
+# ============================================================================
+network:
+  proxy: ""               # 用户提供的代理地址，如 http://proxy:port
+  pip_index: ""           # pip 镜像源，如 https://pypi.tuna.tsinghua.edu.cn/simple
+  confirmed: false        # 是否已确认过网络环境
+
+# ============================================================================
+# 执行模式 (由 pre-service-inspection 写入)
+# ============================================================================
+execution:
+  mode: ""                    # host | container (Claude Code 运行位置)
+  cmd_prefix: ""              # "" (容器内) 或 "docker exec <container>" (宿主机)
+
+# ============================================================================
+# 场景 (由 start_deployment.sh 入口确定)
+# ============================================================================
+scenario: ""                  # 新模型迁移发布
+
+# ============================================================================
+# 环境入口 (由 container-preparation 写入)
+# ============================================================================
+entry:
+  type: ""                    # existing_container | new_container | readme_parse
+  source: ""                  # 用户原始输入
+
+# ============================================================================
+# 模型信息 (由 container-preparation 写入)
+# ============================================================================
+model:
+  name: ""                # 模型标识名（用户直接提供）
+  url: ""                 # 模型 URL（用户直接提供）
+  local_path: ""          # 模型在主机上的路径
+  container_path: ""      # 模型在容器内的路径
+  tokenizer_path: ""      # tokenizer 路径 (通常与 model 路径相同)
+
+# ============================================================================
+# 容器信息 (由 container-preparation 写入)
+# ============================================================================
+container:
+  name: ""                # 容器名称
+  status: ""              # 状态: running|stopped
+
+# ============================================================================
+# 镜像信息 (由 container-preparation 写入)
+# ============================================================================
+image:
+  name: ""                # 镜像名称（用户直接提供）
+  tag: ""                 # 镜像标签
+
+# ============================================================================
+# 工作目录 (由 container-preparation 写入)
+# ============================================================================
+workspace:
+  host_path: ""           # 宿主机路径: /data/flagos-workspace/<model_name>
+  container_path: "/flagos-workspace"
+
+# ============================================================================
+# GPU 信息 (由 container-preparation 写入)
+# ============================================================================
+gpu:
+  vendor: ""              # 厂商: nvidia|huawei|hygon|mthreads|kunlunxin|tianshu|metax|tsingmicro|cambricon|alibaba
+  type: ""                # GPU 型号
+  count: 0                # GPU 数量
+  visible_devices_env: "" # 指定卡的环境变量名
+
+# GPU 厂商与环境变量对照:
+#   nvidia      -> CUDA_VISIBLE_DEVICES
+#   huawei      -> ASCEND_RT_VISIBLE_DEVICES
+#   hygon       -> HIP_VISIBLE_DEVICES
+#   mthreads    -> MUSA_VISIBLE_DEVICES
+#   kunlunxin   -> XPU_VISIBLE_DEVICES
+#   tianshu     -> CUDA_VISIBLE_DEVICES
+#   metax       -> CUDA_VISIBLE_DEVICES
+#   tsingmicro  -> TXDA_VISIBLE_DEVICES
+#   cambricon   -> MLU_VISIBLE_DEVICES
+#   alibaba     -> CUDA_VISIBLE_DEVICES
+
+# GPU 检测命令对照:
+#   nvidia      -> nvidia-smi
+#   huawei      -> npu-smi info
+#   hygon       -> hy-smi
+#   mthreads    -> mthreads-gmi
+#   kunlunxin   -> xpu-smi
+#   tianshu     -> ixsmi
+#   metax       -> mx-smi
+#   tsingmicro  -> tsm_smi
+#   cambricon   -> cnmon
+
+# ============================================================================
+# 环境检查信息 (由 pre-service-inspection 写入)
+# ============================================================================
+inspection:
+  core_packages:            # 核心组件版本
+    torch: ""
+    vllm: ""
+    sglang: ""
+  flag_packages:            # flag 生态组件版本
+    flaggems: ""
+    flagscale: ""
+    flagcx: ""
+    vllm_plugin: ""
+  flaggems_control: ""      # env_var | code_comment
+  flaggems_logic: ""        # unused | only_enable
+  flaggems_code_path: ""    # flaggems 代码所在文件路径
+  flaggems_code_lines: ""   # 相关代码行号范围
+  flaggems_capabilities: [] # 运行时探测到的能力列表 (enable_unused, only_enable, yaml_config, vendor_default, query_ops, query_ops_legacy, use_gems_filter)
+  vendor_config_path: ""    # 厂商默认配置文件路径（如存在）
+  vllm_plugin_installed: false  # 是否安装了 vllm-plugin-FL
+  plugin_has_dispatch: false    # vllm-plugin-FL 是否有 OpManager 调度
+  oot_ops: []                   # OOT 算子列表 (来自 plugin 探测)
+  env_vars: {}              # flag 相关环境变量 (USE_FLAGGEMS, USE_FLAGOS 等)
+
+# ============================================================================
+# Plugin 安装信息 (由 plugin-install 写入)
+# ============================================================================
+plugin_install:
+  installed: false
+  version: ""
+  repo_url: ""
+  install_method: ""        # source | editable
+  success: false
+  timestamp: ""
+
+# ============================================================================
+# Plugin 控制信息 (由 pre-service-inspection 写入)
+# ============================================================================
+plugin_control:
+  prefer_enabled: ""            # VLLM_FL_PREFER_ENABLED 当前值
+  oot_enabled: ""               # VLLM_FL_OOT_ENABLED 当前值
+  oot_ops: []                   # 已注册的 OOT 算子列表
+  flagos_whitelist: ""          # 当前 VLLM_FL_FLAGOS_WHITELIST
+  flagos_blacklist: ""          # 当前 VLLM_FL_FLAGOS_BLACKLIST
+  oot_blacklist: ""             # 当前 VLLM_FL_OOT_BLACKLIST
+  dispatch_mode: ""             # flagos | vendor | reference
+
+# ============================================================================
+# Plugin 验证流程状态 (由步骤 9-13 写入)
+# ============================================================================
+plugin_workflow:
+  triggered: false              # 是否触发了 plugin 流程（步骤8 qualified=true 后触发）
+  service_ok: false             # 步骤10 plugin 服务启动是否成功
+  accuracy_ok: false            # 步骤11 plugin 精度是否达标
+  performance_ok: false         # 步骤12 plugin 性能是否达标
+  qualified: false              # service_ok AND accuracy_ok AND performance_ok
+  plugin_image_url: ""          # plugin 版本 Harbor 镜像地址
+  plugin_modelscope_url: ""     # plugin 版本 ModelScope 仓库地址
+  plugin_huggingface_url: ""    # plugin 版本 HuggingFace 仓库地址
+  crash_stopped: false          # 是否因服务崩溃停止任务
+  skip_reason: ""               # 跳过原因（qualified=false 时）
+
+# ============================================================================
+# 环境状态 (由 service-startup 写入)
+# ============================================================================
+environment:
+  env_type: ""              # 环境场景: native | vllm_flaggems | vllm_plugin_flaggems
+  has_plugin: false          # 是否有 vllm-plugin-FL
+  has_flagtree: false        # 是否有 FlagTree
+  flagtree_version: ""       # FlagTree 版本
+  initial_env_verified: false      # 初始环境是否验证通过
+  flaggems_code_path: ""    # flaggems 代码文件路径 (仅 vllm_flaggems)
+  flaggems_enable_call: ""  # flag_gems.enable() 完整调用 (仅 vllm_flaggems)
+  flaggems_txt_path: ""     # enable() 中指定的 txt 路径 (仅 vllm_flaggems)
+  gems_txt_auto_detect: false  # 是否需要启动后自动搜索 gems.txt
+
+# ============================================================================
+# FlagGems 启停方法 (由 pre-service-inspection 探测写入)
+# ============================================================================
+flaggems_control:
+  enable_method: ""           # 如何启用 FlagGems (env:USE_FLAGGEMS=1 / auto / script:xxx)
+  disable_method: ""          # 如何关闭 FlagGems (env:USE_FLAGGEMS=0 / uninstall / script:xxx)
+  integration_type: ""        # env_var | plugin | code_import | script | config_file
+
+# ============================================================================
+# 运行时信息 (由 service-startup 写入)
+# ============================================================================
+runtime:
+  framework: ""           # 框架: vllm|sglang
+  flaggems_enabled: false # 是否启用 FlagGems
+  tp_size: 0              # tensor-parallel-size（由 calc_tp_size.py 推算）
+  tp_reason: ""           # TP 推算原因
+  gpu_count: 0            # 实际使用的 GPU 数量
+  total_gpus: 0           # 宿主机总 GPU 数量
+  cuda_visible_devices: "" # 指定卡的索引值（环境变量名由 gpu.visible_devices_env 决定）
+  gpu_selection_reason: "" # GPU 选择原因
+  thinking_model: false   # 是否为 thinking model
+
+# ============================================================================
+# 服务信息 (由 service-startup 写入)
+# ============================================================================
+service:
+  cluster: ""             # 集群/机房标识 (如 "腾讯云北京", "阿里云上海" 等)
+  external_ip: ""         # 宿主机外部 IP (供远端评测平台访问)
+  host: ""                # 服务地址 (容器内通常为 localhost)
+  port: 8000              # 服务端口
+  endpoint: "/v1/completions"
+  process_id: ""          # 服务进程 PID
+  healthy: false          # 服务是否健康
+  model_id: ""            # API 返回的模型 ID
+  log_path: ""            # 服务日志路径
+  gems_txt_path: ""       # gems.txt 文件路径
+  enable_oplist_path: ""  # flaggems_enable_oplist.txt 路径（运行时权威算子列表）
+  enable_oplist_count: 0  # oplist 中的算子数量
+  initial_operator_list: [] # 初始算子列表
+  max_model_len: 0          # 服务启动时的 --max-model-len 值（首次决策后复用）
+
+# ============================================================================
+# 评测信息 (由 eval-comprehensive 写入)
+# ============================================================================
+eval:
+  request_id: ""            # 远端评测任务 ID
+  domain: ""                # 评测领域: NLP|MM
+  mode: ""                  # 评测模式: FlagRelease|XLC_train|XLC_infer 等
+  eval_method: ""           # 评测方式: remote|local
+  status: ""                # 评测状态: S|F|C|OOR|running|local
+  results: {}               # 最终评测结果
+  v1_score: 0               # V1 (Native) GPQA Diamond 分数 (%)
+  v2_score: 0               # V2 (Full FlagGems) GPQA Diamond 分数 (%)
+  v3_score: 0               # V3 (调优后) GPQA Diamond 分数 (%), 仅步骤5触发时有值
+  accuracy_diff: 0          # V1 - V2 精度下降 (%, 正值=V2低于V1)
+  accuracy_aligned: false   # 下降 ≤5% 为 true (V2高于V1也算达标)
+  accuracy_threshold: 5.0   # 精度对齐阈值 (%)
+  excluded_ops_accuracy: [] # 因精度问题关闭的算子
+
+# ============================================================================
+# 算子替换信息 (由 operator-replacement 写入)
+# ============================================================================
+operator_replacement:
+  replaced_operators: []    # 已替换/排除的算子列表
+  replacement_mode: ""      # yaml_config | only_enable | enable_unused | source_edit | plugin_env
+  final_gems_txt: ""        # 最终 gems.txt 内容/路径
+  config_file_path: ""      # YAML 配置模式下的文件路径
+  env_vars: {}              # Plugin 模式下的当前环境变量快照
+  available_ops: []         # 查询到的完整可用算子列表
+  rollback_info: ""         # 如何还原此次替换操作
+
+# ============================================================================
+# 性能对比汇总 (由 performance-testing 写入，步骤 6)
+# ============================================================================
+perf:
+  strategy: ""              # 使用的测试策略: quick | comprehensive
+  test_case: ""             # 测试用例名 (quick 模式下为 4k_input_1k_output)
+  concurrency: 0            # 并发数 (quick 模式下为 64)
+  v1_output_tps: 0          # V1 Output token throughput (tok/s)
+  v1_total_tps: 0           # V1 Total token throughput (tok/s)
+  v2_output_tps: 0          # V2 Output token throughput (tok/s)
+  v2_total_tps: 0           # V2 Total token throughput (tok/s)
+  output_ratio_pct: 0       # V2/V1 output throughput ratio (%)
+  total_ratio_pct: 0        # V2/V1 total throughput ratio (%)
+  ratio_pct: 0              # min(output_ratio, total_ratio) (%)
+  pass: false               # ratio >= 80%?
+
+# ============================================================================
+# V1 性能基线 — Native 无 FlagGems (由 performance-testing 写入)
+# ============================================================================
+native_perf:
+  result_path: ""             # native_performance.json 路径
+  output_throughput: 0        # Output token throughput (tok/s)
+  total_throughput: 0         # Total token throughput (tok/s)
+
+# ============================================================================
+# V2 性能 — Full FlagGems 全量算子 (由 performance-testing 写入)
+# ============================================================================
+flagos_full_perf:
+  result_path: ""             # flagos_full.json 路径
+  output_throughput: 0
+  total_throughput: 0
+
+# ============================================================================
+# V3 性能 — Optimized FlagGems 优化后算子 (由 performance-testing 写入)
+# ============================================================================
+flagos_optimized_perf:
+  result_path: ""             # flagos_optimized.json 路径
+  output_throughput: 0
+  total_throughput: 0
+
+# ============================================================================
+# 算子优化 (由 operator-replacement 写入)
+# ============================================================================
+optimization:
+  target_ratio: 0.8           # 性能目标: 每个用例每个并发级别 FlagOS / V1 >= 80%
+  current_ratio: 0            # 当前性能比
+  search_phase: ""            # oot | group | done
+  plugin_mode: false          # 是否使用 plugin 环境变量控制
+  enabled_ops: []             # 当前启用的算子列表
+  disabled_ops: []            # 当前禁用的算子列表
+  oot_blacklist: []           # OOT 层需禁用的算子
+  flagos_blacklist: []        # torch 底层需禁用的算子
+  operator_config_path: ""    # operator_config.json 路径
+  oplist_snapshots:            # 算子列表 txt 快照路径
+    initial: ""                  # results/initial_oplist.txt（步骤3 flagos 首次启动后）
+    accuracy_tuned: ""           # results/accuracy_tuned_oplist.txt（步骤5完成后，如触发）
+    final: ""                    # results/final_oplist.txt（步骤7完成后，如触发）
+  search_log: []              # 搜索历史记录
+
+# ============================================================================
+# 流程计时 (由编排层维护)
+# ============================================================================
+timing:
+  workflow_start: ""          # 流程开始时间 (ISO 8601)
+  workflow_end: ""            # 流程结束时间 (ISO 8601)
+  total_duration_seconds: 0   # 全流程总耗时 (秒)
+  steps:                      # 各步骤耗时 (秒)，与 workflow_ledger 步骤名对齐
+    container_preparation: 0    # 步骤1 容器准备
+    environment_inspection: 0   # 步骤2 环境检测
+    service_startup: 0          # 步骤3 服务启动（含 default/native/flagos 模式）
+    quick_accuracy: 0           # 步骤4 精度评测（含 V1+V2）
+    accuracy_tuning: 0          # 步骤5 精度算子调优
+    quick_performance: 0        # 步骤6 性能评测（含 V1+V2）
+    performance_tuning: 0       # 步骤7 性能算子调优
+    release: 0                  # 步骤8 自动发布
+    plugin_install: 0            # 步骤9 Plugin 安装
+    plugin_service_startup: 0    # 步骤10 Plugin 服务启动
+    plugin_accuracy: 0           # 步骤11 Plugin 精度评测
+    plugin_performance: 0        # 步骤12 Plugin 性能评测
+    plugin_release: 0            # 步骤13 Plugin 发布
+
+# ============================================================================
+# 发布信息 (由步骤8 flagos-release 写入)
+# ============================================================================
+release:
+  harbor_image: ""            # Harbor 镜像完整地址
+  modelscope_url: ""          # ModelScope 仓库 URL
+  huggingface_url: ""         # HuggingFace 仓库 URL
+
+# ============================================================================
+# 流程状态 (由编排层维护)
+# ============================================================================
+workflow:
+  service_ok: false           # 步骤3 服务启动是否成功
+  accuracy_ok: false          # 步骤4/5 精度是否达标 (下降 ≤5%)
+  performance_ok: false       # 步骤6/7 性能是否达标 (ratio ≥80%)
+  qualified: false            # 综合判定: service_ok AND accuracy_ok AND performance_ok
+  config_persisted: false     # 算子配置是否已固化到镜像（步骤7/8完成后为 true）
+  all_done: false             # 全流程是否完成
+  last_error: ""              # 最近一次错误信息
+
+# ============================================================================
+# 工作流台账 (由编排层维护，每步开始/结束时更新)
+# ============================================================================
+workflow_ledger:
+  steps:
+    - step: "01_container_preparation"
+      name: "容器准备"
+      status: "pending"       # pending | in_progress | success | failed | skipped
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "02_environment_inspection"
+      name: "环境检测"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "03_service_startup"
+      name: "服务启动"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "04_quick_accuracy"
+      name: "精度评测"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "05_accuracy_tuning"
+      name: "精度算子调优"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "06_quick_performance"
+      name: "性能评测"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "07_performance_tuning"
+      name: "性能算子调优"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "08_release"
+      name: "自动发布"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "09_plugin_install"
+      name: "Plugin 安装"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "10_plugin_service_startup"
+      name: "Plugin 服务启动"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "11_plugin_accuracy"
+      name: "Plugin 精度评测"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "12_plugin_performance"
+      name: "Plugin 性能评测"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "13_plugin_release"
+      name: "Plugin 发布"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+
+# ============================================================================
+# Issue 记录 (由 issue_reporter.py 写入)
+# ============================================================================
+issues:
+  submitted: []               # 已提交的 issue 列表
+
+# ============================================================================
+# 元数据
+# ============================================================================
+metadata:
+  created_by: ""          # 创建此文件的 skill 名称
+  updated_at: ""          # 最后更新时间

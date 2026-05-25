@@ -1,0 +1,29 @@
+# perf_config.yaml — 性能测试配置模板
+# 缺失字段由 benchmark_runner.py 自动从 context.yaml 回填
+
+server:
+  host: ""
+  port: 8000
+
+model:
+  name: ""
+  tokenizer_path: ""
+
+test_matrix:
+  - name: 4k_input_1k_output
+    input_len: 4096
+    output_len: 1024
+    enabled: true
+  - name: 1k_input_1k_output
+    input_len: 1024
+    output_len: 1024
+    enabled: true
+  - name: 8k_input_1k_output
+    input_len: 8192
+    output_len: 1024
+    enabled: true
+
+concurrency:
+  levels: [1, 4, 16, 64, 128, 256]
+
+warmup_requests: 2
