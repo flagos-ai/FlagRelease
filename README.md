@@ -1,106 +1,77 @@
-🌐 Language:
-[English](README.md) | [简体中文](README_cn.md)
+# FlagRelease — FlagOS 自动化发布框架
 
-<div align="right">
-  <a href="https://www.linkedin.com/company/flagos-community" target="_blank">
-    <img src="./docs/assets/Linkedin.png" alt="LinkIn" width="32" height="32" />
-  </a>
+FlagOS 模型迁移与发布的全自动化工作流框架，基于 Claude Code 驱动，支持 NVIDIA 和华为昇腾平台。
 
-  <a href="https://www.youtube.com/@FlagOS_Official" target="_blank">
-    <img src="./docs/assets/youtube.png" alt="YouTube" width="32" height="32" />
-  </a>
+## 功能概览
 
-  <a href="https://x.com/FlagOS_Official" target="_blank">
-    <img src="./docs/assets/x.png" alt="X" width="32" height="32" />
-  </a>
+从容器准备到镜像发布的 13 步全自动流程，零人工交互：
 
-  <a href="https://www.facebook.com/flagosglobalcommunity" target="_blank">
-    <img src="./docs/assets/Facebook.png" alt="Facebook" width="32" height="32" />
-  </a>
+| 步骤 | 名称 | 说明 |
+|------|------|------|
+| 1 | 容器准备 | 自动识别容器/镜像 + 模型权重搜索 + 工具部署 |
+| 2 | 环境检测 | 场景分类（native / vllm_flaggems / vllm_plugin_flaggems） |
+| 3 | 启服务 | V1(native) + V2(flagos) 启动验证 |
+| 4 | 精度评测 | V1/V2 GPQA Diamond 对比 |
+| 5 | 精度算子调优 | 条件触发，分组排查定位问题算子 |
+| 6 | 性能评测 | V1/V2 benchmark 对比 |
+| 7 | 性能算子调优 | 条件触发，逐个禁用直到达标 |
+| 8 | 自动发布 | 打包 + Harbor 上传（合格公开/不合格私有） |
+| 9-13 | Plugin 验证 | 安装 → 启服务 → 精度 → 性能 → 发布 |
 
-  <a href="https://discord.com/invite/ubqGuFMTNE" target="_blank">
-    <img src="./docs/assets/discord.png" alt="Discord" width="32" height="32" />
-  </a>
-</div>
+## 项目结构
 
-# FlagRelease
+```
+├── skills/                     # 各步骤的 Skill 定义和工具脚本
+│   ├── flagos-container-preparation/
+│   ├── flagos-pre-service-inspection/
+│   ├── flagos-service-startup/
+│   ├── flagos-performance-testing/
+│   ├── flagos-operator-replacement/
+│   ├── flagos-eval-comprehensive/
+│   ├── flagos-component-install/
+│   ├── flagos-plugin-install/
+│   ├── flagos-release/
+│   ├── flagos-issue-reporter/
+│   ├── flagos-log-analyzer/
+│   └── shared/
+├── prompts/                    # 流水线启动脚本
+│   ├── run_pipeline.sh         # 单模型流水线
+│   └── run_batch.sh            # 批量执行
+├── shared/                     # 共享工具（报告生成、context 更新等）
+├── CLAUDE.md                   # Claude Code 项目指令
+└── settings.local.json         # 权限预配置
+```
 
-FlagRelease is a large-model automated migration, adaptation, and release platform developed by the Beijing Academy of Artificial Intelligence (BAAI) for multi-architecture artificial intelligence chips. The platform aims to enable mainstream large models to be migrated, validated, and released on diverse domestic AI hardware with lower cost and higher efficiency through automated, standardized, and intelligent adaptation workflows.
-Built upon the unified and open-source AI system software stack FlagOS, which provides cross-hardware adaptation capabilities, FlagRelease establishes a standardized pipeline that supports automatic migration of large models to different hardware architectures, automated evaluation of migration results, built-in automated deployment and tuning, and multi-chip model packaging and release.
-The artifacts released through the FlagRelease platform are published on ModelScope and Hugging Face under the FlagRelease organization, where users can obtain different hardware-specific versions of open-source large models. These models can be downloaded and used directly on the corresponding hardware environments without requiring users to perform model migration themselves, significantly reducing the migration cost for end users.
-Currently, the outputs of the FlagRelease platform include validated, hardware-adapted model files and integrated Docker images. Each image contains the core components of FlagOS along with all required model dependencies, allowing users to deploy and use the models directly on the target chips. In addition, each model release provides evaluation results as technical references, enabling users to clearly understand the model’s correctness and performance characteristics across different hardware platforms.
-Furthermore, every released model is accompanied by configuration and usage instructions for AnythingLLM, helping users quickly verify the availability of the migrated models and facilitating downstream development and application based on these models.
-The overall architecture of FlagOS is illustrated in the figure below:
-   
-![](assets/flagos.jpeg)
+## 快速开始
 
-## Release Notes
+```bash
+# 单模型流水线（容器模式）
+bash prompts/run_pipeline.sh --container <container_name> --model <model_name>
 
-<!-- START:models -->
-| Model Name | 原始模型 | 
-|------------|----------|
-| DeepSeek-R1-Distill-Qwen-32B | [Huggingface: DeepSeek-R1-Distill-Qwen-32B-FlagOS-NVIDIA](https://huggingface.co/FlagRelease/DeepSeek-R1-Distill-Qwen-32B-FlagOS-NVIDIA)<br>[Modalscope: DeepSeek-R1-Distill-Qwen-32B-FlagOS-NVIDIA](https://modelscope.cn/models/FlagRelease/DeepSeek-R1-Distill-Qwen-32B-FlagOS-NVIDIA)<br>[Huggingface: DeepSeek-R1-Distill-Qwen-32B-FlagOS-Cambricon](https://huggingface.co/FlagRelease/DeepSeek-R1-Distill-Qwen-32B-FlagOS-Cambricon)<br>[Modalscope: DeepSeek-R1-Distill-Qwen-32B-FlagOS-Cambricon](https://modelscope.cn/models/FlagRelease/DeepSeek-R1-Distill-Qwen-32B-FlagOS-Cambricon) |
-| MiniMax-M1-80k | [Huggingface: MiniMax-M1-80k-FlagOS](https://huggingface.co/FlagRelease/MiniMax-M1-80k-FlagOS)<br>[Modalscope: MiniMax-M1-80k-FlagOS](https://modelscope.cn/models/FlagRelease/MiniMax-M1-80k-FlagOS) |
-| Qwen3.5-35B-A3B | [Huggingface: Qwen3.5-35B-A3B-FlagOS](https://huggingface.co/FlagRelease/Qwen3.5-35B-A3B-FlagOS)<br>[Modalscope: Qwen3.5-35B-A3B-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3.5-35B-A3B-FlagOS) |
-| Qwen2-7B-Instruct | [Huggingface: Qwen2-7B-Instruct-FlagOS](https://huggingface.co/FlagRelease/Qwen2-7B-Instruct-FlagOS)<br>[Modalscope: Qwen2-7B-Instruct-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen2-7B-Instruct-FlagOS) |
-| Qwen3-235B-A22B | [Huggingface: Qwen3-235B-A22B-FlagOS-nvidia](https://huggingface.co/FlagRelease/Qwen3-235B-A22B-FlagOS-nvidia)<br>[Modalscope: Qwen3-235B-A22B-FlagOS-nvidia](https://modelscope.cn/models/FlagRelease/Qwen3-235B-A22B-FlagOS-nvidia) |
-| phi-4 | [Huggingface: phi-4-FlagOS](https://huggingface.co/FlagRelease/phi-4-FlagOS)<br>[Modalscope: phi-4-FlagOS](https://modelscope.cn/models/FlagRelease/phi-4-FlagOS)<br>[Huggingface: phi-4-hygon-FlagOS](https://huggingface.co/FlagRelease/phi-4-hygon-FlagOS)<br>[Modalscope: phi-4-hygon-FlagOS](https://modelscope.cn/models/FlagRelease/phi-4-hygon-FlagOS)<br>[Huggingface: phi-4-metax-FlagOS](https://huggingface.co/FlagRelease/phi-4-metax-FlagOS)<br>[Modalscope: phi-4-metax-FlagOS](https://modelscope.cn/models/FlagRelease/phi-4-metax-FlagOS) |
-| Qwen2.5-32B-Instruct | [Huggingface: Qwen2.5-32B-Instruct-FlagOS-Nvidia](https://huggingface.co/FlagRelease/Qwen2.5-32B-Instruct-FlagOS-Nvidia)<br>[Modalscope: Qwen2.5-32B-Instruct-FlagOS-Nvidia](https://modelscope.cn/models/FlagRelease/Qwen2.5-32B-Instruct-FlagOS-Nvidia) |
-| RoboBrain2.0-7B-W8A16 | [Huggingface: RoboBrain2.0-7B-W8A16-FlagOS](https://huggingface.co/FlagRelease/RoboBrain2.0-7B-W8A16-FlagOS)<br>[Modalscope: RoboBrain2.0-7B-W8A16-FlagOS](https://modelscope.cn/models/FlagRelease/RoboBrain2.0-7B-W8A16-FlagOS) |
-| pi0 | [Huggingface: pi0-FlagOS](https://huggingface.co/FlagRelease/pi0-FlagOS)<br>[Modalscope: pi0-FlagOS](https://modelscope.cn/models/FlagRelease/pi0-FlagOS) |
-| DeepSeek-R1-INT8 | [Huggingface: DeepSeek-R1-FlagOS-Iluvatar-INT8](https://huggingface.co/FlagRelease/DeepSeek-R1-FlagOS-Iluvatar-INT8)<br>[Modalscope: DeepSeek-R1-FlagOS-Iluvatar-INT8](https://modelscope.cn/models/FlagRelease/DeepSeek-R1-FlagOS-Iluvatar-INT8)<br>[Huggingface: DeepSeek-R1-FlagOS-Kunlunxin-INT8](https://huggingface.co/FlagRelease/DeepSeek-R1-FlagOS-Kunlunxin-INT8)<br>[Modalscope: DeepSeek-R1-FlagOS-Kunlunxin-INT8](https://modelscope.cn/models/FlagRelease/DeepSeek-R1-FlagOS-Kunlunxin-INT8) |
-| DeepSeek-R1-INT4 | [Huggingface: DeepSeek-R1-INT4-FlagOS-Iluvatar](https://huggingface.co/FlagRelease/DeepSeek-R1-INT4-FlagOS-Iluvatar)<br>[Modalscope: DeepSeek-R1-INT4-FlagOS-Iluvatar](https://modelscope.cn/models/FlagRelease/DeepSeek-R1-INT4-FlagOS-Iluvatar) |
-| grok-2 | [Huggingface: grok-2-FlagOS](https://huggingface.co/FlagRelease/grok-2-FlagOS)<br>[Modalscope: grok-2-FlagOS](https://modelscope.cn/models/FlagRelease/grok-2-FlagOS) |
-| RoboBrain-X0 | [Huggingface: RoboBrain-X0-FlagOS](https://huggingface.co/FlagRelease/RoboBrain-X0-FlagOS)<br>[Modalscope: RoboBrain-X0-FlagOS](https://modelscope.cn/models/FlagRelease/RoboBrain-X0-FlagOS) |
-| MiniCPM-V-4 | [Huggingface: MiniCPM-V-4-FlagOS](https://huggingface.co/FlagRelease/MiniCPM-V-4-FlagOS)<br>[Modalscope: MiniCPM-V-4-FlagOS](https://modelscope.cn/models/FlagRelease/MiniCPM-V-4-FlagOS)<br>[Huggingface: MiniCPM-V-4-metax-FlagOS](https://huggingface.co/FlagRelease/MiniCPM-V-4-metax-FlagOS)<br>[Modalscope: MiniCPM-V-4-metax-FlagOS](https://modelscope.cn/models/FlagRelease/MiniCPM-V-4-metax-FlagOS) |
-| Qwen3-VL-235B-A22B-Instruct | [Huggingface: Qwen3-VL-235B-A22B-Instruct-FlagOS](https://huggingface.co/FlagRelease/Qwen3-VL-235B-A22B-Instruct-FlagOS)<br>[Modalscope: Qwen3-VL-235B-A22B-Instruct-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3-VL-235B-A22B-Instruct-FlagOS) |
-| GLM-4.5 | [Huggingface: GLM-4.5-FlagOS](https://huggingface.co/FlagRelease/GLM-4.5-FlagOS)<br>[Modalscope: GLM-4.5-FlagOS](https://modelscope.cn/models/FlagRelease/GLM-4.5-FlagOS) |
-| step3 | [Huggingface: step3-FlagOS](https://huggingface.co/FlagRelease/step3-FlagOS)<br>[Modalscope: step3-FlagOS](https://modelscope.cn/models/FlagRelease/step3-FlagOS) |
-| Qwen3.5-397B-A17B-zhenwu | [Huggingface: Qwen3.5-397B-A17B-zhenwu-FlagOS](https://huggingface.co/FlagRelease/Qwen3.5-397B-A17B-zhenwu-FlagOS)<br>[Modalscope: Qwen3.5-397B-A17B-zhenwu-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3.5-397B-A17B-zhenwu-FlagOS) |
-| RoboBrain2.0-7B | [Huggingface: RoboBrain2.0-7B-FlagOS](https://huggingface.co/FlagRelease/RoboBrain2.0-7B-FlagOS)<br>[Modalscope: RoboBrain2.0-7B-FlagOS](https://modelscope.cn/models/FlagRelease/RoboBrain2.0-7B-FlagOS)<br>[Huggingface: RoboBrain2.0-7B-FlagOS-Ascend](https://huggingface.co/FlagRelease/RoboBrain2.0-7B-FlagOS-Ascend)<br>[Modalscope: RoboBrain2.0-7B-FlagOS-Ascend](https://modelscope.cn/models/FlagRelease/RoboBrain2.0-7B-FlagOS-Ascend)<br>[Huggingface: RoboBrain2.0-7B-metax-FlagOS](https://huggingface.co/FlagRelease/RoboBrain2.0-7B-metax-FlagOS)<br>[Modalscope: RoboBrain2.0-7B-metax-FlagOS](https://modelscope.cn/models/FlagRelease/RoboBrain2.0-7B-metax-FlagOS) |
-| Kimi-K2-Instruct | [Huggingface: Kimi-K2-Instruct-FlagOS](https://huggingface.co/FlagRelease/Kimi-K2-Instruct-FlagOS)<br>[Modalscope: Kimi-K2-Instruct-FlagOS](https://modelscope.cn/models/FlagRelease/Kimi-K2-Instruct-FlagOS) |
-| Hunyuan-A13B-Instruct | [Huggingface: Hunyuan-A13B-Instruct-FlagOS](https://huggingface.co/FlagRelease/Hunyuan-A13B-Instruct-FlagOS)<br>[Modalscope: Hunyuan-A13B-Instruct-FlagOS](https://modelscope.cn/models/FlagRelease/Hunyuan-A13B-Instruct-FlagOS) |
-| RoboBrain2.0-7B-FP8Dynamic | [Huggingface: RoboBrain2.0-7B-FP8Dynamic-FlagOS](https://huggingface.co/FlagRelease/RoboBrain2.0-7B-FP8Dynamic-FlagOS)<br>[Modalscope: RoboBrain2.0-7B-FP8Dynamic-FlagOS](https://modelscope.cn/models/FlagRelease/RoboBrain2.0-7B-FP8Dynamic-FlagOS) |
-| RoboBrain-X0-Preview | [Huggingface: RoboBrain-X0-Preview-FlagOS](https://huggingface.co/FlagRelease/RoboBrain-X0-Preview-FlagOS)<br>[Modalscope: RoboBrain-X0-Preview-FlagOS](https://modelscope.cn/models/FlagRelease/RoboBrain-X0-Preview-FlagOS)<br>[Huggingface: RoboBrain-X0-Preview-ascend-FlagOS](https://huggingface.co/FlagRelease/RoboBrain-X0-Preview-ascend-FlagOS)<br>[Modalscope: RoboBrain-X0-Preview-ascend-FlagOS](https://modelscope.cn/models/FlagRelease/RoboBrain-X0-Preview-ascend-FlagOS) |
-| Kimi-K2-Thinking | [Huggingface: Kimi-K2-Thinking-FlagOS](https://huggingface.co/FlagRelease/Kimi-K2-Thinking-FlagOS)<br>[Modalscope: Kimi-K2-Thinking-FlagOS](https://modelscope.cn/models/FlagRelease/Kimi-K2-Thinking-FlagOS) |
-| MiniCPM-o-4.5-zhenwu | [Huggingface: MiniCPM-o-4.5-zhenwu-FlagOS](https://huggingface.co/FlagRelease/MiniCPM-o-4.5-zhenwu-FlagOS)<br>[Modalscope: MiniCPM-o-4.5-zhenwu-FlagOS](https://modelscope.cn/models/FlagRelease/MiniCPM-o-4.5-zhenwu-FlagOS) |
-| DeepSeek-R1-BF16 | [Huggingface: DeepSeek-R1-FlagOS-Nvidia-BF16](https://huggingface.co/FlagRelease/DeepSeek-R1-FlagOS-Nvidia-BF16)<br>[Modalscope: DeepSeek-R1-FlagOS-Nvidia-BF16](https://modelscope.cn/models/FlagRelease/DeepSeek-R1-FlagOS-Nvidia-BF16)<br>[Huggingface: DeepSeek-R1-FlagOS-Metax-BF16](https://huggingface.co/FlagRelease/DeepSeek-R1-FlagOS-Metax-BF16)<br>[Modalscope: DeepSeek-R1-FlagOS-Metax-BF16](https://modelscope.cn/models/FlagRelease/DeepSeek-R1-FlagOS-Metax-BF16)<br>[Huggingface: DeepSeek-R1-FlagOS-Cambricon-BF16](https://huggingface.co/FlagRelease/DeepSeek-R1-FlagOS-Cambricon-BF16)<br>[Modalscope: DeepSeek-R1-FlagOS-Cambricon-BF16](https://modelscope.cn/models/FlagRelease/DeepSeek-R1-FlagOS-Cambricon-BF16) |
-| MiniMax-M2 | [Huggingface: MiniMax-M2-FlagOS](https://huggingface.co/FlagRelease/MiniMax-M2-FlagOS)<br>[Modalscope: MiniMax-M2-FlagOS](https://modelscope.cn/models/FlagRelease/MiniMax-M2-FlagOS) |
-| Qwen3-Omni-30B-A3B-Instruct | [Huggingface: Qwen3-Omni-30B-A3B-Instruct-FlagOS](https://huggingface.co/FlagRelease/Qwen3-Omni-30B-A3B-Instruct-FlagOS)<br>[Modalscope: Qwen3-Omni-30B-A3B-Instruct-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3-Omni-30B-A3B-Instruct-FlagOS) |
-| Qwen2-7B | [Huggingface: Qwen2-7B-FlagOS-Arm](https://huggingface.co/FlagRelease/Qwen2-7B-FlagOS-Arm)<br>[Modalscope: Qwen2-7B-FlagOS-Arm](https://modelscope.cn/models/FlagRelease/Qwen2-7B-FlagOS-Arm) |
-| QwQ-32B | [Huggingface: QwQ-32B-FlagOS-Cambricon](https://huggingface.co/FlagRelease/QwQ-32B-FlagOS-Cambricon)<br>[Modalscope: QwQ-32B-FlagOS-Cambricon](https://modelscope.cn/models/FlagRelease/QwQ-32B-FlagOS-Cambricon)<br>[Huggingface: QwQ-32B-FlagOS-Nvidia](https://huggingface.co/FlagRelease/QwQ-32B-FlagOS-Nvidia)<br>[Modalscope: QwQ-32B-FlagOS-Nvidia](https://modelscope.cn/models/FlagRelease/QwQ-32B-FlagOS-Nvidia)<br>[Huggingface: QwQ-32B-FlagOS-Iluvatar](https://huggingface.co/FlagRelease/QwQ-32B-FlagOS-Iluvatar)<br>[Modalscope: QwQ-32B-FlagOS-Iluvatar](https://modelscope.cn/models/FlagRelease/QwQ-32B-FlagOS-Iluvatar) |
-| MiniCPM-o-4.5 | [Huggingface: MiniCPM-o-4.5-ascend-FlagOS](https://huggingface.co/FlagRelease/MiniCPM-o-4.5-ascend-FlagOS)<br>[Modalscope: MiniCPM-o-4.5-ascend-FlagOS](https://modelscope.cn/models/FlagRelease/MiniCPM-o-4.5-ascend-FlagOS)<br>[Huggingface: MiniCPM-o-4.5-metax-FlagOS](https://huggingface.co/FlagRelease/MiniCPM-o-4.5-metax-FlagOS)<br>[Modalscope: MiniCPM-o-4.5-metax-FlagOS](https://modelscope.cn/models/FlagRelease/MiniCPM-o-4.5-metax-FlagOS)<br>[Huggingface: MiniCPM-o-4.5-iluvatar-FlagOS](https://huggingface.co/FlagRelease/MiniCPM-o-4.5-iluvatar-FlagOS)<br>[Modalscope: MiniCPM-o-4.5-iluvatar-FlagOS](https://modelscope.cn/models/FlagRelease/MiniCPM-o-4.5-iluvatar-FlagOS)<br>[Huggingface: MiniCPM-o-4.5-hygon-FlagOS](https://huggingface.co/FlagRelease/MiniCPM-o-4.5-hygon-FlagOS)<br>[Modalscope: MiniCPM-o-4.5-hygon-FlagOS](https://modelscope.cn/models/FlagRelease/MiniCPM-o-4.5-hygon-FlagOS)<br>[Huggingface: MiniCPM-o-4.5-nvidia-FlagOS](https://huggingface.co/FlagRelease/MiniCPM-o-4.5-nvidia-FlagOS)<br>[Modalscope: MiniCPM-o-4.5-nvidia-FlagOS](https://modelscope.cn/models/FlagRelease/MiniCPM-o-4.5-nvidia-FlagOS) |
-| Qwen3.5-397B-A17B | [Huggingface: Qwen3.5-397B-A17B-nvidia-FlagOS](https://huggingface.co/FlagRelease/Qwen3.5-397B-A17B-nvidia-FlagOS)<br>[Modalscope: Qwen3.5-397B-A17B-nvidia-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3.5-397B-A17B-nvidia-FlagOS)<br>[Huggingface: Qwen3.5-397B-A17B-metax-FlagOS](https://huggingface.co/FlagRelease/Qwen3.5-397B-A17B-metax-FlagOS)<br>[Modalscope: Qwen3.5-397B-A17B-metax-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3.5-397B-A17B-metax-FlagOS) |
-| Qwen3-Next-80B-A3B-Instruct | [Huggingface: Qwen3-Next-80B-A3B-Instruct-FlagOS](https://huggingface.co/FlagRelease/Qwen3-Next-80B-A3B-Instruct-FlagOS)<br>[Modalscope: Qwen3-Next-80B-A3B-Instruct-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3-Next-80B-A3B-Instruct-FlagOS)<br>[Huggingface: Qwen3-Next-80B-A3B-Instruct-metax-FlagOS](https://huggingface.co/FlagRelease/Qwen3-Next-80B-A3B-Instruct-metax-FlagOS)<br>[Modalscope: Qwen3-Next-80B-A3B-Instruct-metax-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3-Next-80B-A3B-Instruct-metax-FlagOS) |
-| Qwen3-32B | [Huggingface: Qwen3-32B-FlagOS](https://huggingface.co/FlagRelease/Qwen3-32B-FlagOS)<br>[Modalscope: Qwen3-32B-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3-32B-FlagOS)<br>[Huggingface: Qwen3-32B-ascend-FlagOS](https://huggingface.co/FlagRelease/Qwen3-32B-ascend-FlagOS)<br>[Modalscope: Qwen3-32B-ascend-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3-32B-ascend-FlagOS) |
-| Qwen3-8B | [Huggingface: Qwen3-8B-metax-FlagOS](https://huggingface.co/FlagRelease/Qwen3-8B-metax-FlagOS)<br>[Modalscope: Qwen3-8B-metax-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3-8B-metax-FlagOS)<br>[Huggingface: Qwen3-8B-FlagOS](https://huggingface.co/FlagRelease/Qwen3-8B-FlagOS)<br>[Modalscope: Qwen3-8B-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3-8B-FlagOS)<br>[Huggingface: Qwen3-8B-mthreads-FlagOS](https://huggingface.co/FlagRelease/Qwen3-8B-mthreads-FlagOS)<br>[Modalscope: Qwen3-8B-mthreads-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3-8B-mthreads-FlagOS) |
-| Emu3.5 | [Huggingface: Emu3.5-FlagOS](https://huggingface.co/FlagRelease/Emu3.5-FlagOS)<br>[Modalscope: Emu3.5-FlagOS](https://modelscope.cn/models/FlagRelease/Emu3.5-FlagOS) |
-| MiniCPM_o_2.6 | [Huggingface: MiniCPM_o_2.6-FlagOS-Cambricon](https://huggingface.co/FlagRelease/MiniCPM_o_2.6-FlagOS-Cambricon)<br>[Modalscope: MiniCPM_o_2.6-FlagOS-Cambricon](https://modelscope.cn/models/FlagRelease/MiniCPM_o_2.6-FlagOS-Cambricon)<br>[Huggingface: MiniCPM_o_2.6-FlagOS-NVIDIA](https://huggingface.co/FlagRelease/MiniCPM_o_2.6-FlagOS-NVIDIA)<br>[Modalscope: MiniCPM_o_2.6-FlagOS-NVIDIA](https://modelscope.cn/models/FlagRelease/MiniCPM_o_2.6-FlagOS-NVIDIA) |
-| DeepSeek-V3.2-Exp | [Huggingface: DeepSeek-V3.2-Exp-FlagOS](https://huggingface.co/FlagRelease/DeepSeek-V3.2-Exp-FlagOS)<br>[Modalscope: DeepSeek-V3.2-Exp-FlagOS](https://modelscope.cn/models/FlagRelease/DeepSeek-V3.2-Exp-FlagOS) |
-| Qwen2.5-VL-32B-Instruct-BF16 | [Huggingface: Qwen2.5-VL-32B-Instruct-FlagOS-Metax-BF16](https://huggingface.co/FlagRelease/Qwen2.5-VL-32B-Instruct-FlagOS-Metax-BF16)<br>[Modalscope: Qwen2.5-VL-32B-Instruct-FlagOS-Metax-BF16](https://modelscope.cn/models/FlagRelease/Qwen2.5-VL-32B-Instruct-FlagOS-Metax-BF16) |
-| Qwen2.5-VL-32B-Instruct | [Huggingface: Qwen2.5-VL-32B-Instruct-FlagOS-Nvidia](https://huggingface.co/FlagRelease/Qwen2.5-VL-32B-Instruct-FlagOS-Nvidia)<br>[Modalscope: Qwen2.5-VL-32B-Instruct-FlagOS-Nvidia](https://modelscope.cn/models/FlagRelease/Qwen2.5-VL-32B-Instruct-FlagOS-Nvidia) |
-| RoboBrain2.5-8B | [Huggingface: RoboBrain2.5-8B-FlagOS](https://huggingface.co/FlagRelease/RoboBrain2.5-8B-FlagOS)<br>[Modalscope: RoboBrain2.5-8B-FlagOS](https://modelscope.cn/models/FlagRelease/RoboBrain2.5-8B-FlagOS)<br>[Huggingface: RoboBrain2.5-8B-ascend-FlagOS](https://huggingface.co/FlagRelease/RoboBrain2.5-8B-ascend-FlagOS)<br>[Modalscope: RoboBrain2.5-8B-ascend-FlagOS](https://modelscope.cn/models/FlagRelease/RoboBrain2.5-8B-ascend-FlagOS) |
-| gpt-oss-120b | [Huggingface: gpt-oss-120b-FlagOS](https://huggingface.co/FlagRelease/gpt-oss-120b-FlagOS)<br>[Modalscope: gpt-oss-120b-FlagOS](https://modelscope.cn/models/FlagRelease/gpt-oss-120b-FlagOS) |
-| Qwen3-4B | [Huggingface: Qwen3-4B-FlagOS-cambricon](https://huggingface.co/FlagRelease/Qwen3-4B-FlagOS-cambricon)<br>[Modalscope: Qwen3-4B-FlagOS-cambricon](https://modelscope.cn/models/FlagRelease/Qwen3-4B-FlagOS-cambricon)<br>[Huggingface: Qwen3-4B-FlagOS-Nvidia](https://huggingface.co/FlagRelease/Qwen3-4B-FlagOS-Nvidia)<br>[Modalscope: Qwen3-4B-FlagOS-Nvidia](https://modelscope.cn/models/FlagRelease/Qwen3-4B-FlagOS-Nvidia)<br>[Huggingface: Qwen3-4B-FlagOS-Iluvatar](https://huggingface.co/FlagRelease/Qwen3-4B-FlagOS-Iluvatar)<br>[Modalscope: Qwen3-4B-FlagOS-Iluvatar](https://modelscope.cn/models/FlagRelease/Qwen3-4B-FlagOS-Iluvatar)<br>[Huggingface: Qwen3-4B-FlagOS-Metax](https://huggingface.co/FlagRelease/Qwen3-4B-FlagOS-Metax)<br>[Modalscope: Qwen3-4B-FlagOS-Metax](https://modelscope.cn/models/FlagRelease/Qwen3-4B-FlagOS-Metax)<br>[Huggingface: Qwen3-4B-FlagOS-Ascend](https://huggingface.co/FlagRelease/Qwen3-4B-FlagOS-Ascend)<br>[Modalscope: Qwen3-4B-FlagOS-Ascend](https://modelscope.cn/models/FlagRelease/Qwen3-4B-FlagOS-Ascend)<br>[Huggingface: Qwen3-4B-hygon-FlagOS](https://huggingface.co/FlagRelease/Qwen3-4B-hygon-FlagOS)<br>[Modalscope: Qwen3-4B-hygon-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3-4B-hygon-FlagOS) |
-| Qwen3-30B-A3B | [Huggingface: Qwen3-30B-A3B-FlagOS-nvidia](https://huggingface.co/FlagRelease/Qwen3-30B-A3B-FlagOS-nvidia)<br>[Modalscope: Qwen3-30B-A3B-FlagOS-nvidia](https://modelscope.cn/models/FlagRelease/Qwen3-30B-A3B-FlagOS-nvidia)<br>[Huggingface: Qwen3-30B-A3B-Iluvatar-FlagOS](https://huggingface.co/FlagRelease/Qwen3-30B-A3B-Iluvatar-FlagOS)<br>[Modalscope: Qwen3-30B-A3B-Iluvatar-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3-30B-A3B-Iluvatar-FlagOS) |
-| RoboBrain2.0-32B | [Huggingface: RoboBrain2.0-32B-FlagOS](https://huggingface.co/FlagRelease/RoboBrain2.0-32B-FlagOS)<br>[Modalscope: RoboBrain2.0-32B-FlagOS](https://modelscope.cn/models/FlagRelease/RoboBrain2.0-32B-FlagOS)<br>[Huggingface: RoboBrain2.0-32B-Ascend-FlagOS](https://huggingface.co/FlagRelease/RoboBrain2.0-32B-Ascend-FlagOS)<br>[Modalscope: RoboBrain2.0-32B-Ascend-FlagOS](https://modelscope.cn/models/FlagRelease/RoboBrain2.0-32B-Ascend-FlagOS) |
-| Qwen3-235B-A22B-Instruct-2507 | [Huggingface: Qwen3-235B-A22B-Instruct-2507-FlagOS](https://huggingface.co/FlagRelease/Qwen3-235B-A22B-Instruct-2507-FlagOS)<br>[Modalscope: Qwen3-235B-A22B-Instruct-2507-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3-235B-A22B-Instruct-2507-FlagOS)<br>[Huggingface: Qwen3-235B-A22B-Instruct-2507-hygon-FlagOS](https://huggingface.co/FlagRelease/Qwen3-235B-A22B-Instruct-2507-hygon-FlagOS)<br>[Modalscope: Qwen3-235B-A22B-Instruct-2507-hygon-FlagOS](https://modelscope.cn/models/FlagRelease/Qwen3-235B-A22B-Instruct-2507-hygon-FlagOS) |
-| Seed-OSS-36B-Instruct | [Huggingface: Seed-OSS-36B-Instruct-FlagOS](https://huggingface.co/FlagRelease/Seed-OSS-36B-Instruct-FlagOS)<br>[Modalscope: Seed-OSS-36B-Instruct-FlagOS](https://modelscope.cn/models/FlagRelease/Seed-OSS-36B-Instruct-FlagOS) |
-| ERNIE-4.5-300B-A47B-PT | [Huggingface: ERNIE-4.5-300B-A47B-PT-FlagOS](https://huggingface.co/FlagRelease/ERNIE-4.5-300B-A47B-PT-FlagOS)<br>[Modalscope: ERNIE-4.5-300B-A47B-PT-FlagOS](https://modelscope.cn/models/FlagRelease/ERNIE-4.5-300B-A47B-PT-FlagOS) |
+# 单模型流水线（镜像模式）
+bash prompts/run_pipeline.sh --image <image:tag> --model <model_name>
 
-<!-- END:models -->
+# 批量执行
+bash prompts/run_batch.sh
+```
 
-## Example Usage of Released Artifacts
-The outputs of FlagRelease include validated large-model files and integrated FlagOS Docker images. By using these artifacts, users can rapidly deploy and run large models on different hardware platforms without performing model migration themselves or configuring complex software environments.
-Example Workflow
-1. Download Open-Source Model Weights
-  - Visit the FlagRelease pages on ModelScope or Hugging Face, select the required large model and the corresponding hardware-specific version, and download the model weight files directly.
-2. Download the FlagOS Image
-  - Obtain the officially provided integrated FlagOS Docker image, which includes the unified software stack and built-in hardware adaptation support.
-3. Deployment and Execution
-  - Combine the downloaded model weights with the FlagOS image to run the model directly on the target hardware.
-  - FlagOS automatically manages hardware resources and supports multi-chip parallel execution, eliminating the need for manual environment configuration.
-Example Application Scenarios
-- Research and experimentation: rapidly deploy large models for inference without concern for underlying hardware differences.
-- Production environments: directly deploy hardware-specific versions of models as services, ensuring performance and stability across different AI chips.
+## 支持平台
 
+- NVIDIA GPU（推荐：vllm >= 0.7.3 + flaggems >= 5.1.0 + flagtree >= 0.5.0）
+- 华为昇腾 NPU（vllm_ascend 适配层）
+
+## 环境要求
+
+- Claude Code CLI
+- Docker
+- 环境变量：`HARBOR_USER`、`HARBOR_PASSWORD`、`MODELSCOPE_TOKEN`、`HF_TOKEN`、`GITHUB_TOKEN`（按需）
+
+## 分支说明
+
+| 分支 | 用途 |
+|------|------|
+| main | 稳定版本 |
+| huawei | 华为昇腾适配开发 |
+| test | 集成测试 |
+| hygon | 海光适配开发 |
+| metax | 沐曦适配开发 |

@@ -1,0 +1,65 @@
+# Performance Testing Configuration
+# Version: 2.1.0
+#
+# 此文件包含完整的测试配置，可独立在容器内运行
+
+# =============================================================================
+# 服务连接信息 (由上游 skill 填充，同步自 shared/context.yaml)
+# =============================================================================
+server:
+  host: ""                # 服务地址 (如 localhost 或容器内 127.0.0.1)
+  port: 8000              # 服务端口
+
+model:
+  name: ""                # 模型名称/路径
+  tokenizer_path: ""      # tokenizer 路径
+
+# =============================================================================
+# Test Matrix - Input/Output Length Combinations
+# =============================================================================
+test_matrix:
+  - name: "prefill1_decode512"
+    input_len: 1
+    output_len: 512
+    enabled: true
+
+  - name: "1k_input_1k_output"
+    input_len: 1024
+    output_len: 1024
+    enabled: true
+
+  - name: "4k_input_1k_output"
+    input_len: 4096
+    output_len: 1024
+    enabled: true
+
+  - name: "16k_input_1k_output"
+    input_len: 16384
+    output_len: 1024
+    enabled: true
+
+  - name: "32k_input_1k_output"
+    input_len: 32768
+    output_len: 1024
+    enabled: true
+
+# =============================================================================
+# Concurrency Test Configuration
+# =============================================================================
+concurrency:
+  levels: [1, 2, 4, 8, 16, 32, 64, 128, 256]
+
+# =============================================================================
+# Benchmark Fixed Parameters
+# =============================================================================
+benchmark:
+  dataset_name: "random"
+  endpoint: "/v1/completions"
+  ignore_eos: true
+  trust_remote_code: true
+
+# =============================================================================
+# Output Configuration
+# =============================================================================
+output:
+  dir: "./output"            # 默认输出目录（--output-dir 参数优先）
