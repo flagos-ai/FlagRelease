@@ -282,7 +282,11 @@ def get_step_status(context: Optional[dict]) -> Tuple[List[str], List[str]]:
         return completed, pending
 
     ledger = context.get("workflow_ledger", {}).get("steps", [])
-    for step in ledger:
+    if isinstance(ledger, dict):
+        items = [{"id": k, **(v if isinstance(v, dict) else {})} for k, v in ledger.items()]
+    else:
+        items = ledger
+    for step in items:
         sid = step.get("id", "")
         status = step.get("status", "")
         if status == "success":

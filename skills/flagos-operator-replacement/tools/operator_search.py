@@ -65,7 +65,7 @@ DEFAULT_OPTIMIZER_SCRIPT = "/flagos-workspace/scripts/operator_optimizer.py"
 DEFAULT_WAIT_SCRIPT = "/flagos-workspace/scripts/wait_for_service.sh"
 DEFAULT_APPLY_CONFIG_SCRIPT = "/flagos-workspace/scripts/apply_op_config.py"
 
-SERVICE_STOP_CMD = "pkill -f 'vllm|sglang'"
+SERVICE_STOP_CMD = "pkill -9 -f 'vllm.entrypoints|sglang.launch_server|vllm serve|vllm.serve'"
 SERVICE_WAIT_TIMEOUT = 300  # 秒
 GPU_MEM_FREE_THRESHOLD = 0.95  # GPU 显存空闲比例阈值（>95% 视为已释放）
 GPU_RELEASE_TIMEOUT = 60       # GPU 显存释放等待超时（秒）
@@ -687,30 +687,37 @@ def restart_service(stop_cmd: str, startup_cmd: str,
     else:
         bg_cmd = f"nohup {startup_cmd} > {nohup_log} 2>&1 &"
         print("  启动服务（后台）...")
+    # 清空约定文件，确保读到的是本次启动写入的路径
+    SERVICE_LOG_PATH_FILE = "/flagos-workspace/logs/service_log_path"
+    run_cmd(f"rm -f {SERVICE_LOG_PATH_FILE}", check=False)
+
     run_cmd(bg_cmd, check=False)
 
     # 确定 wait_for_service 应监控的日志路径：
-    # start_service.sh 内部会将 vllm 输出重定向到 startup_<mode>.log，
-    # 导致 nohup_log 只有 shell echo，无 vllm 启动进度。
-    # 优先使用显式指定的 service_log_path，否则从 nohup_log 输出中自动探测。
+    # start_service.sh 启动后会将实际日志路径写入 service_log_path 文件。
+    # 优先使用显式指定的 service_log_path，其次读约定文件，最后回退到 nohup_log。
     monitor_log = service_log_path
     if not monitor_log:
-        time.sleep(1)
-        try:
-            with open(nohup_log, "r") as f:
-                for line in f:
-                    if "log=" in line:
-                        monitor_log = line.split("log=")[-1].strip()
-                        break
-        except (FileNotFoundError, IOError):
-            pass
+        for _ in range(5):
+            time.sleep(1)
+            try:
+                with open(SERVICE_LOG_PATH_FILE) as f:
+                    val = f.read().strip()
+                if val:
+                    monitor_log = val
+                    break
+            except (FileNotFoundError, IOError):
+                pass
     if not monitor_log:
         monitor_log = nohup_log
     if monitor_log != nohup_log:
         print(f"  监控实际服务日志: {monitor_log}")
 
+    # truncate 目标日志，确保 wait_for_service 从头读取本次启动内容
+    run_cmd(f"truncate -s 0 {monitor_log} 2>/dev/null || true", check=False)
+
     # 传递 --log-path 启用动态超时模式（监控日志活动而非固定超时）
-    wait_cmd = f"bash {wait_script} --timeout {wait_timeout}"
+    wait_cmd = f"bash {wait_script} --timeout {wait_timeout} --from-start"
     wait_cmd += f" --log-path {monitor_log}"
     if max_timeout:
         wait_cmd += f" --max-timeout {max_timeout}"
@@ -1174,6 +1181,49 @@ def run_full_search(state_path: str, perf_config: str,
 
         search_log.append(result)
 
+        if result.get("action") == "error" and "服务重启失败" in result.get("message", ""):
+            # Elimination mode: service crash means this operator is essential.
+            # Revert it (re-enable) and continue to next operator.
+            state = load_json(state_path)
+            if state.get("search_mode") == "elimination":
+                es = state.get("elimination_state", {})
+                search_ops = state.get("search_ops", state.get("all_ops", []))
+                idx = es.get("current_idx", 0)
+                crashed_op = search_ops[idx] if idx < len(search_ops) else ""
+                if crashed_op:
+                    print(f"\n  [恢复] 禁用 '{crashed_op}' 导致服务崩溃，标记为必需算子并继续")
+                    # Remove from disabled, add back to enabled
+                    disabled = state.get("disabled_ops", [])
+                    enabled = state.get("enabled_ops", [])
+                    if crashed_op in disabled:
+                        disabled.remove(crashed_op)
+                    if crashed_op not in enabled:
+                        enabled.append(crashed_op)
+                        enabled.sort()
+                    state["disabled_ops"] = disabled
+                    state["enabled_ops"] = enabled
+                    # Remove from cumulative_disabled
+                    cumulative = list(es.get("cumulative_disabled", []))
+                    if crashed_op in cumulative:
+                        cumulative.remove(crashed_op)
+                    es["cumulative_disabled"] = cumulative
+                    # Advance current_idx to skip this op
+                    es["current_idx"] = idx + 1
+                    state["elimination_state"] = es
+                    # Track essential ops
+                    essential = state.get("essential_ops", [])
+                    if crashed_op not in essential:
+                        essential.append(crashed_op)
+                    state["essential_ops"] = essential
+                    save_json(state, state_path)
+                    search_log[-1]["decision"] = "essential_keep"
+                    search_log[-1]["op_name"] = crashed_op
+                    # Kill any leftover processes before next round
+                    run_cmd("pkill -9 -f 'vllm\\|sglang\\|vllm serve' 2>/dev/null", check=False)
+                    time.sleep(5)
+                    continue
+            break
+
         if result.get("action") in ("completed", "failed", "error"):
             break
 
@@ -1232,6 +1282,41 @@ def run_full_search(state_path: str, perf_config: str,
     if summary["disabled_list"]:
         print(f"# 禁用列表: {', '.join(summary['disabled_list'])}")
     print(f"{'#' * 60}\n")
+
+    # 搜索达标时，自动运行正式 benchmark 保存为 flagos_optimized.json
+    # 解决问题：编排层可能遗漏保存标准命名的 V3 结果文件，导致下游对比和报告读不到调优结果
+    if state.get("status") == "completed":
+        print("[最终验证] 搜索达标，保存正式 benchmark 为 flagos_optimized.json...")
+        benchmark_script = kwargs.get("benchmark_script", DEFAULT_BENCHMARK_SCRIPT)
+        final_bench = run_benchmark_quick(perf_config, benchmark_script, "flagos_optimized")
+        if final_bench.get("success"):
+            final_throughputs = final_bench.get("throughputs", {})
+            # 计算最终 ratio（与 native 对比）
+            native_tp = state.get("native_throughput", 0)
+            output_vals = []
+            for v in final_throughputs.values():
+                if isinstance(v, dict):
+                    output_vals.append(v.get("output", 0) or 0)
+                else:
+                    output_vals.append(v)
+            final_output_tp = max(output_vals) if output_vals else 0
+            final_ratio = final_output_tp / native_tp if native_tp > 0 else 0
+            summary["final_benchmark"] = {
+                "throughputs": final_throughputs,
+                "output_throughput": round(final_output_tp, 2),
+                "native_throughput": round(native_tp, 2),
+                "ratio": round(final_ratio, 4),
+            }
+            summary["performance_ok"] = final_ratio >= state.get("target_ratio", 0.8)
+            summary["final_ratio"] = round(final_ratio, 4)
+            print(f"  ✓ flagos_optimized.json 已保存 (ratio={final_ratio*100:.1f}%)")
+        else:
+            print(f"  ⚠ 最终 benchmark 失败: {final_bench.get('error', '?')}（搜索结果仍有效）")
+            summary["performance_ok"] = True
+            summary["final_ratio"] = round(state.get("current_ratio", 0), 4)
+    else:
+        summary["performance_ok"] = False
+        summary["final_ratio"] = round(state.get("current_ratio", 0), 4)
 
     # 保存摘要
     summary_path = str(Path(state_path).parent / "search_summary.json")

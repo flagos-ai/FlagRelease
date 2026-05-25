@@ -7,4 +7,4 @@ harbor.baai.ac.cn/flagrelease-public/hy_gems_tree:2605111710 | XiaomiMiMo/MiMo-7
 harbor.baai.ac.cn/flagrelease-public/hy_gems_tree:2605111710 | THUDM/glm-4-9b-chat
 harbor.baai.ac.cn/flagrelease-public/hy_gems_tree:2605111710 | nv-community/Nemotron-H-8B-Base-8K
 harbor.baai.ac.cn/flagrelease-public/hy_gems_tree:2605111710 | openbmb/MiniCPM4.1-8B
-harbor.baai.ac.cn/flagrelease-public/hy_gems_tree:2605111710 | moonshotai/Kimi-K2.6
+harbor.baai.ac.cn/flagrelease-public/hy_gems_tree:2605111710 | moonshotai/Kimi-K2.6 d611745 (fix: 多工具修复 + persist_tuning_checkpoint 新增)

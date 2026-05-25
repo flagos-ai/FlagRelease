@@ -206,7 +206,7 @@ class PublishStage(BaseStage):
             "modelscope_model_id": ms_model_id if not ms_failed else "",
             "modelscope_url": f"https://modelscope.cn/models/{ms_model_id}" if ms_model_id and not ms_failed else "",
             "huggingface_repo_id": hf_repo_id if not hf_failed else "",
-            "huggingface_url": f"https://hf-mirror.com/{hf_repo_id}" if hf_repo_id and not hf_failed else "",
+            "huggingface_url": f"https://huggingface.co/{hf_repo_id}" if hf_repo_id and not hf_failed else "",
         }
         print(f"\n[RELEASE_SUMMARY]{json.dumps(release_summary, ensure_ascii=False)}[/RELEASE_SUMMARY]")
 
@@ -1336,10 +1336,8 @@ print(f'已发布到 ModelScope: {{model_id}}')
         print(f"  目标仓库: {repo_id}")
         print(f"  可见性: {'私有' if publish_config.private else '公开'}")
 
-        # 默认使用 hf-mirror 镜像站，避免国内网络直连 huggingface.co 不可达
         if not os.environ.get("HF_ENDPOINT"):
-            os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-            print(f"  HF_ENDPOINT 未设置，使用镜像站: https://hf-mirror.com")
+            os.environ["HF_ENDPOINT"] = "https://huggingface.co"
 
         if self._publish_to_huggingface_cli(readme_path):
             return True
@@ -1368,7 +1366,7 @@ print(f'已发布到 ModelScope: {{model_id}}')
 
         token = publish_config.huggingface_token or ""
         private_flag = "True" if publish_config.private else "False"
-        hf_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+        hf_endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
 
         sdk_script = f"""
 import os
@@ -1425,7 +1423,7 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
         self._docker_cp_readme_to_container(readme_path, container_upload_dir)
 
         token = publish_config.huggingface_token or ""
-        hf_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+        hf_endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
         token_env = f"HF_TOKEN={token} " if token else ""
         endpoint_env = f"HF_ENDPOINT={hf_endpoint} "
 
@@ -1517,7 +1515,7 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
             if not self._ensure_container_package("huggingface_hub"):
                 print(f"  x 容器内安装 huggingface_hub 失败")
                 return False
-            hf_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+            hf_endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
             shell_cmd = f"PATH=/opt/conda/bin:$PATH huggingface-cli upload {repo_id} {container_tmp}/README.md README.md"
             docker_cmd = ["docker", "exec",
                           "-e", f"HF_TOKEN={token}",

@@ -179,7 +179,9 @@ LOG_FILE="/flagos-workspace/logs/startup_${MODE}.log"
 
 # 创建 startup_default.log 符号链接指向当前 mode 的日志
 # 崩溃诊断脚本统一引用 startup_default.log，确保路径一致
-ln -sf "startup_${MODE}.log" /flagos-workspace/logs/startup_default.log
+if [ "$MODE" != "default" ]; then
+    ln -sf "startup_${MODE}.log" /flagos-workspace/logs/startup_default.log
+fi
 
 # FlagGems 模式启动前清理 Triton/FlagGems 编译缓存（约束39：避免旧缓存隐藏问题算子）
 if [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
@@ -224,6 +226,7 @@ echo "[start_service.sh] CMD: ${CMD}"
 nohup bash -c "cd /flagos-workspace && ${CMD}" > "${LOG_FILE}" 2>&1 &
 SVC_PID=$!
 echo "${SVC_PID}" > /flagos-workspace/logs/service.pid
+echo "${LOG_FILE}" > /flagos-workspace/logs/service_log_path
 echo "[start_service.sh] PID=${SVC_PID}, log=${LOG_FILE}"
 
 # 保存控制文件副本到 results/（供报告对比配置 vs 运行时算子，仅首次启动时保存）

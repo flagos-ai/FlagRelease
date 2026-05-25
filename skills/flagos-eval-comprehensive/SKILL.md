@@ -831,7 +831,51 @@ ISSUE_EOF"
 **触发条件**：`workflow.accuracy_ok = false` 且 `env_type ≠ native`
 **跳过条件**：`accuracy_ok = true`（不触发时显示已完成）
 
-固化选择：
+### 步骤5入口 — 恢复检测（必须先执行）
+
+会话可能在调优中途超时，重试时必须先检查是否已有达标结果：
+
+```bash
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 -c \"
+import yaml
+with open('/flagos-workspace/shared/context.yaml') as f:
+    ctx = yaml.safe_load(f)
+tuning = ctx.get('accuracy_tuning', {})
+if tuning.get('completed'):
+    print('TUNING_COMPLETED')
+    print('final_disabled_ops=' + str(tuning.get('final_disabled_ops', '')))
+    print('final_round=' + str(tuning.get('final_round', 0)))
+else:
+    latest = tuning.get('latest_round', 0)
+    if latest:
+        print(f'TUNING_IN_PROGRESS round={latest}')
+    else:
+        print('TUNING_NOT_STARTED')
+\""
+```
+
+- 输出 `TUNING_COMPLETED` → 调优已达标，应用 `final_disabled_ops` 配置，标记步骤5为 success，直接进入步骤6
+- 输出 `TUNING_IN_PROGRESS` → 从 `latest_round + 1` 继续调优（跳过已完成的轮次）
+- 输出 `TUNING_NOT_STARTED` → 正常开始调优
+
+### 每轮评测后 — checkpoint 持久化（必须执行）
+
+每轮评测完成后，**立即**调用 checkpoint 工具写入结果，确保会话超时不丢失进度：
+
+```bash
+# ROUND: 当前轮次 (1/2/3)
+# SCORE: 本轮评测得分 (如 22.0)
+# BASELINE: V1 基线分数 (如 22.0)
+# DISABLED_OPS: 本轮累积禁用的算子，逗号分隔 (如 "addmm,mm,bmm")
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/persist_tuning_checkpoint.py $ROUND $SCORE $BASELINE '$DISABLED_OPS'"
+```
+
+该工具会：
+- 写入本轮结果到 `context.yaml` 的 `accuracy_tuning` 字段
+- 如果本轮达标（下降 ≤5%），自动标记 `accuracy_tuning.completed=true` 和 `workflow.accuracy_ok=true`
+
+### 固化选择
+
 - 使用 `diagnose_ops.py accuracy-groups` 分组排查（不使用逐个排查）
 - **最多 3 轮**（3 组），达标即停
 - **累积禁用**：第1轮禁用组A，第2轮禁用组A+B，第3轮禁用组A+B+C（每轮在上一轮基础上追加禁用）

@@ -37,6 +37,7 @@ while [[ $# -gt 0 ]]; do
         --timeout) TIMEOUT="$2"; shift 2 ;;
         --max-timeout) MAX_TIMEOUT="$2"; shift 2 ;;
         --log-path) LOG_PATH="$2"; shift 2 ;;
+        --from-start) FROM_START=true; shift ;;
         --mode) MODE="$2"; shift 2 ;;
         -h|--help)
             echo "Usage: wait_for_service.sh [OPTIONS]"
@@ -95,7 +96,11 @@ FATAL_LINE=""
 
 # 初始化日志跟踪
 if [ "$DYNAMIC_MODE" = true ] && [ -f "$LOG_PATH" ]; then
-    LAST_LOG_SIZE=$(wc -c < "$LOG_PATH" 2>/dev/null || echo 0)
+    if [ "${FROM_START:-false}" = true ]; then
+        LAST_LOG_SIZE=0
+    else
+        LAST_LOG_SIZE=$(wc -c < "$LOG_PATH" 2>/dev/null || echo 0)
+    fi
     LAST_ACTIVITY_TIME=$(date +%s)
 fi
 
@@ -403,11 +408,11 @@ print_failure_diagnostics() {
     elif command -v netstat &>/dev/null; then
         netstat -tlnp 2>/dev/null | grep ":${PORT}" || echo "  端口 ${PORT} 未监听"
     else
-        # ss/netstat 都没有，用 curl 探测
-        if curl -s --connect-timeout 1 "http://127.0.0.1:${PORT}/" &>/dev/null; then
+        # ss/netstat 都没有，用 python 探测
+        if python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${PORT}/', timeout=1)" &>/dev/null; then
             echo "  端口 ${PORT} 有响应"
         else
-            echo "  端口 ${PORT} 未监听（ss/netstat 不可用，curl 探测）"
+            echo "  端口 ${PORT} 未监听（ss/netstat 不可用，python 探测）"
         fi
     fi
 
@@ -527,7 +532,14 @@ print(json.dumps({
     fi
 
     # === CHECK 2: 端点检查 ===
-    RESPONSE=$(curl -s --connect-timeout 3 "${MODELS_URL}" 2>/dev/null || true)
+    RESPONSE=$(python3 -c "
+import urllib.request, urllib.error
+try:
+    r = urllib.request.urlopen('${MODELS_URL}', timeout=3)
+    print(r.read().decode())
+except:
+    pass
+" 2>/dev/null || true)
 
     if [ -n "$RESPONSE" ]; then
         HAS_DATA=$(echo "$RESPONSE" | python3 -c "
