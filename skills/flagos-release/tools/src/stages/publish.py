@@ -1324,8 +1324,10 @@ print(f'已发布到 ModelScope: {{model_id}}')
 
     # ==================== HuggingFace ====================
 
+    _HF_ENDPOINTS = ["https://huggingface.co", "https://hf-mirror.com"]
+
     def _publish_to_huggingface(self, readme_path: Optional[str]) -> bool:
-        """发布到 HuggingFace（CLI 优先，SDK 降级）"""
+        """发布到 HuggingFace（官网优先，镜像站降级；CLI 优先，SDK 降级）"""
         publish_config = self.config.publish
 
         model_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name
@@ -1336,14 +1338,25 @@ print(f'已发布到 ModelScope: {{model_id}}')
         print(f"  目标仓库: {repo_id}")
         print(f"  可见性: {'私有' if publish_config.private else '公开'}")
 
-        if not os.environ.get("HF_ENDPOINT"):
-            os.environ["HF_ENDPOINT"] = "https://huggingface.co"
+        # 如果用户已指定 endpoint，只用该 endpoint
+        user_endpoint = os.environ.get("HF_ENDPOINT", "")
+        endpoints = [user_endpoint] if user_endpoint else self._HF_ENDPOINTS
 
-        if self._publish_to_huggingface_cli(readme_path):
-            return True
+        for i, endpoint in enumerate(endpoints):
+            os.environ["HF_ENDPOINT"] = endpoint
+            print(f"  尝试 HuggingFace endpoint: {endpoint}")
 
-        print("  CLI 方式失败，尝试使用 SDK...")
-        return self._publish_to_huggingface_sdk(readme_path)
+            if self._publish_to_huggingface_cli(readme_path):
+                return True
+
+            print("  CLI 方式失败，尝试使用 SDK...")
+            if self._publish_to_huggingface_sdk(readme_path):
+                return True
+
+            if i < len(endpoints) - 1:
+                print(f"  ⚠ endpoint {endpoint} 不可用，切换到 {endpoints[i+1]}")
+
+        return False
 
     def _publish_to_huggingface_sdk(self, readme_path: Optional[str]) -> bool:
         """使用 SDK 发布到 HuggingFace（降级方案，容器内执行）"""
