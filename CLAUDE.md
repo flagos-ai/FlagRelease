@@ -56,6 +56,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 | 组件安装 / install component / 安装 FlagGems / 安装 FlagTree / 升级 FlagGems / flag upgrade | flagos-component-install | `skills/flagos-component-install/SKILL.md` |
 | 发布 / 镜像上传 / 镜像打包 / 模型发布 / release / publish / image upload / package image | flagos-release | `skills/flagos-release/SKILL.md` |
 | 安装 plugin / install plugin / plugin 安装 / vllm-plugin | flagos-plugin-install | `skills/flagos-plugin-install/SKILL.md` |
+| 离线推理 / offline inference / 模型适配 / inference 跑通 / 推理验证 | flagos-offline-inference | `skills/flagos-offline-inference/SKILL.md` |
 
 ---
 

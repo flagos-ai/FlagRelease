@@ -2,7 +2,7 @@
 # FlagOS 全自动迁移流程 — 一键启动脚本（V1+V2+V3 算子调优）
 #
 # 用法:
-#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...]
+#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>]
 #
 # 自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址
 # 模型路径：仅需模型名，自动搜索宿主机路径；未找到则容器内自动下载。也可通过 --model-path 显式指定
@@ -96,7 +96,7 @@ if [[ "${1:-}" == "--image" ]]; then
 else
     # 统一格式：7 个位置参数
     if [ $# -lt 7 ]; then
-        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...]"
+        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>]"
         echo ""
         echo "自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址"
         echo ""
@@ -121,6 +121,7 @@ else
         case "$1" in
             --verbose) FILTER_FLAGS="--verbose"; shift ;;
             --proxy) PROXY_LIST="$2"; shift 2 ;;
+            --flagrelease-token) export FLAGRELEASE_API_TOKEN="$2"; shift 2 ;;
             --model-path)
                 if [ -z "${2:-}" ]; then
                     echo "错误: --model-path 需要指定路径"
@@ -601,6 +602,45 @@ print(f'{ctr}|{env}|{last}')
 " 2>/dev/null
 }
 
+# ===== 平台上传（脚本退出时自动执行） =====
+upload_to_platform_on_exit() {
+    [ -z "${MODEL:-}" ] && return 0
+    [ -z "${FLAGRELEASE_API_TOKEN:-}" ] && return 0
+
+    local host_base="/data/flagos-workspace/${MODEL}"
+    local ctx_file="${host_base}/config/context_final.yaml"
+    [ ! -f "${ctx_file}" ] && ctx_file="${host_base}/config/context_snapshot.yaml"
+
+    local results_dir="${host_base}/results/"
+
+    # 尝试从容器同步最新数据（异常退出时宿主机可能是旧版本）
+    local ctr="${DIAG_CONTAINER:-${SEG_CTR:-${CONTAINER:-}}}"
+    if [ -n "${ctr}" ] && docker inspect --type=container "${ctr}" &>/dev/null; then
+        mkdir -p "${host_base}/config" "${host_base}/results"
+        docker cp "${ctr}:/flagos-workspace/shared/context.yaml" "${host_base}/config/context_snapshot.yaml" 2>/dev/null || true
+        docker cp "${ctr}:/flagos-workspace/results/." "${results_dir}" 2>/dev/null || true
+        # 刷新 ctx_file（同步后可能新增了 context_snapshot）
+        [ ! -f "${ctx_file}" ] && ctx_file="${host_base}/config/context_snapshot.yaml"
+    fi
+
+    [ ! -f "${ctx_file}" ] && return 0
+    [ ! -d "${results_dir}" ] && return 0
+
+    # 至少有一个 json 数据文件才上传
+    local has_data
+    has_data=$(find "${results_dir}" -name "*.json" -type f 2>/dev/null | head -1)
+    [ -z "${has_data}" ] && return 0
+
+    echo ""
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EXIT] 上传结果到 FlagRelease 平台..."
+    python3 skills/flagos-release/tools/upload_to_platform.py \
+        --context "${ctx_file}" \
+        --results-dir "${results_dir}" \
+        --logs-dir "${host_base}/logs/" \
+        --model-owner "自动化" \
+        2>&1 && echo "  ✓ 数据已上传到 FlagRelease 平台" || echo "  ⚠ 数据上传失败（不影响流程结果）"
+}
+
 # ===== GPU 服务清理（脚本退出时自动执行） =====
 cleanup_gpu_services() {
     local ctr=""
@@ -636,7 +676,7 @@ except: pass
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 未找到有效容器，跳过 GPU 服务清理"
     fi
 }
-trap 'cleanup_gpu_services' EXIT
+trap 'upload_to_platform_on_exit; cleanup_gpu_services' EXIT
 
 # ===== 段间完成性校验 =====
 # 检查 context_snapshot.yaml 中 workflow_ledger 的步骤完成状态
@@ -2176,6 +2216,9 @@ except: print('True')
             echo "  ✓ performance_compare_v3.csv 已生成" || echo "  ⚠ V3 性能对比文件生成失败"
     fi
 fi
+
+# ========== 上传结果到 FlagRelease 平台 ==========
+# 已移入 trap EXIT 处理函数 upload_to_platform_on_exit()，正常/异常退出均自动执行
 
 # 流程结束前清理推理服务
 cleanup_gpu_services
