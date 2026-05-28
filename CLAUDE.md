@@ -90,7 +90,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 - 触发条件：步骤 8 完成且 `workflow.qualified=true`，否则步骤 9-13 全部 skipped
 - 崩溃停止：步骤 9 安装失败或步骤 10 服务崩溃 → 写 issue → 设 `plugin_workflow.crash_stopped=true` → **停止任务**
 - Issue 路由：步骤 9-13 所有 issue 通过 `issue_reporter.py full --type plugin-error --repo flagos-ai/vllm-plugin-FL` 提交（只保存本地文件）
-- 不触发算子调优：精度/性能不达标只写 issue，不进入调优流程
+- **严禁在步骤 9-13 执行任何形式的算子调优**：精度/性能不达标只写 issue，不调用 `operator_search.py`、不手动禁用算子、不执行 `toggle_flaggems.py`。Plugin 阶段仅测试，发现问题立即写 issue 并继续/停止
 - 算子集复用：使用主流程已达标的算子集（含步骤 5/7 的禁用列表），不重新调优，禁止重新检测 GPU
 - 镜像 tag：原 date_tag 追加 `-plugin`（如 `202603301143-plugin`）
 - Plugin 不达标发布：精度/性能不达标时，先提交 issue，再打包镜像上传 Harbor（私有），不更新 ModelScope/HuggingFace README
@@ -352,7 +352,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 22. **性能测试 output-name 标准命名**：V1=`native_performance`，V2=`flagos_performance`，V3=`flagos_optimized`
 23. **步骤5/7的 trace 文件独立**，不混入步骤4/6的 trace
 24. **步骤7性能算子调优 elimination 策略不限轮次上限**，每轮 benchmark 使用 quick 模式，达标即停。步骤5精度调优最多 3 轮（见 flagos-eval-comprehensive SKILL.md）
-25. **服务启动崩溃后重试前必须清理 Triton/FlagGems 编译缓存**。`rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/`。确保重试在干净状态下暴露所有问题算子，禁止依赖旧缓存侥幸通过
+25. **每次服务启动前必须清理 Triton/FlagGems 编译缓存**。`start_service.sh` 已内置此逻辑。手动启动时也必须执行 `rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/`。确保每次启动在干净状态下暴露所有问题算子，禁止依赖旧缓存侥幸通过
 
 ### 算子控制约束
 
@@ -365,7 +365,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 ### 数据完整性约束
 
 28. **每个 Skill 完成后必须写入对应的 trace JSON**
-29. **workflow 状态字段必须与实际数据一致**。`accuracy_ok=true` 仅当V2精度下降 ≤ 阈值；`performance_ok=true` 仅当 min_ratio ≥ target_ratio
+29. **workflow 状态字段必须与实际数据一致**。`accuracy_ok=true` 仅当V2精度下降 ≤ 阈值；`performance_ok=true` 仅当 min_ratio ≥ target_ratio。**禁止直接通过 `update_context.py --set workflow.performance_ok=true` 或 `--set workflow.accuracy_ok=true` 设置**——这两个字段只能由 `operator_search.py`（调优达标时自动设置）或 `update_context.py` 的内置校验逻辑设置。`update_context.py` 已增加写入校验：设置这两个字段为 true 时会自动验证最新结果文件，不达标则拒绝写入
 30. **工具脚本失败后必须读取 `/flagos-workspace/logs/_last_error.json`**，将错误同步到 context.yaml
 31. **流程中断后自动诊断**。新会话启动时应优先读取 `logs/failure_diagnosis.json` 了解中断原因
 32. **编排层生成的 JSON 必须包含 `_meta` 字段说明**

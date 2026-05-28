@@ -1215,6 +1215,30 @@ with open('/flagos-workspace/shared/context.yaml') as f:
     fi
 
     # 直接执行 eval_wrapper.py
+    # Thinking model 需要更长超时（输出 token 多 5-10x）
+    local STALL_TO=300
+    local MAX_TO=3600
+    IS_THINKING_MODEL=$(python3 -c "
+import yaml
+try:
+    with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
+        ctx = yaml.safe_load(f)
+    rt = ctx.get('runtime', {})
+    mn = ctx.get('model', {}).get('name', '').lower()
+    thinking_patterns = ['qwen3', 'qwq', 'deepseek-r1', 'deepseek-r2', 'mimo', 'hunyuan']
+    if rt.get('thinking_model') or any(p in mn for p in thinking_patterns):
+        print('true')
+    else:
+        print('false')
+except:
+    print('false')
+" 2>/dev/null) || IS_THINKING_MODEL="false"
+    if [ "${IS_THINKING_MODEL}" = "true" ]; then
+        STALL_TO=600
+        MAX_TO=7200
+        echo "  [thinking model] 使用加长超时: stall=${STALL_TO}s, max=${MAX_TO}s"
+    fi
+
     echo "  ▶ docker exec ${SEG_CTR} ... eval_wrapper.py --output ${OUTPUT_FILE}"
     docker exec "${SEG_CTR}" bash -c "
         cd /flagos-workspace/scripts && \
@@ -1222,7 +1246,7 @@ with open('/flagos-workspace/shared/context.yaml') as f:
             --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --output /flagos-workspace/results/${OUTPUT_FILE}' \
             --context-yaml /flagos-workspace/shared/context.yaml \
             --service-log \$(ls -t /flagos-workspace/logs/startup_*.log 2>/dev/null | head -1) \
-            --stall-timeout 300 --max-timeout 3600
+            --stall-timeout ${STALL_TO} --max-timeout ${MAX_TO}
     "
     return $?
 }

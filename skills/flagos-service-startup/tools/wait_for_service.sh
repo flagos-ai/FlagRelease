@@ -606,6 +606,14 @@ except:
 " 2>/dev/null || echo "unknown")
 
             report_success "$MODEL_ID" "$MAX_MODEL_LEN"
+
+            # 自动写入 service_ok=true（消除对 LLM 记忆的依赖）
+            if [ -f /flagos-workspace/scripts/update_context.py ]; then
+                PATH=/opt/conda/bin:$PATH python3 /flagos-workspace/scripts/update_context.py \
+                    --set workflow.service_ok=true --json 2>/dev/null && \
+                    echo "  [auto] workflow.service_ok=true 已写入 context.yaml" || true
+            fi
+
             exit 0
         fi
     fi

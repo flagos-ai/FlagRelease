@@ -95,6 +95,15 @@ if [ -z "$MODEL_PATH" ]; then
     exit 1
 fi
 
+# 强制清理残留进程和编译缓存（每次启动前无条件执行）
+pkill -9 -f 'vllm.entrypoints|sglang.launch_server|vllm serve|vllm.serve' 2>/dev/null || true
+for _i in $(seq 1 15); do
+    if ! ss -tlnp 2>/dev/null | grep -qE ":${PORT}\b"; then break; fi
+    sleep 1
+done
+rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/ 2>/dev/null || true
+echo "[start_service.sh] 已清理残留进程和编译缓存"
+
 # 端口占用检测与自动递增（最多尝试 +10）
 ORIGINAL_PORT="$PORT"
 for i in $(seq 0 10); do

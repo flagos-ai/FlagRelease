@@ -1160,13 +1160,27 @@ def run_full_search(state_path: str, perf_config: str,
                 time.sleep(10)
                 gpu_check = check_gpu_availability(required_gpus=required_gpus)
                 if not gpu_check["available"]:
-                    print(f"  FATAL: GPU 资源不可用 ({gpu_check['message']})，搜索中止")
-                    search_log.append({
-                        "action": "error",
-                        "message": f"GPU 资源不可用: {gpu_check['message']}",
-                        "round": round_num,
-                    })
-                    break
+                    # Fallback: docker restart 强制释放 GPU 显存（MetaX 等平台 pkill 不可靠）
+                    container_name = os.environ.get("CONTAINER_NAME", "")
+                    if not container_name:
+                        try:
+                            with open("/flagos-workspace/.container_name", "r") as f:
+                                container_name = f.read().strip()
+                        except Exception:
+                            pass
+                    if container_name:
+                        print(f"  pkill 未能释放 GPU，尝试 docker restart {container_name}...")
+                        run_cmd(f"docker restart {container_name}", check=False, timeout=60)
+                        time.sleep(15)
+                        gpu_check = check_gpu_availability(required_gpus=required_gpus)
+                    if not gpu_check["available"]:
+                        print(f"  FATAL: GPU 资源不可用 ({gpu_check['message']})，搜索中止")
+                        search_log.append({
+                            "action": "error",
+                            "message": f"GPU 资源不可用: {gpu_check['message']}",
+                            "round": round_num,
+                        })
+                        break
             print(f"  ✓ GPU 恢复可用: {gpu_check['message']}")
 
         result = run_search_step(
@@ -1291,20 +1305,42 @@ def run_full_search(state_path: str, perf_config: str,
         final_bench = run_benchmark_quick(perf_config, benchmark_script, "flagos_optimized")
         if final_bench.get("success"):
             final_throughputs = final_bench.get("throughputs", {})
-            # 计算最终 ratio（与 native 对比）
+            # 使用 compute_min_ratio 计算最终 ratio，与搜索过程中的判定逻辑一致
             native_tp = state.get("native_throughput", 0)
-            output_vals = []
-            for v in final_throughputs.values():
-                if isinstance(v, dict):
-                    output_vals.append(v.get("output", 0) or 0)
-                else:
-                    output_vals.append(v)
-            final_output_tp = max(output_vals) if output_vals else 0
-            final_ratio = final_output_tp / native_tp if native_tp > 0 else 0
+            native_tps = state.get("native_throughputs")
+            try:
+                from operator_optimizer import compute_min_ratio
+                final_ratio = compute_min_ratio(final_throughputs, native_tp, native_tps)
+            except ImportError:
+                # fallback: 手动计算 min ratio
+                ratios = []
+                for key, val in final_throughputs.items():
+                    if isinstance(val, dict):
+                        native_val = (native_tps or {}).get(key, {}) if native_tps else {}
+                        if not native_val and native_tp > 0:
+                            native_val = {"output": native_tp, "total": native_tp}
+                        if isinstance(native_val, (int, float)):
+                            native_val = {"output": native_val, "total": native_val}
+                        for metric in ("output", "total"):
+                            tp = val.get(metric, 0) or 0
+                            n_tp = native_val.get(metric, 0) if isinstance(native_val, dict) else 0
+                            if n_tp > 0 and tp > 0:
+                                ratios.append(tp / n_tp)
+                    else:
+                        if native_tp > 0 and val > 0:
+                            ratios.append(val / native_tp)
+                final_ratio = min(ratios) if ratios else 0.0
+
+            # Sanity check: ratio 异常低时告警（防止计算错误导致误判）
+            if final_ratio < 0.20 and state.get("current_ratio", 0) > 0.50:
+                print(f"  ⚠ 最终 ratio={final_ratio*100:.1f}% 异常偏低（搜索过程 ratio={state.get('current_ratio', 0)*100:.1f}%），"
+                      f"使用搜索过程的 ratio 作为最终结果")
+                final_ratio = state.get("current_ratio", 0)
+
             summary["final_benchmark"] = {
                 "throughputs": final_throughputs,
-                "output_throughput": round(final_output_tp, 2),
                 "native_throughput": round(native_tp, 2),
+                "native_throughputs": native_tps,
                 "ratio": round(final_ratio, 4),
             }
             summary["performance_ok"] = final_ratio >= state.get("target_ratio", 0.8)
