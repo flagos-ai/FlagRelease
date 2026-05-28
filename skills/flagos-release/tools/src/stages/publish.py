@@ -587,6 +587,7 @@ class PublishStage(BaseStage):
             "container_run_cmd": model_info.container_run_cmd,
             "serve_start_cmd": model_info.serve_start_cmd,
             "serve_infer_cmd": model_info.serve_infer_cmd,
+            "canonical_model_path": model_info.canonical_model_path,
             "new_model_introduction": model_info.new_model_introduction,
             "evaluation_table": self._generate_evaluation_table(),
         }
@@ -818,11 +819,24 @@ class PublishStage(BaseStage):
         vars["image_harbor_path"] = model_info.image_harbor_path or self.config.publish.harbor_path or "N/A"
         image_harbor = vars["image_harbor_path"]
         vars["image_pull_cmd"] = f"docker pull {image_harbor}" if image_harbor != "N/A" else ""
-        vars["weights_local_path"] = self.config.publish.weights_dir or "/data/models/" + (model_info.source_of_model_weights.split("/")[-1] if model_info.source_of_model_weights else "model")
+
+        # 统一模型路径：下载目标、serve 命令、docker run 挂载三者一致
+        canonical_path = model_info.canonical_model_path or "/data/models/model"
+        vars["canonical_model_path"] = canonical_path
+        vars["weights_local_path"] = canonical_path
 
         vars["container_run_cmd"] = model_info.container_run_cmd.strip() if model_info.container_run_cmd else ""
         vars["serve_start_cmd"] = model_info.serve_start_cmd.strip() if model_info.serve_start_cmd else ""
         vars["serve_infer_cmd"] = model_info.serve_infer_cmd.strip() if model_info.serve_infer_cmd else self._default_curl_cmd()
+
+        # 一致性校验：serve_start_cmd 中必须包含 canonical_model_path
+        if vars["serve_start_cmd"] and canonical_path not in vars["serve_start_cmd"]:
+            print(f"  ⚠ 路径一致性警告: serve_start_cmd 中未包含 canonical_model_path ({canonical_path})")
+            print(f"    serve_start_cmd: {vars['serve_start_cmd'][:120]}...")
+            # 尝试自动修正：替换 vllm serve 后的路径
+            import re
+            vars["serve_start_cmd"] = re.sub(
+                r'(vllm\s+serve\s+)\S+', rf'\1{canonical_path}', vars["serve_start_cmd"])
 
         vars["evaluation_table"] = self._generate_evaluation_table()
 
@@ -930,6 +944,7 @@ class PublishStage(BaseStage):
         model_info = self.config.model_info
         vendor_display = model_info.vendor.capitalize() if model_info.vendor else "Unknown"
         flagrelease_name = model_info.flagrelease_name or model_info.output_name or "model"
+        canonical_model_path = model_info.canonical_model_path or f"/data/{flagrelease_name}"
         new_model_intro = model_info.new_model_introduction or "新模型介绍，待定...."
         eval_table = self._generate_evaluation_table()
         docker_version = model_info.docker_version or "N/A"
@@ -973,7 +988,7 @@ Environment Setup
 ### Download Open-source Model Weights
 ```bash
 pip install modelscope
-modelscope download --model FlagRelease/{flagrelease_name} --local_dir /data/{flagrelease_name}
+modelscope download --model FlagRelease/{flagrelease_name} --local_dir {canonical_model_path}
 ```
 
 ### Start the Container
