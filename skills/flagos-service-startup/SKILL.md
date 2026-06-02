@@ -687,6 +687,7 @@ ISSUE_EOF"
    - 查看 graph capture 前最后注册/编译的算子
    - 以上均无法定位 → 逐步禁用最近一轮新启用的算子组（二分法排查）
 8. **停止条件**：连续 2 轮重试后服务仍崩溃，且上述所有定位手段均无法识别新的问题算子 → 最后尝试 `--enforce-eager` 一次 → 仍失败 → 判定不可恢复 → 调用 `issue_reporter.py full --type operator-crash`
+8b. **恢复成功也必须提 issue**：禁用算子后服务恢复成功时，同样必须调用 `issue_reporter.py full --type operator-crash --recovered` 记录哪些算子在该硬件/模型组合下会导致崩溃。这是通知 FlagGems 团队修复算子 bug 的唯一途径，不可省略。
 9. 排除操作失误：native 模式也失败 → 环境问题，需人工介入
 10. 确认是 FlagGems 问题（非硬件）→ `workflow.service_ok = false` → 提交 issue 后**停止任务**，不继续步骤4/6/7 的精度性能评测（FlagGems 完全不可用时评测无意义）→ 直接到步骤8发布（私有，附带崩溃原因）
 

@@ -206,7 +206,7 @@ class PublishStage(BaseStage):
             "modelscope_model_id": ms_model_id if not ms_failed else "",
             "modelscope_url": f"https://modelscope.cn/models/{ms_model_id}" if ms_model_id and not ms_failed else "",
             "huggingface_repo_id": hf_repo_id if not hf_failed else "",
-            "huggingface_url": f"https://hf-mirror.com/{hf_repo_id}" if hf_repo_id and not hf_failed else "",
+            "huggingface_url": f"https://huggingface.co/{hf_repo_id}" if hf_repo_id and not hf_failed else "",
         }
         print(f"\n[RELEASE_SUMMARY]{json.dumps(release_summary, ensure_ascii=False)}[/RELEASE_SUMMARY]")
 
@@ -587,6 +587,7 @@ class PublishStage(BaseStage):
             "container_run_cmd": model_info.container_run_cmd,
             "serve_start_cmd": model_info.serve_start_cmd,
             "serve_infer_cmd": model_info.serve_infer_cmd,
+            "canonical_model_path": model_info.canonical_model_path,
             "new_model_introduction": model_info.new_model_introduction,
             "evaluation_table": self._generate_evaluation_table(),
         }
@@ -818,11 +819,24 @@ class PublishStage(BaseStage):
         vars["image_harbor_path"] = model_info.image_harbor_path or self.config.publish.harbor_path or "N/A"
         image_harbor = vars["image_harbor_path"]
         vars["image_pull_cmd"] = f"docker pull {image_harbor}" if image_harbor != "N/A" else ""
-        vars["weights_local_path"] = self.config.publish.weights_dir or "/data/models/" + (model_info.source_of_model_weights.split("/")[-1] if model_info.source_of_model_weights else "model")
+
+        # 统一模型路径：下载目标、serve 命令、docker run 挂载三者一致
+        canonical_path = model_info.canonical_model_path or "/data/models/model"
+        vars["canonical_model_path"] = canonical_path
+        vars["weights_local_path"] = canonical_path
 
         vars["container_run_cmd"] = model_info.container_run_cmd.strip() if model_info.container_run_cmd else ""
         vars["serve_start_cmd"] = model_info.serve_start_cmd.strip() if model_info.serve_start_cmd else ""
         vars["serve_infer_cmd"] = model_info.serve_infer_cmd.strip() if model_info.serve_infer_cmd else self._default_curl_cmd()
+
+        # 一致性校验：serve_start_cmd 中必须包含 canonical_model_path
+        if vars["serve_start_cmd"] and canonical_path not in vars["serve_start_cmd"]:
+            print(f"  ⚠ 路径一致性警告: serve_start_cmd 中未包含 canonical_model_path ({canonical_path})")
+            print(f"    serve_start_cmd: {vars['serve_start_cmd'][:120]}...")
+            # 尝试自动修正：替换 vllm serve 后的路径
+            import re
+            vars["serve_start_cmd"] = re.sub(
+                r'(vllm\s+serve\s+)\S+', rf'\1{canonical_path}', vars["serve_start_cmd"])
 
         vars["evaluation_table"] = self._generate_evaluation_table()
 
@@ -930,6 +944,7 @@ class PublishStage(BaseStage):
         model_info = self.config.model_info
         vendor_display = model_info.vendor.capitalize() if model_info.vendor else "Unknown"
         flagrelease_name = model_info.flagrelease_name or model_info.output_name or "model"
+        canonical_model_path = model_info.canonical_model_path or f"/data/{flagrelease_name}"
         new_model_intro = model_info.new_model_introduction or "新模型介绍，待定...."
         eval_table = self._generate_evaluation_table()
         docker_version = model_info.docker_version or "N/A"
@@ -973,7 +988,7 @@ Environment Setup
 ### Download Open-source Model Weights
 ```bash
 pip install modelscope
-modelscope download --model FlagRelease/{flagrelease_name} --local_dir /data/{flagrelease_name}
+modelscope download --model FlagRelease/{flagrelease_name} --local_dir {canonical_model_path}
 ```
 
 ### Start the Container
@@ -1324,8 +1339,10 @@ print(f'已发布到 ModelScope: {{model_id}}')
 
     # ==================== HuggingFace ====================
 
+    _HF_ENDPOINTS = ["https://huggingface.co", "https://hf-mirror.com"]
+
     def _publish_to_huggingface(self, readme_path: Optional[str]) -> bool:
-        """发布到 HuggingFace（CLI 优先，SDK 降级）"""
+        """发布到 HuggingFace（官网优先，镜像站降级；CLI 优先，SDK 降级）"""
         publish_config = self.config.publish
 
         model_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name
@@ -1336,16 +1353,25 @@ print(f'已发布到 ModelScope: {{model_id}}')
         print(f"  目标仓库: {repo_id}")
         print(f"  可见性: {'私有' if publish_config.private else '公开'}")
 
-        # 默认使用 hf-mirror 镜像站，避免国内网络直连 huggingface.co 不可达
-        if not os.environ.get("HF_ENDPOINT"):
-            os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-            print(f"  HF_ENDPOINT 未设置，使用镜像站: https://hf-mirror.com")
+        # 如果用户已指定 endpoint，只用该 endpoint
+        user_endpoint = os.environ.get("HF_ENDPOINT", "")
+        endpoints = [user_endpoint] if user_endpoint else self._HF_ENDPOINTS
 
-        if self._publish_to_huggingface_cli(readme_path):
-            return True
+        for i, endpoint in enumerate(endpoints):
+            os.environ["HF_ENDPOINT"] = endpoint
+            print(f"  尝试 HuggingFace endpoint: {endpoint}")
 
-        print("  CLI 方式失败，尝试使用 SDK...")
-        return self._publish_to_huggingface_sdk(readme_path)
+            if self._publish_to_huggingface_cli(readme_path):
+                return True
+
+            print("  CLI 方式失败，尝试使用 SDK...")
+            if self._publish_to_huggingface_sdk(readme_path):
+                return True
+
+            if i < len(endpoints) - 1:
+                print(f"  ⚠ endpoint {endpoint} 不可用，切换到 {endpoints[i+1]}")
+
+        return False
 
     def _publish_to_huggingface_sdk(self, readme_path: Optional[str]) -> bool:
         """使用 SDK 发布到 HuggingFace（降级方案，容器内执行）"""
@@ -1368,7 +1394,7 @@ print(f'已发布到 ModelScope: {{model_id}}')
 
         token = publish_config.huggingface_token or ""
         private_flag = "True" if publish_config.private else "False"
-        hf_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+        hf_endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
 
         sdk_script = f"""
 import os
@@ -1425,7 +1451,7 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
         self._docker_cp_readme_to_container(readme_path, container_upload_dir)
 
         token = publish_config.huggingface_token or ""
-        hf_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+        hf_endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
         token_env = f"HF_TOKEN={token} " if token else ""
         endpoint_env = f"HF_ENDPOINT={hf_endpoint} "
 
@@ -1517,7 +1543,7 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
             if not self._ensure_container_package("huggingface_hub"):
                 print(f"  x 容器内安装 huggingface_hub 失败")
                 return False
-            hf_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+            hf_endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
             shell_cmd = f"PATH=/opt/conda/bin:$PATH huggingface-cli upload {repo_id} {container_tmp}/README.md README.md"
             docker_cmd = ["docker", "exec",
                           "-e", f"HF_TOKEN={token}",

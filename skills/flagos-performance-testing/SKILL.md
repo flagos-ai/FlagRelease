@@ -216,6 +216,13 @@ print(f'已记录 {len(ops)} 个算子到 ops_list.json')
 
 ## 步骤 6：运行 V2 FlagGems 性能测试
 
+**V2 服务启动崩溃处理**：如果 FlagGems 模式服务在此步骤启动时崩溃（步骤3已验证过但缓存清理后可能暴露新问题），按以下流程处理：
+1. 备份崩溃日志
+2. 调用 `diagnose_ops.py crash-log` 定位问题算子
+3. 禁用问题算子 → 清理 Triton 缓存 → 重启服务
+4. 恢复成功 → 调用 `issue_reporter.py full --type operator-crash --recovered` → 继续 benchmark
+5. 不可恢复（连续 2 轮无法定位新算子）→ 调用 `issue_reporter.py full --type operator-crash` → 设 `performance_ok=false` → 跳到步骤 8 发布
+
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/benchmark_runner.py \
   --config scripts/config/perf_config.yaml \

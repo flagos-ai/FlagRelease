@@ -15,7 +15,9 @@ update_context.py — context.yaml 结构化更新工具
 """
 
 import argparse
+import glob
 import json
+import os
 import sys
 import datetime
 
@@ -135,6 +137,62 @@ def convert_field_value_pairs(argv):
     return converted
 
 
+def _validate_ok_field(ctx, key_path):
+    """校验 performance_ok/accuracy_ok 设为 true 时，实际数据是否支持。
+
+    返回 None 表示通过，返回 str 表示错误原因。
+    """
+    import glob
+
+    results_dir = "/flagos-workspace/results"
+
+    if key_path == "workflow.performance_ok":
+        target_ratio = get_nested(ctx, "workflow.target_ratio", 0.8)
+        # 检查最新的性能结果文件
+        perf_files = sorted(glob.glob(f"{results_dir}/flagos_*.json") +
+                           glob.glob(f"{results_dir}/search_step_*.json"),
+                           key=lambda f: os.path.getmtime(f) if os.path.exists(f) else 0,
+                           reverse=True)
+        if not perf_files:
+            return (f"设置 {key_path}=true 失败: 未找到性能结果文件。"
+                    f"请通过 operator_search.py 或 benchmark_runner.py 生成结果后再设置")
+        # 读取最新结果验证 ratio
+        try:
+            with open(perf_files[0], "r") as f:
+                data = json.load(f)
+            # 从 search_summary 或 benchmark 结果中提取 ratio
+            ratio = data.get("final_ratio") or data.get("ratio") or 0
+            if isinstance(ratio, dict):
+                ratio = min(ratio.values()) if ratio else 0
+            if ratio < target_ratio:
+                return (f"设置 {key_path}=true 失败: 最新结果 ratio={ratio*100:.1f}% "
+                        f"< target={target_ratio*100:.0f}% (文件: {perf_files[0]})")
+        except (json.JSONDecodeError, IOError):
+            pass  # 文件解析失败时不阻断，允许设置
+
+    elif key_path == "workflow.accuracy_ok":
+        threshold = get_nested(ctx, "workflow.accuracy_threshold", 0.05)
+        acc_files = sorted(glob.glob(f"{results_dir}/accuracy_compare*.json"),
+                          key=lambda f: os.path.getmtime(f) if os.path.exists(f) else 0,
+                          reverse=True)
+        if not acc_files:
+            return (f"设置 {key_path}=true 失败: 未找到精度对比结果文件。"
+                    f"请通过精度评测生成结果后再设置")
+        try:
+            with open(acc_files[0], "r") as f:
+                data = json.load(f)
+            drop = data.get("accuracy_drop") or data.get("drop") or 0
+            if isinstance(drop, str):
+                drop = float(drop.strip('%')) / 100
+            if abs(drop) > threshold:
+                return (f"设置 {key_path}=true 失败: 精度下降 {abs(drop)*100:.1f}% "
+                        f"> 阈值 {threshold*100:.0f}% (文件: {acc_files[0]})")
+        except (json.JSONDecodeError, IOError, ValueError):
+            pass
+
+    return None
+
+
 def main():
     raw_args = sys.argv[1:]
     if "--field" in raw_args:
@@ -179,6 +237,14 @@ def main():
                 sys.exit(1)
             key, val = item.split("=", 1)
             parsed = parse_value(val)
+
+            # 校验 performance_ok/accuracy_ok 写入（防止误设 true）
+            if key in ("workflow.performance_ok", "workflow.accuracy_ok") and parsed is True:
+                err = _validate_ok_field(ctx, key)
+                if err:
+                    print(f"[ERROR] {err}", file=sys.stderr)
+                    sys.exit(1)
+
             set_nested(ctx, key, parsed)
             changes.append({"op": "set", "key": key, "value": parsed})
 

@@ -568,16 +568,24 @@ def _compute_enabled_from_disabled(disabled_ops):
 
 
 def normalize_ops_to_func_names(ops):
-    """将算子名列表从大写显示名转换为小写函数名（纯规则转换，不依赖 gems.txt）"""
+    """将算子名列表从大写显示名或 debug 行格式转换为小写函数名（纯规则转换，不依赖 gems.txt）"""
     if not ops:
         return ops
-    if all(op == op.lower() and ' ' not in op for op in ops):
+    if all(op == op.lower() and ' ' not in op and 'flag_gems' not in op for op in ops):
         return ops
 
     result = []
     for op in ops:
+        # Handle [DEBUG] flag_gems.ops.X.Y: GEMS Z format
+        m = re.match(r'\[DEBUG\]\s*flag_gems\.ops\.(\w+)\.(\w+):', op, re.IGNORECASE)
+        if m:
+            func_name = m.group(2)
+            result.append(func_name)
+            continue
+        # Fallback: display name format (e.g., "GEMS ADD", "ADD")
         s = re.sub(r'\s*\(.*?\)', '', op)
         s = s.split(',')[0].strip()
+        s = re.sub(r'^GEMS\s+', '', s, flags=re.IGNORECASE)
         s = re.sub(r'-hopper$', '', s, flags=re.IGNORECASE)
         s = s.replace('.STABLE', '_stable')
         s = re.sub(r'\s+FORWARD$', '', s, flags=re.IGNORECASE)

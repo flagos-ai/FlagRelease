@@ -189,6 +189,11 @@ def main():
     # 自动注入模型名（防止使用模板默认值或遗漏）
     eval_cmd = inject_model_name(eval_cmd, api_base)
 
+    # 自动注入 --api-base（防止 fast_gpqa.py 使用默认端口而非实际端口）
+    if "--api-base" not in eval_cmd and "fast_gpqa.py" in eval_cmd:
+        eval_cmd = eval_cmd.replace("fast_gpqa.py", f"fast_gpqa.py --api-base '{api_base}'", 1)
+        print(f"[WRAPPER] 自动注入 api_base: {api_base}")
+
     output_file = get_eval_output_file(eval_cmd)
 
     # 记录服务日志初始偏移

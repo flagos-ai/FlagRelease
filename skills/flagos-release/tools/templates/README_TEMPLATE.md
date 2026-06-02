@@ -30,7 +30,7 @@ Environment Setup
 ### Download Open-source Model Weights
 ```bash
 pip install modelscope
-modelscope download --model FlagRelease/{{flagrelease_name}} --local_dir /data/{{flagrelease_name}}
+modelscope download --model FlagRelease/{{flagrelease_name}} --local_dir {{canonical_model_path}}
 ```
 
 ### Start the Container

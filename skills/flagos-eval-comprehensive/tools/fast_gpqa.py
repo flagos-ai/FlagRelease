@@ -48,13 +48,25 @@ except ImportError:
 # Thinking 模型检测
 # =============================================================================
 
-THINKING_PATTERNS = ['qwen3', 'qwq', 'deepseek-r1', 'deepseek-r2']
+THINKING_PATTERNS = ['qwen3', 'qwq', 'deepseek-r1', 'deepseek-r2', 'mimo', 'hunyuan']
 
 
 def detect_thinking(model_name: str) -> bool:
-    """根据模型名自动检测是否为 thinking model。"""
+    """根据模型名或 context.yaml 检测是否为 thinking model。"""
     name_lower = model_name.lower()
-    return any(p in name_lower for p in THINKING_PATTERNS)
+    if any(p in name_lower for p in THINKING_PATTERNS):
+        return True
+    # 从 context.yaml 读取 thinking_model 字段（优先级最高）
+    try:
+        import yaml as _yaml
+        ctx_path = "/flagos-workspace/shared/context.yaml"
+        with open(ctx_path, "r") as f:
+            ctx = _yaml.safe_load(f) or {}
+        if ctx.get("runtime", {}).get("thinking_model") or ctx.get("model", {}).get("thinking_model"):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 # =============================================================================

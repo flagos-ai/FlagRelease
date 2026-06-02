@@ -89,6 +89,7 @@ class ModelInfo:
     container_run_cmd: str = ""
     serve_start_cmd: str = ""
     serve_infer_cmd: str = ""
+    canonical_model_path: str = ""
 
 
 @dataclass
@@ -138,29 +139,28 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
             {'metric': method, 'origin': ev['v1_score'], 'flagos': ev['v2_score']}
         ]
 
-    # serve_start_cmd
+    # serve_start_cmd + container_run_cmd
+    # 核心原则：README 中下载路径、docker run 挂载路径、vllm serve 模型路径三者必须一致
+    # 统一使用 canonical_model_path 作为唯一模型路径
+    import re
     svc = ctx.get('service', {})
     runtime = ctx.get('runtime', {})
     commands = ctx.get('commands', {})
     model_short = model.get('name', '').split('/')[-1] if model.get('name') else ''
     flagrelease_name = f"{model_short}-FlagOS" if model_short else ''
-    user_model_path = f"/data/{flagrelease_name}" if flagrelease_name else model.get('container_path', '')
+    canonical_model_path = f"/data/{flagrelease_name}" if flagrelease_name else model.get('container_path', '/data/model')
 
     if commands.get('serve_start'):
-        import re
         serve_cmd = commands['serve_start']
-        # 替换模型路径为用户下载路径
-        container_path = model.get('container_path', '')
-        if container_path and user_model_path:
-            serve_cmd = serve_cmd.replace(container_path, user_model_path)
+        # 用正则替换 vllm serve 后的模型路径参数（第一个非 -- 参数）
+        serve_cmd = re.sub(r'(vllm\s+serve\s+)\S+', rf'\1{canonical_model_path}', serve_cmd)
         # 替换端口为默认 8000
         serve_cmd = re.sub(r'--port\s+\d+', '--port 8000', serve_cmd)
         config.model_info.serve_start_cmd = serve_cmd
     else:
-        port = svc.get('port', 8000)
         tp = runtime.get('tp_size') or 1
         max_model_len = svc.get('max_model_len', '')
-        cmd_parts = [f"vllm serve {user_model_path}",
+        cmd_parts = [f"vllm serve {canonical_model_path}",
                      f"--host 0.0.0.0 --port 8000",
                      f"--tensor-parallel-size {tp}",
                      f"--served-model-name {model_short}" if model_short else None,
@@ -171,19 +171,23 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
 
     # container_run_cmd (优先从 context commands 读取实际命令)
     if commands.get('container_run'):
-        import re
         run_cmd = commands['container_run']
-        # 替换镜像为 {{IMAGE}} 占位符（镜像通常是最后一个非选项参数或可通过已知镜像名匹配）
+        # 替换镜像为目标镜像占位符
         image_name = ctx.get('image', {}).get('name', '')
         if image_name:
             run_cmd = run_cmd.replace(image_name, '{{IMAGE}}')
         # 移除 workspace 挂载（-v ...:/flagos-workspace）
         run_cmd = re.sub(r'\s*-v\s+\S+:/flagos-workspace', '', run_cmd)
-        # 替换模型挂载为简化的 -v /data:/data
+        # 替换所有模型相关挂载为 -v /data:/data（canonical_model_path 在 /data/ 下，天然可达）
         container_path = model.get('container_path', '')
         local_path = model.get('local_path', '')
-        if container_path and local_path:
+        if container_path:
             run_cmd = re.sub(r'-v\s+\S+:' + re.escape(container_path), '-v /data:/data', run_cmd)
+        elif local_path:
+            run_cmd = re.sub(r'-v\s+' + re.escape(local_path) + r':\S+', '-v /data:/data', run_cmd)
+        # 如果命令中没有 -v /data:/data（原始命令无模型挂载或替换未命中），追加
+        if '-v /data:/data' not in run_cmd and '-v /data:' not in run_cmd:
+            run_cmd = re.sub(r'(docker\s+run\s+)', r'\1-v /data:/data ', run_cmd)
         # 替换容器名为通用名
         run_cmd = re.sub(r'--name[= ]\S+', '--name flagos', run_cmd)
         config.model_info.container_run_cmd = run_cmd
@@ -192,6 +196,9 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
             "docker run -itd --gpus=all --network=host "
             "-v /data:/data --name flagos {{IMAGE}}"
         )
+
+    # 保存 canonical_model_path 供模板使用
+    config.model_info.canonical_model_path = canonical_model_path
 
     # ---- chip ----
     gpu = ctx.get('gpu', {})
