@@ -207,6 +207,23 @@ docker run -d --name ${CONTAINER_NAME} \
     ${IMAGE} sleep infinity
 ```
 
+#### 模板 F：Hygon DCU（海光）
+
+```bash
+docker run -d --name ${CONTAINER_NAME} \
+    --net=host --ipc=host \
+    --device=/dev/kfd --device=/dev/mkfd --device=/dev/dri \
+    --group-add video \
+    -v /opt/hyhal:/opt/hyhal \
+    -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
+    -v ${WORKSPACE_PATH:-/data/flagos-workspace/${MODEL_NAME}}:/flagos-workspace \
+    -v /data:/data \
+    ${IMAGE} sleep infinity
+```
+
+> **Hygon 识别**：宿主机存在 `/opt/hyhal` 或 `/opt/dtk` 目录，或 `hy-smi` 命令可用，或 `detect_gpu.py` 返回 `vendor=hygon`。
+> **必需设备**：`/dev/kfd`（ROCm kernel driver）、`/dev/mkfd`（Hygon DCU 特有）、`/dev/dri`（DRM 渲染）。缺少 `/dev/mkfd` 时 DCU 不可用。
+
 **模板规则**：
 - 业务环境变量（`USE_FLAGGEMS`、`VLLM_USE_V1` 等）不写入模板，由后续 skill 按需添加
 - 所有模板统一挂载 `/flagos-workspace`（宿主机路径为 `/data/flagos-workspace/${MODEL_NAME}`，按模型隔离）
@@ -254,7 +271,7 @@ model:
   local_path: "<宿主机路径>"
   container_path: "<容器内路径>"
 gpu:
-  vendor: "<nvidia|huawei|mthreads|metax|cambricon>"
+  vendor: "<nvidia|huawei|mthreads|metax|cambricon|hygon>"
   type: "<GPU 型号>"
   count: <数量>
 workspace:

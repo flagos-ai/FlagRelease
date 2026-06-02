@@ -45,10 +45,11 @@ GPU_VENDORS: List[Tuple[str, str, str, str]] = [
 VENDOR_KEYWORDS = {
     "nvidia": ["nvidia", "geforce", "tesla", "quadro", "rtx", "a100", "a800", "h100", "h800", "l40", "v100"],
     "huawei": ["ascend", "atlas"],
-    "hygon": ["hygon", "dcu"],
+    "hygon": ["hygon", "dcu", "bw200", "bw3000", "bw100"],
     "cambricon": ["mlu"],
     "mthreads": ["mtt", "musa"],
     "kunlunxin": ["kunlun", "xpu"],
+    "metax": ["metax", "c500", "c550", "n100"],
 }
 
 
@@ -201,6 +202,12 @@ def _detect_via_cli() -> Optional[Dict[str, Any]]:
         if output is None:
             continue
 
+        # Hygon/MetaX 歧义消解：rocm-smi 存在时需进一步判断
+        if vendor == "hygon" and cli_cmd == "rocm-smi":
+            actual_vendor = _disambiguate_rocm_vendor()
+            if actual_vendor and actual_vendor != "hygon":
+                continue  # 不是 Hygon，跳过让后续厂商匹配
+
         # 解析输出
         if vendor == "nvidia":
             info = _parse_nvidia_smi(output)
@@ -219,6 +226,34 @@ def _detect_via_cli() -> Optional[Dict[str, Any]]:
             }
 
     return None
+
+
+def _disambiguate_rocm_vendor() -> str:
+    """当 rocm-smi 存在时，区分 Hygon DCU 和 AMD GPU。
+
+    Hygon 特征：/opt/hyhal 或 /opt/dtk 目录存在，或 hy-smi 命令存在，
+    或 torch.cuda.get_device_name() 含 BW 前缀（BW200/BW3000）。
+    """
+    # 检查 Hygon 特有目录
+    if os.path.isdir("/opt/hyhal") or os.path.isdir("/opt/dtk"):
+        return "hygon"
+    # 检查 hy-smi 命令
+    if _cli_exists("hy-smi"):
+        return "hygon"
+    # 检查 /dev/mkfd（Hygon DCU 特有设备）
+    if os.path.exists("/dev/mkfd"):
+        return "hygon"
+    # 通过 torch 获取设备名
+    try:
+        import torch
+        if torch.cuda.is_available():
+            dev_name = torch.cuda.get_device_name(0).upper()
+            if any(kw in dev_name for kw in ["BW", "HYGON", "DCU"]):
+                return "hygon"
+    except Exception:
+        pass
+    # 默认视为 AMD（非 Hygon）
+    return "amd"
 
 
 # =============================================================================

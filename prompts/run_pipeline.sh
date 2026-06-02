@@ -2,7 +2,7 @@
 # FlagOS 全自动迁移流程 — 一键启动脚本（V1+V2+V3 算子调优）
 #
 # 用法:
-#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...]
+#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>]
 #
 # 自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址
 # 模型路径：仅需模型名，自动搜索宿主机路径；未找到则容器内自动下载。也可通过 --model-path 显式指定
@@ -96,7 +96,7 @@ if [[ "${1:-}" == "--image" ]]; then
 else
     # 统一格式：7 个位置参数
     if [ $# -lt 7 ]; then
-        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...]"
+        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>]"
         echo ""
         echo "自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址"
         echo ""
@@ -121,6 +121,7 @@ else
         case "$1" in
             --verbose) FILTER_FLAGS="--verbose"; shift ;;
             --proxy) PROXY_LIST="$2"; shift 2 ;;
+            --flagrelease-token) export FLAGRELEASE_API_TOKEN="$2"; shift 2 ;;
             --model-path)
                 if [ -z "${2:-}" ]; then
                     echo "错误: --model-path 需要指定路径"
@@ -601,6 +602,45 @@ print(f'{ctr}|{env}|{last}')
 " 2>/dev/null
 }
 
+# ===== 平台上传（脚本退出时自动执行） =====
+upload_to_platform_on_exit() {
+    [ -z "${MODEL:-}" ] && return 0
+    [ -z "${FLAGRELEASE_API_TOKEN:-}" ] && return 0
+
+    local host_base="/data/flagos-workspace/${MODEL}"
+    local ctx_file="${host_base}/config/context_final.yaml"
+    [ ! -f "${ctx_file}" ] && ctx_file="${host_base}/config/context_snapshot.yaml"
+
+    local results_dir="${host_base}/results/"
+
+    # 尝试从容器同步最新数据（异常退出时宿主机可能是旧版本）
+    local ctr="${DIAG_CONTAINER:-${SEG_CTR:-${CONTAINER:-}}}"
+    if [ -n "${ctr}" ] && docker inspect --type=container "${ctr}" &>/dev/null; then
+        mkdir -p "${host_base}/config" "${host_base}/results"
+        docker cp "${ctr}:/flagos-workspace/shared/context.yaml" "${host_base}/config/context_snapshot.yaml" 2>/dev/null || true
+        docker cp "${ctr}:/flagos-workspace/results/." "${results_dir}" 2>/dev/null || true
+        # 刷新 ctx_file（同步后可能新增了 context_snapshot）
+        [ ! -f "${ctx_file}" ] && ctx_file="${host_base}/config/context_snapshot.yaml"
+    fi
+
+    [ ! -f "${ctx_file}" ] && return 0
+    [ ! -d "${results_dir}" ] && return 0
+
+    # 至少有一个 json 数据文件才上传
+    local has_data
+    has_data=$(find "${results_dir}" -name "*.json" -type f 2>/dev/null | head -1)
+    [ -z "${has_data}" ] && return 0
+
+    echo ""
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EXIT] 上传结果到 FlagRelease 平台..."
+    python3 skills/flagos-release/tools/upload_to_platform.py \
+        --context "${ctx_file}" \
+        --results-dir "${results_dir}" \
+        --logs-dir "${host_base}/logs/" \
+        --model-owner "自动化" \
+        2>&1 && echo "  ✓ 数据已上传到 FlagRelease 平台" || echo "  ⚠ 数据上传失败（不影响流程结果）"
+}
+
 # ===== GPU 服务清理（脚本退出时自动执行） =====
 cleanup_gpu_services() {
     local ctr=""
@@ -636,7 +676,7 @@ except: pass
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 未找到有效容器，跳过 GPU 服务清理"
     fi
 }
-trap 'cleanup_gpu_services' EXIT
+trap 'upload_to_platform_on_exit; cleanup_gpu_services' EXIT
 
 # ===== 段间完成性校验 =====
 # 检查 context_snapshot.yaml 中 workflow_ledger 的步骤完成状态
@@ -782,6 +822,84 @@ echo "  容器名: ${SEG_CTR}"
 echo "  环境类型: ${SEG_ENV}"
 echo "  最后完成步骤: ${SEG_LAST}"
 echo ""
+
+# ===== 段1 步骤3 完成性校验 =====
+SEG1_SVC_STATUS=$(check_seg_complete "${MODEL}" "03" "service")
+if [ "$SEG1_SVC_STATUS" != "complete" ]; then
+    echo ""
+    echo "  ⚠ 段1 步骤3（服务启动）未完成，重新执行步骤3..."
+    PROMPT_SEG1_RETRY="容器名: ${SEG_CTR}，模型名: ${MODEL}
+${COMMON_TOKENS}
+
+**前段状态（步骤1/2已完成，无需重做）**：
+- 容器 ${SEG_CTR} 已就绪，工具脚本已部署
+- env_type=${SEG_ENV}
+- 步骤1/2 已完成，**只需执行步骤3（服务启动）**
+
+**执行前**：
+1. 读取 skills/flagos-service-startup/SKILL.md 了解服务启动流程
+2. 读取容器内 /flagos-workspace/shared/context.yaml 获取模型路径、GPU 配置、FlagGems 状态
+
+按 CLAUDE.md 工作流定义执行步骤3。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
+
+**wait_for_service.sh 等待策略**：使用 Bash(timeout=600000) 前台执行，禁止 TaskOutput 轮询。Bash timeout 单位是毫秒，600000ms = 10 分钟。
+
+完成步骤3后，通过 docker cp 同步 context 到宿主机：
+  docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
+
+**⚠ 段边界**：只执行步骤3，完成后立即停止。"
+
+    claude -p "${PROMPT_SEG1_RETRY}" \
+        --permission-mode auto \
+        --output-format stream-json \
+        --verbose \
+        --debug-file "${DEBUG_FILE}.seg1_retry" \
+        --max-turns 500 \
+        2>&1 | tee -a "${LOG_FILE}" \
+             | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
+             | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --cost-file "${LOG_DIR}/seg1_retry_cost.txt" --durations-file "${LOG_DIR}/seg1_durations.json" ${FILTER_FLAGS} || true
+
+    # 重试后重新同步 context
+    if [ -f "${SHARED_CTX}" ]; then
+        cp "${SHARED_CTX}" "${CTX_FILE}"
+    elif docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+        docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+    fi
+    echo "  段1 重试后 ledger 状态:"
+    print_ledger_summary "${CTX_FILE}"
+
+    # 二次校验
+    SEG1_SVC_STATUS2=$(check_seg_complete "${MODEL}" "03" "service")
+    if [ "$SEG1_SVC_STATUS2" != "complete" ]; then
+        echo "  ⚠ 段1 步骤3 第一次重试后仍未完成，再次重试..."
+        claude -p "${PROMPT_SEG1_RETRY}" \
+            --permission-mode auto \
+            --output-format stream-json \
+            --verbose \
+            --debug-file "${DEBUG_FILE}.seg1_retry2" \
+            --max-turns 500 \
+            2>&1 | tee -a "${LOG_FILE}" \
+                 | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
+                 | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --cost-file "${LOG_DIR}/seg1_retry2_cost.txt" --durations-file "${LOG_DIR}/seg1_durations.json" ${FILTER_FLAGS} || true
+
+        # 二次重试后同步 context
+        if [ -f "${SHARED_CTX}" ]; then
+            cp "${SHARED_CTX}" "${CTX_FILE}"
+        elif docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+            docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+        fi
+        echo "  段1 二次重试后 ledger 状态:"
+        print_ledger_summary "${CTX_FILE}"
+
+        # 最终校验
+        SEG1_SVC_STATUS3=$(check_seg_complete "${MODEL}" "03" "service")
+        if [ "$SEG1_SVC_STATUS3" != "complete" ]; then
+            echo "错误：段1 步骤3 两次重试后仍未完成，终止流程"
+            exit 1
+        fi
+    fi
+    echo "  ✓ 段1 步骤3 重试成功"
+fi
 
 # ===== 段1越界检测：如果段1执行了步骤4+的操作，回滚 context 中的越界状态 =====
 SEG1_OVERFLOW=$(python3 -c "
@@ -1175,6 +1293,30 @@ with open('/flagos-workspace/shared/context.yaml') as f:
     fi
 
     # 直接执行 eval_wrapper.py
+    # Thinking model 需要更长超时（输出 token 多 5-10x）
+    local STALL_TO=300
+    local MAX_TO=3600
+    IS_THINKING_MODEL=$(python3 -c "
+import yaml
+try:
+    with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
+        ctx = yaml.safe_load(f)
+    rt = ctx.get('runtime', {})
+    mn = ctx.get('model', {}).get('name', '').lower()
+    thinking_patterns = ['qwen3', 'qwq', 'deepseek-r1', 'deepseek-r2', 'mimo', 'hunyuan']
+    if rt.get('thinking_model') or any(p in mn for p in thinking_patterns):
+        print('true')
+    else:
+        print('false')
+except:
+    print('false')
+" 2>/dev/null) || IS_THINKING_MODEL="false"
+    if [ "${IS_THINKING_MODEL}" = "true" ]; then
+        STALL_TO=600
+        MAX_TO=7200
+        echo "  [thinking model] 使用加长超时: stall=${STALL_TO}s, max=${MAX_TO}s"
+    fi
+
     echo "  ▶ docker exec ${SEG_CTR} ... eval_wrapper.py --output ${OUTPUT_FILE}"
     docker exec "${SEG_CTR}" bash -c "
         cd /flagos-workspace/scripts && \
@@ -1182,7 +1324,7 @@ with open('/flagos-workspace/shared/context.yaml') as f:
             --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --output /flagos-workspace/results/${OUTPUT_FILE}' \
             --context-yaml /flagos-workspace/shared/context.yaml \
             --service-log \$(ls -t /flagos-workspace/logs/startup_*.log 2>/dev/null | head -1) \
-            --stall-timeout 300 --max-timeout 3600
+            --stall-timeout ${STALL_TO} --max-timeout ${MAX_TO}
     "
     return $?
 }
@@ -2176,6 +2318,9 @@ except: print('True')
             echo "  ✓ performance_compare_v3.csv 已生成" || echo "  ⚠ V3 性能对比文件生成失败"
     fi
 fi
+
+# ========== 上传结果到 FlagRelease 平台 ==========
+# 已移入 trap EXIT 处理函数 upload_to_platform_on_exit()，正常/异常退出均自动执行
 
 # 流程结束前清理推理服务
 cleanup_gpu_services

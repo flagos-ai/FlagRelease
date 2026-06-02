@@ -244,6 +244,8 @@ SCRIPT_MAP=(
     "skills/flagos-eval-comprehensive/tools/accuracy_compare.py:scripts/accuracy_compare.py"
     "skills/flagos-eval-comprehensive/tools/fast_gpqa.py:scripts/fast_gpqa.py"
     "skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml:scripts/fast_gpqa_config.yaml"
+    # 精度调优 checkpoint 持久化
+    "skills/flagos-eval-comprehensive/tools/persist_tuning_checkpoint.py:scripts/persist_tuning_checkpoint.py"
     # 远端评测监控
     "skills/flagos-eval-comprehensive/tools/eval_monitor.py:scripts/eval_monitor.py"
     # 评测配置模板
