@@ -101,6 +101,7 @@ class PipelineConfig:
     config_persisted: bool = False
     plugin_image_mode: bool = False  # plugin 模式：镜像 tag 追加 -plugin，仓库名追加 -plugin
     plugin_qualified: bool = False   # plugin 精度+性能均达标时为 True，否则跳过 README 更新
+    version_tag: str = "v2"          # 发布版本标签：v2=Pro, v3=Max, v5=Royal
 
     # 各阶段配置
     chip: ChipConfig = field(default_factory=ChipConfig)
@@ -434,7 +435,16 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
     # ==================== 镜像 tag ====================
     if not config.chip.date_tag:
         tag = datetime.datetime.now().strftime("%Y%m%d%H%M")
-        config.chip.date_tag = f"{tag}-plugin" if config.plugin_image_mode else tag
+        # 根据 version_tag 决定后缀
+        version_tag = getattr(config, 'version_tag', None)
+        if version_tag:
+            version_suffix_map = {"v2": "-v2", "v3": "-v3", "v5": "-v5"}
+            suffix = version_suffix_map.get(version_tag, "")
+        elif config.plugin_image_mode:
+            suffix = "-plugin"  # 向后兼容：未设置 version_tag 但设置了 plugin_image_mode
+        else:
+            suffix = ""
+        config.chip.date_tag = f"{tag}{suffix}"
 
     if not config.publish.image_target_tag and config.publish.existing_harbor_image:
         config.publish.image_target_tag = config.publish.existing_harbor_image

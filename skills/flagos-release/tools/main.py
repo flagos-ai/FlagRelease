@@ -140,9 +140,15 @@ def main():
         help="干运行模式，只打印配置不实际执行"
     )
     parser.add_argument(
+        "--version-tag",
+        choices=["v2", "v3", "v5"],
+        default="v2",
+        help="发布版本标签：v2=Pro版(gems+tree), v3=Max版(gems+tree+plugin), v5=Royal版(最大化算子)"
+    )
+    parser.add_argument(
         "--plugin-mode",
         action="store_true",
-        help="Plugin 发布模式：镜像 tag 追加 -plugin，仓库名追加 -plugin，发布后更新已发布仓库 README"
+        help="[兼容别名] 等价于 --version-tag v3"
     )
     parser.add_argument(
         "--plugin-qualified",
@@ -186,7 +192,13 @@ def main():
         config.publish.publish_modelscope = False
         config.publish.publish_huggingface = False
 
+    # --plugin-mode 是 --version-tag v3 的兼容别名
     if args.plugin_mode:
+        args.version_tag = "v3"
+
+    # 设置 version_tag 到 config
+    config.version_tag = args.version_tag
+    if args.version_tag in ("v3", "v5"):
         config.plugin_image_mode = True
         config.publish.existing_harbor_image = ""
         if args.plugin_qualified:

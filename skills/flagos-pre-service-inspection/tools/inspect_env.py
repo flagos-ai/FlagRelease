@@ -1006,13 +1006,42 @@ def output_report(data):
     print("\n".join(report))
 
 
+def detect_model_dtype(model_path: str) -> str:
+    """从模型 config.json 读取权重数制（torch_dtype）。"""
+    if not model_path:
+        return ""
+    config_json = os.path.join(model_path, "config.json")
+    if not os.path.exists(config_json):
+        # 尝试常见子目录
+        for sub in ["", "config"]:
+            p = os.path.join(model_path, sub, "config.json") if sub else config_json
+            if os.path.exists(p):
+                config_json = p
+                break
+        else:
+            return ""
+    try:
+        with open(config_json, "r") as f:
+            cfg = json.load(f)
+        return cfg.get("torch_dtype", "")
+    except Exception:
+        return ""
+
+
 def main():
     parser = argparse.ArgumentParser(description="FlagOS 环境检查合并脚本")
     parser.add_argument("--output-json", action="store_true", help="输出 JSON 格式")
     parser.add_argument("--report", action="store_true", help="输出人类可读报告")
+    parser.add_argument("--model-path", default="", help="模型路径，用于检测权重数制 (torch_dtype)")
     args = parser.parse_args()
 
     data = collect_all()
+
+    # 追加模型权重数制检测
+    if args.model_path:
+        dtype = detect_model_dtype(args.model_path)
+        if dtype:
+            data["model_dtype"] = dtype
 
     if args.output_json:
         output_json(data)
