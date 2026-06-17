@@ -73,16 +73,19 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 5 精度算子调优       → [条件] env_type≠native 且 V2精度下降>5% 时分组排查定位问题算子（最多3轮）
 6 性能评测           → V1/V2 4k1k benchmark 对比 → 异常自动 issue
 7 性能算子调优       → [条件] env_type≠native 且 ratio<80% 时逐个禁用直到达标
-8 自动发布           → 打包 + 上传（统一私有发布，报告注明是否达标）
+8 V2发布(Pro)        → 打包 + 上传，tag 后缀 -v2（统一私有发布，报告注明是否达标）
 --- Plugin 验证流程（仅 qualified=true 时触发）---
 9  Plugin 安装       → install_plugin.py 安装 vllm-plugin-FL → 失败则 issue + 停止
 10 Plugin 启服务     → 以达标算子集 + plugin 模式启动 → 崩溃则 issue + 停止
-11 Plugin 精度评测   → 与 V1 基线对比 → 不达标则 issue（继续）
-12 Plugin 性能评测   → 与 V1 基线对比 → 不达标则 issue（继续）
-13 Plugin 发布       → [不达标]issue + 镜像上传(私有) / [达标]镜像上传 + 更新已发布版本 README
+11 Plugin 精度评测   → 与 V1 基线对比 → 不达标则算子调优（plugin 模式）
+12 Plugin 性能评测   → 与 V1 基线对比 → 不达标则算子调优（plugin 模式）
+13 V3发布(Max)       → tag 后缀 -v3，[不达标]issue + 镜像上传(私有) / [达标]镜像上传 + 更新 README
+--- V5 扩展流程（有禁用算子时触发）---
+14 V5算子扩展       → operator_expansion.py 逐个重新开启被禁算子（仅需启动+精度）
+15 V5发布(Royal)    → tag 后缀 -v5，打包发布（无达标门槛）
 ```
 
-执行顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → [qualified=true] → 9 → 10 → 11 → 12 → 13
+执行顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → [qualified=true] → 9 → 10 → 11 → 12 → 13 → [has_disabled_ops] → 14 → 15
 
 **算子累计禁用规则**：5 禁用精度问题算子 → 6 在此基础上测性能 → 7 继续禁用性能问题算子。步骤 10-12 复用步骤 5/7 的最终算子集，不重新调优。各步骤详细流程见对应 SKILL.md 的"编排层指令"章节。
 
@@ -90,16 +93,34 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 - 触发条件：步骤 8 完成且 `workflow.qualified=true`，否则步骤 9-13 全部 skipped
 - 崩溃停止：步骤 9 安装失败或步骤 10 服务崩溃 → 写 issue → 设 `plugin_workflow.crash_stopped=true` → **停止任务**
 - Issue 路由：步骤 9-13 所有 issue 通过 `issue_reporter.py full --type plugin-error --repo flagos-ai/vllm-plugin-FL` 提交（只保存本地文件）
-- **严禁在步骤 9-13 执行任何形式的算子调优**：精度/性能不达标只写 issue，不调用 `operator_search.py`、不手动禁用算子、不执行 `toggle_flaggems.py`。Plugin 阶段仅测试，发现问题立即写 issue 并继续/停止
-- 算子集复用：使用主流程已达标的算子集（含步骤 5/7 的禁用列表），不重新调优，禁止重新检测 GPU
-- 镜像 tag：原 date_tag 追加 `-plugin`（如 `202603301143-plugin`）
-- Plugin 不达标发布：精度/性能不达标时，先提交 issue，再打包镜像上传 Harbor（私有），不更新 ModelScope/HuggingFace README
+- **Plugin 阶段允许算子调优**：步骤 11/12 精度/性能不达标时，允许使用 `operator_search.py run --plugin-mode --final-output-name v3_performance --state-path operator_config_v3.json` 在 Plugin 模式下继续关闭算子，直到达标。调优前仍先提交 issue 记录问题
+- 算子集初始化：以主流程已达标的算子集（含步骤 5/7 的禁用列表）为起点，在此基础上累加禁用
+- 镜像 tag：原 date_tag 追加 `-v3`（如 `202603301143-v3`）
+- Plugin 不达标发布：调优后仍不达标时，先提交 issue，再打包镜像上传 Harbor（私有），不更新 ModelScope/HuggingFace README
 
-### V1/V2/V3 定义
+### V5 算子扩展流程（步骤 14-15）
 
-- **V1**：不开启 flaggems 算子替换的版本，作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务，则标记"无 V1"，跳过 V1 基线测试
-- **V2**：初始环境的 flaggems 状态（已开启部分或全部算子）。服务启动后以 `flaggems_enable_oplist.txt` 或 `gems.txt` 记录的算子为准
-- **V3**：经过算子调优（步骤5/7）后的优化版本。仅在精度或性能不达标时产出
+- 触发条件：步骤 13 完成后，且存在被禁用的算子（`optimization.disabled_ops` 非空）
+- 目标：从 V3 基础上最大化开启算子，仅需服务可启动 + 精度误差 ≤5%（**无性能要求**）
+- 执行方式：通过 `operator_expansion.py` 脚本全自动完成逐算子探测循环，Claude 仅负责调用脚本和发布
+- 镜像 tag：原 date_tag 追加 `-v5`（如 `202603301143-v5`）
+- V5 不设达标门槛：只要扩展脚本执行完成即发布，无论最终开启了多少算子
+
+### 版本定义
+
+| 版本 | 定义 | 镜像 tag 后缀 | 产出方式 |
+|------|------|--------------|---------|
+| **V1** (基础版) | 仅 FlagTree，不开启 FlagGems | `-v1` | 阶段一手动发布 |
+| **V0** (中间态) | FlagGems 全量算子开启的初始状态 | — | 不发布（仅作为调优起点） |
+| **V2** (Pro版) | FlagGems + FlagTree，精度≤5%，性能≥80% of V1 | `-v2` | 步骤8自动发布 |
+| **V3** (Max版) | V2 + Plugin，精度≤5%，性能≥80% of V1 | `-v3` | 步骤13自动发布 |
+| **V5** (Royal版) | V3 基础上最大化开启算子，仅需启动+精度达标 | `-v5` | 步骤15自动发布 |
+
+- **V1 基线**：不开启 flaggems 算子替换的版本（仅 FlagTree 生效），作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务，则标记"无 V1"，跳过 V1 基线测试
+- **V0**：进入自动化时 flaggems 全量开启状态。服务启动后以 `flaggems_enable_oplist.txt` 或 `gems.txt` 记录的算子为准
+- **V2 Pro**：经过算子调优（步骤5/7）后达标的版本。精度误差≤5%，性能≥80% of V1
+- **V3 Max**：在 V2 基础上安装 Plugin 并调优达标的版本。允许 Plugin 模式下继续关闭算子
+- **V5 Royal**：在 V3 基础上尝试重新开启被禁用算子，仅需服务启动+精度达标（无性能要求）
 
 ### native 场景工作流简化
 
@@ -178,7 +199,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 ```
 
-部署的脚本清单：`inspect_env.py`、`toggle_flaggems.py`、`wait_for_service.sh`、`benchmark_runner.py`、`performance_compare.py`、`operator_optimizer.py`、`operator_search.py`、`diagnose_ops.py`、`eval_monitor.py`、`install_component.py`、`install_flagtree.sh`、`issue_reporter.py`、`log_analyzer.py`、`install_plugin.py`。
+部署的脚本清单：`inspect_env.py`、`toggle_flaggems.py`、`wait_for_service.sh`、`benchmark_runner.py`、`performance_compare.py`、`operator_optimizer.py`、`operator_search.py`、`operator_expansion.py`、`diagnose_ops.py`、`eval_monitor.py`、`install_component.py`、`install_flagtree.sh`、`issue_reporter.py`、`log_analyzer.py`、`install_plugin.py`。
 
 ---
 

@@ -54,6 +54,7 @@ model:
   local_path: ""          # 模型在主机上的路径
   container_path: ""      # 模型在容器内的路径
   tokenizer_path: ""      # tokenizer 路径 (通常与 model 路径相同)
+  dtype: ""               # 权重数制 (bfloat16/float16/float32)，由 inspect_env.py 从 config.json 读取
 
 # ============================================================================
 # 容器信息 (由 container-preparation 写入)
@@ -335,6 +336,8 @@ timing:
     plugin_accuracy: 0           # 步骤11 Plugin 精度评测
     plugin_performance: 0        # 步骤12 Plugin 性能评测
     plugin_release: 0            # 步骤13 Plugin 发布
+    v5_expansion: 0              # 步骤14 V5 算子扩展
+    v5_release: 0                # 步骤15 V5 发布
 
 # ============================================================================
 # 发布信息 (由步骤8 flagos-release 写入)
@@ -478,6 +481,36 @@ workflow_ledger:
       notes: ""
       fail_reason: ""
       skip_reason: ""
+    - step: "14_v5_expansion"
+      name: "V5算子扩展"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "15_v5_release"
+      name: "V5发布"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+
+# ============================================================================
+# V5 算子扩展信息 (由 operator_expansion.py 写入)
+# ============================================================================
+v5_expansion:
+  expanded_ops: []              # 成功重新开启的算子
+  incompatible_ops: []          # 服务启动失败的算子
+  accuracy_harmful_ops: []      # 精度不达标的算子
+  final_enabled_count: 0        # 最终启用算子总数
+  v5_score: 0                   # V5 最终精度分数
+  expansion_rounds: 0           # 总探测轮数
+  completed: false
 
 # ============================================================================
 # Issue 记录 (由 issue_reporter.py 写入)

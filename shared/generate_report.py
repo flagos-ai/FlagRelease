@@ -135,6 +135,11 @@ class ReportData:
         self.op_config: Optional[dict] = None
         self.ops_control_initial: Optional[dict] = None
         self.workflow_complete = False
+        # 多版本数据（新增）
+        self.gpqa_versions: Dict[str, Optional[dict]] = {}   # {v1: gpqa_json, v2: ..., v3: ..., v5: ...}
+        self.perf_versions: Dict[str, Optional[dict]] = {}   # {v1: perf_json, v2: ..., v3: ..., v5: ...}
+        self.op_config_v3: Optional[dict] = None
+        self.op_config_v5: Optional[dict] = None
 
     def collect(self) -> bool:
         """收集数据，返回 False 表示无 context.yaml。"""
@@ -155,6 +160,30 @@ class ReportData:
         self.flagos_perf = read_json(os.path.join(r, "flagos_performance.json"))
         self.optimized_perf = read_json(os.path.join(r, "flagos_optimized.json"))
         self.perf_compare_table = read_csv_table(os.path.join(r, "performance_compare.csv"))
+
+        # 多版本精度结果（优先新命名，fallback 旧命名）
+        self.gpqa_versions["v1"] = read_json(os.path.join(r, "gpqa_v1.json")) or read_json(os.path.join(r, "gpqa_native.json"))
+        self.gpqa_versions["v2"] = (
+            read_json(os.path.join(r, "gpqa_v2.json"))
+            or read_json(os.path.join(r, "gpqa_flagos_optimized.json"))
+            or read_json(os.path.join(r, "gpqa_flagos.json"))
+        )
+        self.gpqa_versions["v3"] = read_json(os.path.join(r, "gpqa_v3.json")) or read_json(os.path.join(r, "gpqa_plugin.json"))
+        self.gpqa_versions["v5"] = read_json(os.path.join(r, "gpqa_v5.json"))
+
+        # 多版本性能结果
+        self.perf_versions["v1"] = read_json(os.path.join(r, "v1_performance.json")) or self.native_perf
+        self.perf_versions["v2"] = (
+            read_json(os.path.join(r, "v2_performance.json"))
+            or self.optimized_perf
+            or self.flagos_perf
+        )
+        self.perf_versions["v3"] = read_json(os.path.join(r, "v3_performance.json"))
+        self.perf_versions["v5"] = read_json(os.path.join(r, "v5_performance.json"))
+
+        # V3/V5 算子配置
+        self.op_config_v3 = read_json(os.path.join(r, "operator_config_v3.json"))
+        self.op_config_v5 = read_json(os.path.join(r, "operator_config_v5.json"))
 
         # traces
         traces_dir = os.path.join(self.workspace, "traces")
@@ -181,7 +210,7 @@ class ReportData:
                     self.issue_files.append(parse_issue_md(content))
 
         # oplists
-        for name in ("initial_oplist", "accuracy_tuned_oplist", "final_oplist"):
+        for name in ("initial_oplist", "accuracy_tuned_oplist", "final_oplist", "v5_oplist"):
             lines = read_lines(os.path.join(r, f"{name}.txt"))
             if lines:
                 self.oplists[name] = lines
@@ -441,397 +470,539 @@ def _resolve_disabled_ops(data: ReportData) -> tuple:
     return all_disabled, excluded_acc_list, excluded_perf_list, search_log, optimized_ratio
 
 
+# =============================================================================
+# GPU TFLOPS 查表 (BF16 peak TFLOPS)
+# =============================================================================
+
+GPU_TFLOPS_MAP = {
+    # NVIDIA
+    "A100": 312, "A100-80GB": 312, "A100-SXM": 312, "A100-PCIE": 312,
+    "A800": 312, "A800-80GB": 312,
+    "H100": 989, "H100-SXM": 989, "H100-PCIE": 756,
+    "H800": 989, "H20": 296,
+    "L40S": 366, "L40": 181, "L20": 239,
+    "B200": 2250, "B100": 1750, "GB200": 2250,
+    "4090": 165, "4080": 97, "3090": 71,
+    # Ascend (华为)
+    "910B": 296, "910ProB": 296, "910C": 320, "910A": 256,
+    # Hygon DCU (海光)
+    "Z100": 96, "Z100L": 96, "K100": 128, "K100_AI": 128,
+    # Moore Threads (摩尔线程)
+    "S4000": 96, "S80": 59,
+    # MetaX (沐曦)
+    "C500": 128, "N100": 96,
+    # Cambricon (寒武纪)
+    "MLU590": 96, "MLU370": 48,
+}
+
+
+def lookup_tflops(gpu_type: str) -> Optional[float]:
+    """从 GPU 型号模糊匹配 TFLOPS 值。"""
+    if not gpu_type:
+        return None
+    # 精确匹配
+    normalized = gpu_type.strip().upper().replace(" ", "")
+    for key, val in GPU_TFLOPS_MAP.items():
+        if key.upper().replace(" ", "").replace("-", "") in normalized.replace("-", ""):
+            return val
+    # 数字子串匹配（如 "NVIDIA A100-SXM4-80GB" → 找到 "A100"）
+    for key, val in sorted(GPU_TFLOPS_MAP.items(), key=lambda x: -len(x[0])):
+        if key.upper() in normalized:
+            return val
+    return None
+
+
+# =============================================================================
+# 版本配置标签
+# =============================================================================
+
+VERSION_LABELS = {
+    "v1": ("V1", "-", "基础版(FlagTree only)"),
+    "v2": ("V2", "Pro", "gems+tree达标版"),
+    "v3": ("V3", "Max", "gems+tree+plugin达标版"),
+    "v4": ("V4", "Flag-express", "性能超V1(未实现)"),
+    "v5": ("V5", "Royal Megamaster", "最大化算子版"),
+}
+
+
+# =============================================================================
+# 性能数据提取
+# =============================================================================
+
+def _extract_perf_metrics(perf_json: Optional[dict], concurrency: str = "64") -> Dict[str, Any]:
+    """从 benchmark JSON 提取指定并发下的性能指标。"""
+    if not perf_json or not isinstance(perf_json, dict):
+        return {}
+    # benchmark_runner 输出格式: {test_case_name: {concurrency: {metric: value}}}
+    # 或 quick 模式: {concurrency: {metric: value}}
+    for key, val in perf_json.items():
+        if key.startswith("_"):
+            continue
+        if isinstance(val, dict):
+            # 检查是否直接是 {concurrency: metrics}
+            metrics = val.get(concurrency) or val.get(str(concurrency))
+            if metrics and isinstance(metrics, dict):
+                return metrics
+            # 可能是 test_case 层：{tc_name: {conc: metrics}}
+            for tc_key, tc_val in val.items():
+                if isinstance(tc_val, dict):
+                    m = tc_val.get(concurrency) or tc_val.get(str(concurrency))
+                    if m and isinstance(m, dict):
+                        return m
+    # fallback: 找第一个包含 throughput 的 dict
+    for key, val in perf_json.items():
+        if key.startswith("_"):
+            continue
+        if isinstance(val, dict) and "Output token throughput (tok/s)" in val:
+            return val
+    return {}
+
+
+def _count_ops_from_oplist(oplist_lines: List[str]) -> int:
+    """从 oplist txt 行数统计算子数。"""
+    return len([l for l in oplist_lines if l.strip() and not l.startswith("#")])
+
+
 def generate_text_report(data: ReportData) -> str:
+    """按照 FlagOS 标准报告模板生成 Markdown 报告。"""
     lines: List[str] = []
 
-    # 流程状态警告
-    if not data.workflow_complete:
-        lines.append("⚠ 流程未完成 — 以下为当前已有数据的报告")
-        lines.append("")
+    # ── 上下文数据 ──
+    ctx = data.context or {}
+    wf = ctx.get("workflow", {}) or {}
+    eval_sec = ctx.get("eval", {}) or {}
+    insp = ctx.get("inspection", {}) or {}
+    env = ctx.get("environment", {}) or {}
+    gpu = ctx.get("gpu", {}) or {}
+    model = ctx.get("model", {}) or {}
+    runtime = ctx.get("runtime", {}) or {}
+    timing = ctx.get("timing", {}) or {}
+    release = ctx.get("release", {}) or {}
+    optimization = ctx.get("optimization", {}) or {}
+    plugin_wf = ctx.get("plugin_workflow", {}) or {}
+    v5_exp = ctx.get("v5_expansion", {}) or {}
+    container = ctx.get("container", {}) or {}
+    core_pkgs = insp.get("core_packages", {}) or {}
+    flag_pkgs = insp.get("flag_packages", {}) or {}
 
-    lines.append("FlagOS 迁移报告")
-    lines.append("=" * 40)
+    # ── TFLOPS ──
+    gpu_type = gpu.get("type", "")
+    gpu_count = gpu.get("count", 0)
+    tflops_per_gpu = lookup_tflops(gpu_type)
+    tflops_str = str(tflops_per_gpu) if tflops_per_gpu else "-"
+    total_tflops = tflops_per_gpu * gpu_count if tflops_per_gpu and gpu_count else None
+    total_tflops_str = str(int(total_tflops)) if total_tflops else "-"
 
+    # ── 算子列表 ──
+    initial_oplist = data.oplists.get("initial_oplist", [])
+    final_oplist = data.oplists.get("final_oplist", [])
+    v5_oplist = data.oplists.get("v5_oplist", [])
+    disabled_ops = optimization.get("disabled_ops", [])
+    if isinstance(disabled_ops, str):
+        disabled_ops = [op.strip() for op in disabled_ops.split(",") if op.strip()]
+
+    initial_ops_control = data.ops_control_initial or {}
+    include_list = initial_ops_control.get("include", [])
+
+    # 发布用 oplist（优先 final，其次 initial）
+    publish_oplist = final_oplist or initial_oplist
+
+    # 步骤完成时间
+    steps_timing = timing.get("steps", {}) or {}
+
+    # ═══════════════════════════════════════════════
     # 基本信息
-    model = data.get("model", "name", default="N/A")
-    gpu_count = data.get("gpu", "count", default="N/A")
-    gpu_type = data.get("gpu", "type", default="N/A")
-    container = data.get("container", "name", default="N/A")
-    env_type = data.get("environment", "env_type", default="N/A")
-
-    # 区分主流程/Plugin 环境类型
-    plugin_triggered = data.get("plugin_workflow", "triggered", default=False)
-    if plugin_triggered and "plugin" in str(env_type):
-        main_env = env_type.replace("_plugin_", "_").replace("vllm_plugin_flaggems", "vllm_flaggems")
-        env_display = f"{main_env} (主流程) / {env_type} (Plugin)"
-    else:
-        env_display = env_type
-
-    lines.append(f"模型: {model}")
-    lines.append(f"GPU: {gpu_count}x {gpu_type}")
-    lines.append(f"容器: {container}")
-    lines.append(f"环境: {env_display}")
-
-    # 算子配置（无论是否调优都输出）
-    wf = data.get("workflow", default={}) or {}
-    env_type = data.get("environment", "env_type", default="")
-    eval_sec = data.get("eval", default={}) or {}
-    all_disabled, excluded_acc_list, excluded_perf_list, search_log, optimized_ratio = _resolve_disabled_ops(data)
-
-    initial_ops = data.oplists.get("initial_oplist", [])
-    acc_tuned_ops = data.oplists.get("accuracy_tuned_oplist", [])
-    final_ops = data.oplists.get("final_oplist", [])
-    oplist_count = data.get("service", "enable_oplist_count", default=None)
-    config_persisted = wf.get("config_persisted", False)
-
-    if env_type and env_type != "native":
-        lines.append("")
-        lines.append("算子配置:")
-        if initial_ops:
-            lines.append(f"  初始算子数: {len(initial_ops)} 个")
-        elif oplist_count is not None:
-            lines.append(f"  初始算子数: {oplist_count} 个")
-
-        # 精度调优
-        acc_ok = wf.get("accuracy_ok")
-        acc_triggered = bool(excluded_acc_list)
-        v3_score = eval_sec.get("v3_score")
-        acc_diff = eval_sec.get("accuracy_diff")
-        if acc_triggered:
-            status = "达标" if acc_ok else "未达标"
-            detail = ""
-            if acc_diff is not None and v3_score is not None:
-                detail = f" (偏差 {acc_diff}% → V3={v3_score}%)"
-            lines.append(f"  精度调优: 触发 → {status}{detail}")
-            lines.append(f"    禁用算子: {', '.join(str(o) for o in excluded_acc_list)}")
-            if acc_tuned_ops:
-                lines.append(f"    调优后算子数: {len(acc_tuned_ops)} 个")
-        else:
-            deviation = eval_sec.get("deviation") or eval_sec.get("accuracy_diff")
-            threshold = eval_sec.get("accuracy_threshold", 5.0)
-            if deviation is not None:
-                lines.append(f"  精度调优: 未触发 (偏差 {deviation}% ≤ {threshold}%)")
-            else:
-                lines.append(f"  精度调优: 未触发")
-
-        # 性能调优
-        perf_ok = wf.get("performance_ok")
-        perf_triggered = bool(excluded_perf_list)
-        if perf_triggered:
-            status = "达标" if perf_ok else "未达标"
-            ratio_info = f" (ratio → {optimized_ratio:.1f}%)" if optimized_ratio else ""
-            lines.append(f"  性能调优: 触发 → {status}{ratio_info}")
-            lines.append(f"    禁用算子: {', '.join(str(o) for o in excluded_perf_list)}")
-            if search_log:
-                lines.append(f"    搜索过程 ({len(search_log)} 轮):")
-                for i, entry in enumerate(search_log, 1):
-                    disabled_op = entry.get("op", entry.get("disabled_op", entry.get("tested_op", "?")))
-                    ratio = entry.get("ratio") or entry.get("min_ratio")
-                    if ratio is not None and ratio < 2:
-                        ratio = ratio * 100
-                    passed = entry.get("passed", entry.get("met_target", False))
-                    if not passed and ratio is not None:
-                        target = data.op_config.get("target_ratio", 0.8) if data.op_config else 0.8
-                        target_pct = target * 100 if target < 1 else target
-                        passed = ratio >= target_pct
-                    ratio_str = f"{ratio:.1f}%" if ratio is not None else "N/A"
-                    result_str = "达标" if passed else "未达标"
-                    lines.append(f"      第{i}轮: 禁用 {disabled_op} → ratio {ratio_str} ({result_str})")
-            # 启用算子数
-            if data.op_config and isinstance(data.op_config, dict):
-                enabled_count = len(data.op_config.get("enabled_ops", []))
-                if enabled_count:
-                    lines.append(f"    调优后启用算子数: {enabled_count} 个")
-        else:
-            perf_data = data.get("perf", default={}) or {}
-            cur_ratio = perf_data.get("ratio_pct")
-            if cur_ratio is not None:
-                lines.append(f"  性能调优: 未触发 (ratio {cur_ratio}% ≥ 80%)")
-            else:
-                lines.append(f"  性能调优: 未触发")
-
-        # ── 算子配置 vs 运行时 txt 完整对比 ──
-        lines.append("")
-        lines.append("  算子配置 vs 运行时 txt 对比:")
-
-        # 初始阶段
-        initial_config_ops = None
-        if data.ops_control_initial and isinstance(data.ops_control_initial, dict):
-            initial_config_ops = data.ops_control_initial.get("include", [])
-        if not initial_config_ops and data.op_config and isinstance(data.op_config, dict):
-            # fallback: all_ops - disabled_ops (初始时 disabled 为空)
-            all_ops = data.op_config.get("all_ops", [])
-            if all_ops:
-                initial_config_ops = list(all_ops)
-
-        initial_txt = data.oplists.get("initial_oplist", [])
-        if initial_config_ops and initial_txt:
-            lines.extend(_render_ops_comparison(initial_config_ops, initial_txt, "初始启动"))
-
-        # 精度调优后
-        acc_tuned_txt = data.oplists.get("accuracy_tuned_oplist", [])
-        if acc_tuned_txt and excluded_acc_list:
-            acc_config_ops = [op for op in (initial_config_ops or []) if op not in excluded_acc_list]
-            if not acc_config_ops and data.op_config and isinstance(data.op_config, dict):
-                acc_config_ops = data.op_config.get("enabled_ops", [])
-            if acc_config_ops:
-                lines.append("")
-                lines.extend(_render_ops_comparison(acc_config_ops, acc_tuned_txt, "精度调优后"))
-
-        # 性能调优后
-        final_txt = data.oplists.get("final_oplist", [])
-        if final_txt and excluded_perf_list:
-            perf_config_ops = []
-            if data.op_config and isinstance(data.op_config, dict):
-                perf_config_ops = data.op_config.get("enabled_ops", [])
-            if perf_config_ops:
-                lines.append("")
-                lines.extend(_render_ops_comparison(perf_config_ops, final_txt, "性能调优后"))
-
-        lines.append(f"  算子配置已固化: {'是' if config_persisted else '否'}")
-    # 精度评测
-    v1_score = eval_sec.get("v1_score") if isinstance(eval_sec, dict) else None
-    v2_score = eval_sec.get("v2_score") if isinstance(eval_sec, dict) else None
-    deviation = (eval_sec.get("deviation") or eval_sec.get("accuracy_diff")) if isinstance(eval_sec, dict) else None
-    threshold = eval_sec.get("accuracy_threshold", 5.0) if isinstance(eval_sec, dict) else 5.0
-
-    if data.gpqa_result and v1_score is None:
-        v1_score = data.gpqa_result.get("v1_score") or data.gpqa_result.get("native_score")
-        v2_score = data.gpqa_result.get("v2_score") or data.gpqa_result.get("flagos_score")
-        deviation = data.gpqa_result.get("deviation")
-
-    if v1_score is not None or v2_score is not None:
-        lines.append("")
-        lines.append("精度评测 (GPQA Diamond):")
-        lines.append(f"  V1: {v1_score}%" if v1_score is not None else "  V1: N/A")
-        lines.append(f"  V2: {v2_score}%" if v2_score is not None else "  V2: N/A")
-        if deviation is not None:
-            lines.append(f"  V1 vs V2 偏差: {deviation}% (阈值 {threshold}%)")
-        v3_score_val = eval_sec.get("v3_score") if isinstance(eval_sec, dict) else None
-        if v3_score_val is not None:
-            lines.append(f"  V3 (调优后): {v3_score_val}%")
-
-    # 性能对比
-    if data.perf_compare_table:
-        lines.append("")
-        lines.append("性能对比:")
-        lines.append(data.perf_compare_table)
-    elif data.native_perf or data.flagos_perf:
-        perf = data.get("perf", default={}) or {}
-        min_ratio = perf.get("ratio_pct") if perf.get("ratio_pct") is not None else perf.get("min_ratio")
-        optimized_ratio = perf.get("optimized_ratio_pct")
-        if min_ratio is not None or optimized_ratio is not None:
-            lines.append("")
-            lines.append("性能对比:")
-            if min_ratio is not None:
-                lines.append(f"  V2/V1 min ratio: {min_ratio}%")
-            if optimized_ratio is not None:
-                lines.append(f"  V3/V1 optimized ratio: {optimized_ratio}%")
-
-    # 流程耗时
-    steps = data.ledger_steps()
-    if steps:
-        lines.append("")
-        lines.append("流程耗时:")
-        for s in steps:
-            name = s.get("name", s.get("step", ""))
-            status = s.get("status", "pending")
-            dur = s.get("duration_seconds", 0)
-            if status == "success":
-                lines.append(f"  {name}: {format_duration(dur)}")
-            elif status == "skipped":
-                reason = s.get("skip_reason", "")
-                lines.append(f"  {name}: 跳过" + (f" ({reason})" if reason else ""))
-            elif status == "failed":
-                reason = s.get("fail_reason", "")
-                lines.append(f"  {name}: 失败" + (f" ({reason})" if reason else ""))
-            elif status == "in_progress":
-                lines.append(f"  {name}: 进行中...")
-            else:
-                lines.append(f"  {name}: 未开始")
-
-    # 总耗时
-    timing = data.get("timing", default={})
-    if isinstance(timing, dict) and timing.get("total_duration_seconds"):
-        lines.append(f"  总耗时: {format_duration(timing['total_duration_seconds'])}")
-
-    # 发布信息
-    release = data.get("release", default={}) or {}
-    wf = data.get("workflow", default={}) or {}
-    if isinstance(release, dict) and release:
-        lines.append("")
-        lines.append("发布信息:")
-        if release.get("harbor_image"):
-            lines.append(f"  Harbor 镜像: {release['harbor_image']}")
-        if release.get("modelscope_url"):
-            lines.append(f"  ModelScope: {release['modelscope_url']}")
-        if release.get("huggingface_url"):
-            lines.append(f"  HuggingFace: {release['huggingface_url']}")
-
-    qualified = wf.get("qualified") if isinstance(wf, dict) else None
-    if qualified is not None:
-        if not (isinstance(release, dict) and release):
-            lines.append("")
-            lines.append("发布信息:")
-        lines.append(f"  发布方式: 私有")
-        lines.append(f"  qualified: {qualified}")
-
-    # 主流程结论
+    # ═══════════════════════════════════════════════
+    lines.append("# 基本信息")
     lines.append("")
-    if qualified is True:
-        lines.append("结论: 达标 (qualified)")
-    elif qualified is False:
-        lines.append("结论: 未达标")
-    elif not data.workflow_complete:
-        lines.append("结论: 流程未完成，暂无最终判定")
+    lines.append("| 项目 | 内容 |")
+    lines.append("|------|------|")
+    lines.append(f"| 开始时间 | {timing.get('workflow_start', '-')} |")
+
+    # gems+tree 上传时间 = 步骤8完成时间
+    release_step = _find_ledger_step(data, "08_release")
+    v2_upload_time = release_step.get("finished_at", "-") if release_step else "-"
+    lines.append(f"| gems+tree版本上传时间 | {v2_upload_time} |")
+
+    # plugin 上传时间 = 步骤13完成时间
+    plugin_release_step = _find_ledger_step(data, "13_plugin_release")
+    v3_upload_time = plugin_release_step.get("finished_at", "-") if plugin_release_step else "-"
+    lines.append(f"| plugin上传时间 | {v3_upload_time} |")
+
+    lines.append(f"| 模型 | {model.get('name', '-')} |")
+    lines.append(f"| 权重数制 | {model.get('dtype', '-')} |")
+    lines.append(f"| 计算数制（默认权重数制） | {model.get('dtype', '-')} |")
+    lines.append(f"| 推理框架后端 | {runtime.get('framework', 'vllm')} |")
+    lines.append(f"| 推理框架后端版本 | {core_pkgs.get('vllm', '-')} |")
+    lines.append(f"| 推理框架插件plugin-FL | {flag_pkgs.get('vllm_plugin', '-')} |")
+    lines.append(f"| FlagGems版本 | {flag_pkgs.get('flaggems', '-')} |")
+    lines.append(f"| Flagtree版本 | {env.get('flagtree_version', flag_pkgs.get('flagtree', '-'))} |")
+    lines.append(f"| FlagCX版本 | {flag_pkgs.get('flagcx', '-')} |")
+    lines.append(f"| 厂商 | {gpu.get('vendor', '-')} |")
+    mem_gb = gpu.get("memory_gb", ctx.get("gpu", {}).get("memory_gb", "-"))
+    lines.append(f"| GPU | {gpu_type} : {gpu_count} x {mem_gb}GB |")
+    lines.append(f"| 容器 | {container.get('name', '-')} |")
+    lines.append(f"| release自动化工具版本 | v0.1.0 |")
+
+    # ═══════════════════════════════════════════════
+    # 算子替换列表
+    # ═══════════════════════════════════════════════
+    lines.append("")
+    lines.append("# 算子替换列表")
+
+    # 初始算子替换列表
+    lines.append("")
+    lines.append(f"## 初始算子替换列表（默认全开）")
+    if initial_oplist:
+        lines.append(f"共替换{_count_ops_from_oplist(initial_oplist)}个算子")
+        for line in initial_oplist:
+            if line.strip():
+                lines.append(line)
     else:
-        lines.append("结论: N/A")
+        lines.append("（无数据）")
 
-    # ═══ Plugin 流程 ═══
-    plugin_wf = data.get("plugin_workflow", default={}) or {}
-    plugin_triggered = plugin_wf.get("triggered", False)
-    if plugin_triggered:
-        lines.append("")
-        lines.append("── Plugin 流程 ──")
-        # Plugin 安装
-        plugin_install = data.get("plugin_install", default={}) or {}
-        if plugin_install.get("installed"):
-            ver = plugin_install.get("version", "?")
-            method = plugin_install.get("install_method", "")
-            lines.append(f"  安装: vllm-plugin-FL v{ver}" + (f" ({method})" if method else ""))
-        elif plugin_install.get("success") is False:
-            lines.append(f"  安装: 失败")
-        # Plugin 精度
-        plugin_score = plugin_wf.get("plugin_score")
-        plugin_acc_ok = plugin_wf.get("accuracy_ok")
-        plugin_acc_diff = plugin_wf.get("accuracy_diff")
-        v1_score = eval_sec.get("v1_score") if isinstance(eval_sec, dict) else None
-        if plugin_score is not None:
-            ok_str = "ok" if plugin_acc_ok else "不达标"
-            diff_str = f", diff={plugin_acc_diff}%" if plugin_acc_diff is not None else ""
-            v1_str = f" vs V1={v1_score}%" if v1_score is not None else ""
-            lines.append(f"  精度评测: Plugin={plugin_score}%{v1_str}{diff_str} → {ok_str}")
-        # Plugin 性能
-        plugin_perf_ratio = plugin_wf.get("performance_ratio")
-        plugin_perf_ok = plugin_wf.get("performance_ok")
-        if plugin_perf_ratio is not None:
-            ok_str = "ok" if plugin_perf_ok else "不达标"
-            lines.append(f"  性能评测: ratio={plugin_perf_ratio}% → {ok_str}")
-        # Plugin 发布
-        plugin_image = plugin_wf.get("plugin_image", "")
-        plugin_released = plugin_wf.get("released", False)
-        if plugin_image or plugin_released:
-            lines.append(f"  发布: {'已发布' if plugin_released else '未发布'}")
-            if plugin_image:
-                lines.append(f"    镜像: {plugin_image}")
-        # Plugin 结论
-        plugin_qualified = plugin_wf.get("qualified")
-        if plugin_qualified is True:
-            lines.append(f"  结论: qualified")
-        elif plugin_qualified is False:
-            lines.append(f"  结论: 不合格")
-        elif plugin_wf.get("crash_stopped"):
-            lines.append(f"  结论: 崩溃中止")
-        elif plugin_wf.get("skip_reason"):
-            lines.append(f"  结论: 跳过 ({plugin_wf['skip_reason']})")
+    # enable 算子列表
+    lines.append("")
+    lines.append(f"## enable 算子数（flaggems include 列表）")
+    if include_list:
+        lines.append("```yaml")
+        lines.append("include:")
+        for op in sorted(include_list):
+            lines.append(f"  - {op}")
+        lines.append("```")
+    else:
+        lines.append("（无数据）")
 
-    # 服务异常 & 崩溃诊断
-    service_ok = wf.get("service_ok") if isinstance(wf, dict) else None
-    startup_trace = data.traces.get("03_service_startup")
-    startup_issues = data.issues.get("issues_startup", [])
-    has_crash_info = (service_ok is False) or startup_issues or (
-        startup_trace and any(
-            "crash" in str(a.get("action", "")).lower() or "diagnose" in str(a.get("action", "")).lower()
-            for a in (startup_trace.get("actions", []) if isinstance(startup_trace, dict) else [])
-        )
-    )
-    if has_crash_info:
+    # 发布算子替换列表
+    lines.append("")
+    lines.append(f"## 发布算子替换列表（达标版本）")
+    if publish_oplist:
+        lines.append(f"共替换{_count_ops_from_oplist(publish_oplist)}个算子")
+        for line in publish_oplist:
+            if line.strip():
+                lines.append(line)
+    else:
+        lines.append("（无数据）")
+
+    # 禁用算子
+    lines.append("")
+    lines.append(f"## 禁用算子")
+    if disabled_ops:
+        for op in disabled_ops:
+            lines.append(f"- {op}")
+    else:
+        lines.append("（无禁用算子）")
+
+    # ═══════════════════════════════════════════════
+    # 评测结果 — 精度评测
+    # ═══════════════════════════════════════════════
+    lines.append("")
+    lines.append("# 评测结果")
+    lines.append("")
+    lines.append("## 精度评测")
+
+    # V1-V5 版本的精度表
+    for ver_key in ["v1", "v2", "v3", "v4", "v5"]:
+        ver_label, config_label, _ = VERSION_LABELS.get(ver_key, (ver_key.upper(), "-", ""))
+        gpqa = data.gpqa_versions.get(ver_key)
         lines.append("")
-        lines.append("服务异常:")
-        if startup_trace and isinstance(startup_trace, dict):
-            actions = startup_trace.get("actions", [])
-            crash_actions = [a for a in actions if "crash" in str(a.get("action", "")).lower() or "diagnose" in str(a.get("action", "")).lower()]
-            if crash_actions:
-                for ca in crash_actions:
-                    lines.append(f"  {ca.get('action', '诊断')}: {ca.get('output_summary', ca.get('status', ''))}")
+        lines.append(f"### {ver_label}")
+        lines.append("| 数据集 | 评测条数 | 正确率(%) | 开启算子数 | FlagOS配置 |")
+        lines.append("|--------|---------|-----------|-----------|-----------|")
+
+        if ver_key == "v4":
+            # V4 未实现，保留空行
+            lines.append(f"| GPQA_Diamond | - | - | - | - |")
+        elif gpqa:
+            score = gpqa.get("score", "-")
+            total = gpqa.get("total_questions", "-")
+            # 算子数：V1 无 FlagGems，V2 从 final_oplist，V3 从 v3 config，V5 从 v5_expansion
+            op_count = "-"
+            if ver_key == "v1":
+                op_count = "-"
+                config_label = "-"
+            elif ver_key == "v2":
+                op_count = str(_count_ops_from_oplist(publish_oplist)) if publish_oplist else "-"
+            elif ver_key == "v3":
+                if data.op_config_v3:
+                    op_count = str(len(data.op_config_v3.get("enabled_ops", [])))
+                elif publish_oplist:
+                    op_count = str(_count_ops_from_oplist(publish_oplist))
+            elif ver_key == "v5":
+                if v5_exp.get("final_enabled_count"):
+                    op_count = str(v5_exp["final_enabled_count"])
+                elif v5_oplist:
+                    op_count = str(_count_ops_from_oplist(v5_oplist))
+            lines.append(f"| GPQA_Diamond | {total} | {score} | {op_count} | {config_label} |")
+        else:
+            lines.append(f"| GPQA_Diamond | - | - | - | - |")
+
+    # 精度结果对比
+    lines.append("")
+    lines.append("### 结果对比")
+    lines.append("| 对比项 | 结果 |")
+    lines.append("|--------|------|")
+    v1_gpqa = data.gpqa_versions.get("v1")
+    v1_score = v1_gpqa.get("score", 0) if v1_gpqa else (eval_sec.get("v1_score") or 0)
+    for cmp_ver in ["v2", "v3", "v4"]:
+        cmp_gpqa = data.gpqa_versions.get(cmp_ver)
+        ver_label = VERSION_LABELS[cmp_ver][0]
+        if cmp_ver == "v4" or not cmp_gpqa:
+            lines.append(f"| V1 VS {ver_label} | - |")
+        else:
+            cmp_score = cmp_gpqa.get("score", 0)
+            if v1_score and cmp_score:
+                diff = abs(float(v1_score) - float(cmp_score))
+                lines.append(f"| V1 VS {ver_label} | 精度偏差 {diff:.1f}% |")
             else:
-                lines.append(f"  启动状态: {'成功' if service_ok else '失败'}")
-        if startup_issues:
-            lines.append(f"  启动异常记录: {len(startup_issues)} 条")
-            for entry in startup_issues[:3]:
-                lines.append(f"    {entry[:120]}")
-        if service_ok is False:
-            lines.append(f"  最终状态: workflow.service_ok=false")
+                lines.append(f"| V1 VS {ver_label} | - |")
+    # V2 VS V3
+    v2_gpqa = data.gpqa_versions.get("v2")
+    v3_gpqa = data.gpqa_versions.get("v3")
+    if v2_gpqa and v3_gpqa:
+        diff = abs(float(v2_gpqa.get("score", 0)) - float(v3_gpqa.get("score", 0)))
+        lines.append(f"| V2 VS V3 | 精度偏差 {diff:.1f}% |")
+    else:
+        lines.append(f"| V2 VS V3 | - |")
 
+    # ═══════════════════════════════════════════════
+    # 评测结果 — 性能评测
+    # ═══════════════════════════════════════════════
+    lines.append("")
+    lines.append("## 性能评测")
+
+    model_name = model.get("name", "-")
+    vendor = gpu.get("vendor", "-")
+
+    for ver_key in ["v1", "v2", "v3", "v4", "v5"]:
+        ver_label, config_label, _ = VERSION_LABELS.get(ver_key, (ver_key.upper(), "-", ""))
+        perf = data.perf_versions.get(ver_key)
+        metrics = _extract_perf_metrics(perf) if perf else {}
+        lines.append("")
+        lines.append(f"### {ver_label}")
+        lines.append("| 模型名 | 厂商 | TFLOPS（单卡） | 卡数 | TFLOPS（单卡） × 卡数 | 4k-1k 64并发 - mean TTFT（ms） | 4k-1k 64并发 - P99 TTFT（ms） | 4k-1k 64并发 - output toks/s | 4k-1k 64并发 - total tok/s | 4k-1k 64并发 - Mean TPOT (ms) | 开算子数 | FlagOS配置 | 单算力吞吐 |")
+        lines.append("|--------|------|---------------|------|---------------------|------|------|------|------|------|------|------|------|")
+
+        if ver_key == "v4" or not metrics:
+            lines.append(f"| {model_name} | {vendor} | {tflops_str} | {gpu_count} | {total_tflops_str} | - | - | - | - | - | - | {config_label} | - |")
+        else:
+            ttft = metrics.get("Mean TTFT (ms)", "-")
+            p99_ttft = metrics.get("P99 TTFT (ms)", "-")
+            output_tps = metrics.get("Output token throughput (tok/s)", "-")
+            total_tps_val = metrics.get("Total token throughput (tok/s)", "-")
+            tpot = metrics.get("Mean TPOT (ms)", "-")
+
+            # 算子数
+            op_count = "-"
+            if ver_key == "v1":
+                op_count = "0"
+                config_label = "-"
+            elif ver_key == "v2":
+                op_count = str(_count_ops_from_oplist(publish_oplist)) if publish_oplist else "-"
+            elif ver_key == "v3":
+                if data.op_config_v3:
+                    op_count = str(len(data.op_config_v3.get("enabled_ops", [])))
+                elif publish_oplist:
+                    op_count = str(_count_ops_from_oplist(publish_oplist))
+            elif ver_key == "v5":
+                if v5_exp.get("final_enabled_count"):
+                    op_count = str(v5_exp["final_enabled_count"])
+
+            # 单算力吞吐
+            throughput_per_tflops = "-"
+            try:
+                if total_tflops and total_tps_val and total_tps_val != "-":
+                    throughput_per_tflops = f"{float(total_tps_val) / total_tflops:.6f}"
+            except (ValueError, TypeError, ZeroDivisionError):
+                pass
+
+            lines.append(f"| {model_name} | {vendor} | {tflops_str} | {gpu_count} | {total_tflops_str} | {ttft} | {p99_ttft} | {output_tps} | {total_tps_val} | {tpot} | {op_count} | {config_label} | {throughput_per_tflops} |")
+
+    # 性能结果对比
+    lines.append("")
+    lines.append("### 结果对比")
+    lines.append("| 对比项 | 结果 |")
+    lines.append("|--------|------|")
+    v1_perf = data.perf_versions.get("v1")
+    v1_metrics = _extract_perf_metrics(v1_perf) if v1_perf else {}
+    v1_total = v1_metrics.get("Total token throughput (tok/s)", 0) if v1_metrics else 0
+    for cmp_ver in ["v2", "v3", "v4"]:
+        ver_label = VERSION_LABELS[cmp_ver][0]
+        cmp_perf = data.perf_versions.get(cmp_ver)
+        cmp_metrics = _extract_perf_metrics(cmp_perf) if cmp_perf else {}
+        if cmp_ver == "v4" or not cmp_metrics:
+            lines.append(f"| V1 VS {ver_label} | - |")
+        else:
+            cmp_total = cmp_metrics.get("Total token throughput (tok/s)", 0)
+            try:
+                if v1_total and cmp_total and float(v1_total) > 0:
+                    ratio = float(cmp_total) / float(v1_total) * 100
+                    lines.append(f"| V1 VS {ver_label} | 性能比 {ratio:.1f}% |")
+                else:
+                    lines.append(f"| V1 VS {ver_label} | - |")
+            except (ValueError, TypeError):
+                lines.append(f"| V1 VS {ver_label} | - |")
+    # V2 VS V3
+    v2_perf_m = _extract_perf_metrics(data.perf_versions.get("v2")) if data.perf_versions.get("v2") else {}
+    v3_perf_m = _extract_perf_metrics(data.perf_versions.get("v3")) if data.perf_versions.get("v3") else {}
+    if v2_perf_m and v3_perf_m:
+        try:
+            v2_t = float(v2_perf_m.get("Total token throughput (tok/s)", 0))
+            v3_t = float(v3_perf_m.get("Total token throughput (tok/s)", 0))
+            if v2_t > 0:
+                ratio = v3_t / v2_t * 100
+                lines.append(f"| V2 VS V3 | 性能比 {ratio:.1f}% |")
+            else:
+                lines.append(f"| V2 VS V3 | - |")
+        except (ValueError, TypeError):
+            lines.append(f"| V2 VS V3 | - |")
+    else:
+        lines.append(f"| V2 VS V3 | - |")
+
+    # ═══════════════════════════════════════════════
+    # 流程耗时与消费
+    # ═══════════════════════════════════════════════
+    lines.append("")
+    lines.append("# 流程耗时与消费")
+    lines.append("")
+    lines.append("| 项目 | 内容 |")
+    lines.append("|------|------|")
+    total_dur = timing.get("total_duration_seconds", 0)
+    lines.append(f"| 流程耗时 | {format_duration(total_dur) if total_dur else '-'} |")
+    lines.append(f"| 流程消费 | — |")
+
+    # ═══════════════════════════════════════════════
+    # 发布信息
+    # ═══════════════════════════════════════════════
+    lines.append("")
+    lines.append("# 发布信息")
+    lines.append("")
+    lines.append("- Harbor 镜像")
+
+    # V1（手动发布，自动化不产出）
+    lines.append("  - V1：（阶段一手动发布）")
+
+    # V2
+    v2_harbor = release.get("v2_harbor_image", "") or release.get("harbor_image", "")
+    image_reg = ctx.get("image", {}).get("registry_url", "")
+    if not v2_harbor and image_reg and "-v2" in image_reg:
+        v2_harbor = image_reg
+    elif not v2_harbor and image_reg and "-v3" not in image_reg and "-v5" not in image_reg and "-plugin" not in image_reg:
+        v2_harbor = image_reg  # 旧格式无后缀 = V2
+    lines.append(f"  - V2：{v2_harbor or '-'}")
+
+    # V3
+    v3_harbor = release.get("v3_harbor_image", "") or plugin_wf.get("plugin_image_url", "")
+    lines.append(f"  - V3：{v3_harbor or '-'}")
+
+    # V4
+    lines.append(f"  - V4：-")
+
+    # V5
+    v5_harbor = release.get("v5_harbor_image", "") or v5_exp.get("image_url", "")
+    lines.append(f"  - V5：{v5_harbor or '-'}")
+
+    lines.append("")
+    ms_url = release.get("modelscope_url", "")
+    hf_url = release.get("huggingface_url", "")
+    lines.append(f"- ModelScope: {ms_url or '-'}")
+    lines.append(f"- HuggingFace: {hf_url or '-'}")
+
+    # ═══════════════════════════════════════════════
+    # 结论
+    # ═══════════════════════════════════════════════
+    lines.append("")
+    lines.append("# 结论")
+    lines.append("")
+
+    qualified = wf.get("qualified")
+    acc_ok = wf.get("accuracy_ok")
+    perf_ok = wf.get("performance_ok")
+    svc_ok = wf.get("service_ok")
+
+    if qualified is True:
+        lines.append("- 流自动化程结论：✅ 流程已达标")
+    elif qualified is False:
+        reasons = []
+        if not svc_ok:
+            reasons.append("服务启动失败")
+        if not acc_ok:
+            reasons.append("精度不达标")
+        if not perf_ok:
+            reasons.append("性能不达标")
+        lines.append(f"- 流自动化程结论：❌ 未达标 ({', '.join(reasons) if reasons else '未知原因'})")
+    elif not data.workflow_complete:
+        lines.append("- 流自动化程结论：⏳ 流程未完成")
+    else:
+        lines.append("- 流自动化程结论：N/A")
+
+    # gems+tree 上传
+    if v2_harbor:
+        lines.append(f"- gems+tree上传正常：✅")
+    else:
+        lines.append(f"- gems+tree上传正常：❌")
+
+    # Plugin 上传
+    plugin_triggered = plugin_wf.get("triggered", False)
+    plugin_qualified = plugin_wf.get("qualified")
+    plugin_crash = plugin_wf.get("crash_stopped", False)
+    if not plugin_triggered:
+        lines.append(f"- Plugin 上传正常：⏭ 未触发")
+    elif plugin_crash:
+        lines.append(f"- Plugin 上传正常：❌ 崩溃中止")
+    elif plugin_qualified is True:
+        lines.append(f"- Plugin 上传正常：✅")
+    elif plugin_qualified is False:
+        lines.append(f"- Plugin 上传正常：❌ 不合格")
+    else:
+        lines.append(f"- Plugin 上传正常：-")
+
+    lines.append(f"- 该模型目前是否达到正常模型发布标准（是否安装plugin成功）：{'是' if plugin_wf.get('service_ok') else '否'}")
+
+    # ═══════════════════════════════════════════════
     # 提交的 Issue
-    submitted_issues = data.get("issues", "submitted", default=[])
-    if submitted_issues and isinstance(submitted_issues, list) and len(submitted_issues) > 0:
+    # ═══════════════════════════════════════════════
+    type_label = {
+        "operator-crash": "算子崩溃",
+        "accuracy-zero": "精度归零",
+        "accuracy-degraded": "精度下降",
+        "performance-degraded": "性能下降",
+        "flagtree-error": "FlagTree 错误",
+        "plugin-error": "Plugin 错误",
+    }
+
+    if data.issue_files:
         lines.append("")
-        lines.append("提交的 Issue:")
-        type_label = {
-            "operator-crash": "算子崩溃",
-            "accuracy-zero": "精度归零",
-            "accuracy-degraded": "精度下降",
-            "performance-degraded": "性能下降",
-            "flagtree-error": "FlagTree 错误",
-            "plugin-error": "Plugin 错误",
-        }
-        for i, iss in enumerate(submitted_issues, 1):
-            if isinstance(iss, dict):
-                title = iss.get("title", "未知")
-                itype = type_label.get(iss.get("type", ""), iss.get("type", ""))
-                repo = iss.get("repo", "")
-                url = iss.get("url", "")
-                lines.append(f"  [{i}] {title} ({itype})")
-                if repo:
-                    lines.append(f"      仓库: {repo}")
-                if url:
-                    lines.append(f"      URL: {url}")
-            elif isinstance(iss, str):
-                lines.append(f"  [{i}] {iss}")
-
-    # 问题日志与复现
-    if data.issue_files or data.issues:
-        lines.append("")
-        lines.append("问题日志与复现:")
-
-        # 统计
-        if data.issues:
-            label_map = {
-                "issues_startup": "服务启动",
-                "issues_accuracy": "精度",
-                "issues_performance": "性能",
-            }
-            for key, entries in data.issues.items():
-                label = label_map.get(key, key)
-                count = sum(1 for e in entries if e.startswith("["))
-                lines.append(f"  {label}: {count} 条记录")
-
-        # 每个 issue 的详情和复现步骤
-        type_label = {
-            "operator-crash": "算子崩溃",
-            "accuracy-zero": "精度归零",
-            "accuracy-degraded": "精度下降",
-            "performance-degraded": "性能下降",
-            "flagtree-error": "FlagTree 错误",
-            "plugin-error": "Plugin 错误",
-        }
+        lines.append("# 提交的 Issue")
         for i, issue in enumerate(data.issue_files, 1):
-            lines.append("")
             itype = type_label.get(issue["type"], issue["type"])
-            lines.append(f"  [{i}] {issue['title'] or '未知问题'} ({itype})")
+            lines.append(f"{i}. [{itype}] {issue['title'] or '未知问题'}")
             if issue["description"]:
                 first_line = issue["description"].split("\n")[0].strip()
-                lines.append(f"      描述: {first_line}")
+                lines.append(f"  - 描述：{first_line}")
             if issue["steps"]:
-                lines.append("      复现步骤:")
+                lines.append("  - 复现步骤：")
                 for step_line in issue["steps"].splitlines():
                     if step_line.strip():
-                        lines.append(f"        {step_line.strip()}")
+                        lines.append(f"    {step_line.strip()}")
 
-    lines.append("=" * 40)
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append(f"报告生成时间：{datetime.now().strftime('%Y.%m.%d')}")
 
     return "\n".join(lines)
+
+
+def _find_ledger_step(data: ReportData, step_key: str) -> Dict[str, Any]:
+    """从 ledger 中找到指定步骤。"""
+    steps = data.ledger_steps()
+    for s in steps:
+        if s.get("step", "").startswith(step_key) or step_key in s.get("step", ""):
+            return s
+    return {}
+
+
 
 
 # =============================================================================

@@ -1085,6 +1085,7 @@ def run_full_search(state_path: str, perf_config: str,
                     capabilities: Optional[List[str]] = None,
                     model_name: Optional[str] = None,
                     max_timeout: Optional[int] = None,
+                    final_output_name: str = "flagos_optimized",
                     **kwargs) -> Dict[str, Any]:
     """运行完整搜索循环"""
     # 读取状态并检查残留 completed 状态
@@ -1297,12 +1298,12 @@ def run_full_search(state_path: str, perf_config: str,
         print(f"# 禁用列表: {', '.join(summary['disabled_list'])}")
     print(f"{'#' * 60}\n")
 
-    # 搜索达标时，自动运行正式 benchmark 保存为 flagos_optimized.json
-    # 解决问题：编排层可能遗漏保存标准命名的 V3 结果文件，导致下游对比和报告读不到调优结果
+    # 搜索达标时，自动运行正式 benchmark 保存为最终结果文件
+    # 解决问题：编排层可能遗漏保存标准命名的结果文件，导致下游对比和报告读不到调优结果
     if state.get("status") == "completed":
-        print("[最终验证] 搜索达标，保存正式 benchmark 为 flagos_optimized.json...")
+        print(f"[最终验证] 搜索达标，保存正式 benchmark 为 {final_output_name}.json...")
         benchmark_script = kwargs.get("benchmark_script", DEFAULT_BENCHMARK_SCRIPT)
-        final_bench = run_benchmark_quick(perf_config, benchmark_script, "flagos_optimized")
+        final_bench = run_benchmark_quick(perf_config, benchmark_script, final_output_name)
         if final_bench.get("success"):
             final_throughputs = final_bench.get("throughputs", {})
             # 使用 compute_min_ratio 计算最终 ratio，与搜索过程中的判定逻辑一致
@@ -1345,7 +1346,7 @@ def run_full_search(state_path: str, perf_config: str,
             }
             summary["performance_ok"] = final_ratio >= state.get("target_ratio", 0.8)
             summary["final_ratio"] = round(final_ratio, 4)
-            print(f"  ✓ flagos_optimized.json 已保存 (ratio={final_ratio*100:.1f}%)")
+            print(f"  ✓ {final_output_name}.json 已保存 (ratio={final_ratio*100:.1f}%)")
         else:
             print(f"  ⚠ 最终 benchmark 失败: {final_bench.get('error', '?')}（搜索结果仍有效）")
             summary["performance_ok"] = True
@@ -1391,6 +1392,8 @@ def main():
     # run — 完整搜索
     run_parser = subparsers.add_parser("run", parents=[common], help="运行完整搜索循环")
     run_parser.add_argument("--max-rounds", type=int, default=20, help="最大搜索轮次")
+    run_parser.add_argument("--final-output-name", default="flagos_optimized",
+                            help="达标后最终 benchmark 输出文件名 (默认 flagos_optimized, V3 可传 v3_performance)")
 
     # step — 单步搜索
     step_parser = subparsers.add_parser("step", parents=[common], help="运行单轮搜索")
@@ -1412,6 +1415,7 @@ def main():
             capabilities=caps,
             model_name=args.model_name,
             max_timeout=args.max_timeout,
+            final_output_name=args.final_output_name,
             optimizer_script=args.optimizer_script,
             benchmark_script=args.benchmark_script,
             toggle_script=args.toggle_script,

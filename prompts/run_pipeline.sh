@@ -1579,7 +1579,7 @@ ${SEG3_CTX_SUMMARY}
 **发布前同步 context 到宿主机**（发布工具从宿主机路径读取）：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
 （如果 mount_mode=mounted，也可：cp /data/flagos-workspace/${MODEL}/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml）
-发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
+发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --version-tag v2
 完成后通过 docker cp 回传最终 context：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
 
@@ -1827,7 +1827,7 @@ ${SEG4_CTX_SUMMARY}
 **步骤 13 发布**：
 发布前同步 context 到宿主机：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
-发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --plugin-mode
+发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --version-tag v3
 完成后通过 docker cp 回传最终 context：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
 
@@ -1885,6 +1885,111 @@ print('no')
 else
     echo ""
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] qualified=${QUALIFIED}，跳过 Plugin 流程（步骤 9-13）"
+fi
+
+# ===== 段5: V5 算子扩展 + 发布 (步骤 14-15) =====
+# 触发条件：段4完成（不要求 plugin qualified，V5 从当前最终状态出发）
+# V5 通过独立脚本完成全部循环，Claude 仅负责调用脚本 + 发布
+
+# 强制同步 context
+CTX_FILE="/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+SHARED_CTX="/data/flagos-workspace/${MODEL}/shared/context.yaml"
+if [ -f "${SHARED_CTX}" ]; then
+    cp "${SHARED_CTX}" "${CTX_FILE}"
+elif [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+    docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+fi
+CTX_INFO=$(read_context "${MODEL}" 2>/dev/null) || CTX_INFO=""
+[ -n "$(echo "$CTX_INFO" | cut -d'|' -f1)" ] && SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
+
+# 检查是否有被禁用的算子（无禁用算子则无需扩展）
+HAS_DISABLED_OPS=$(python3 -c "
+import yaml
+try:
+    with open('${CTX_FILE}') as f:
+        ctx = yaml.safe_load(f)
+    ops = ctx.get('optimization', {}).get('disabled_ops', [])
+    print('yes' if ops else 'no')
+except: print('no')
+" 2>/dev/null) || HAS_DISABLED_OPS="no"
+
+SEG5_ELAPSED=0
+SEG5_MIN=0
+SEG5_SEC=0
+
+if [ "${HAS_DISABLED_OPS}" = "yes" ] && [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+
+echo ""
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  段5  V5 算子扩展 + 发布  (步骤 14→15)                      ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
+SEG5_START_TS=$(date +%s)
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] 段5 开始 (V5 Royal Megamaster 算子扩展)"
+
+PROMPT_SEG5="容器名: ${SEG_CTR}，模型名: ${MODEL}
+
+**变量定义**：CONTAINER=${SEG_CTR}
+${COMMON_TOKENS}
+
+执行步骤14（V5算子扩展）和步骤15（V5发布）。
+
+**前段状态**：容器 ${SEG_CTR} 已就绪，步骤1-13已全部完成（含 Plugin 流程）。
+
+**步骤14 V5算子扩展（通过脚本自动执行）**：
+operator_expansion.py 是自包含脚本，内部完成全部逐算子探测循环。一条命令执行：
+  docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/operator_expansion.py \\
+    --context-yaml /flagos-workspace/shared/context.yaml \\
+    --v1-result /flagos-workspace/results/gpqa_native.json \\
+    --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh --mode flagos' \\
+    --accuracy-threshold 5.0 \\
+    --output-dir /flagos-workspace/results/ \\
+    --state-path /flagos-workspace/results/operator_config_v5.json \\
+    --json\"
+使用 Bash(timeout=600000) 前台执行（脚本可能运行数小时）。
+脚本退出码 0 = 扩展完成。读取最后一行 [EXPANSION_RESULT]{...}[/EXPANSION_RESULT] 获取结果。
+更新 context.yaml 的 v5_expansion 字段和 workflow_ledger。
+
+**步骤15 V5发布**：
+  docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
+  python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --version-tag v5
+
+**进度输出**：步骤开始/完成时输出 [步骤14]/[步骤15] 标记。
+**完成标志**：输出 \"[段5] V5扩展+发布完成\" 后停止所有操作。"
+
+mkdir -p "${LOG_DIR}"
+claude -p "${PROMPT_SEG5}" \
+    --permission-mode auto \
+    --output-format stream-json \
+    --verbose \
+    --debug-file "${DEBUG_FILE}.seg5" \
+    --max-turns 500 \
+    2>&1 | tee -a "${LOG_FILE}" \
+         | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 14 --cost-file "${LOG_DIR}/seg5_cost.txt" ${FILTER_FLAGS} || true
+
+SEG5_END_TS=$(date +%s)
+SEG5_ELAPSED=$(( SEG5_END_TS - SEG5_START_TS ))
+SEG5_MIN=$(( SEG5_ELAPSED / 60 ))
+SEG5_SEC=$(( SEG5_ELAPSED % 60 ))
+echo ""
+echo "┌──────────────────────────────────────────────────────────────┐"
+echo "│  段5 完成 — 耗时 ${SEG5_MIN}m ${SEG5_SEC}s                                     │"
+echo "└──────────────────────────────────────────────────────────────┘"
+
+# 强制同步 context
+CTX_FILE="/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+SHARED_CTX="/data/flagos-workspace/${MODEL}/shared/context.yaml"
+if [ -f "${SHARED_CTX}" ]; then
+    cp "${SHARED_CTX}" "${CTX_FILE}"
+elif docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+    docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+fi
+
+else
+    if [ "${HAS_DISABLED_OPS}" = "no" ]; then
+        echo ""
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 无禁用算子，V5 = 当前版本（无需扩展），跳过段5"
+    fi
 fi
 
 # ===== Claude 退出后自动故障诊断 =====
@@ -2258,11 +2363,12 @@ SEG1_COST=$(cat "${LOG_DIR}/seg1_cost.txt" 2>/dev/null || echo "N/A")
 SEG2_COST=$(cat "${LOG_DIR}/seg2_cost.txt" 2>/dev/null || echo "N/A")
 SEG3_COST=$(cat "${LOG_DIR}/seg3_cost.txt" 2>/dev/null || echo "N/A")
 SEG4_COST=$(cat "${LOG_DIR}/seg4_cost.txt" 2>/dev/null || echo "N/A")
+SEG5_COST=$(cat "${LOG_DIR}/seg5_cost.txt" 2>/dev/null || echo "N/A")
 # 计算总费用（通过环境变量传递，避免 shell 注入）
-TOTAL_COST=$(SEG1_COST="${SEG1_COST}" SEG2_COST="${SEG2_COST}" SEG3_COST="${SEG3_COST}" SEG4_COST="${SEG4_COST}" python3 -c "
+TOTAL_COST=$(SEG1_COST="${SEG1_COST}" SEG2_COST="${SEG2_COST}" SEG3_COST="${SEG3_COST}" SEG4_COST="${SEG4_COST}" SEG5_COST="${SEG5_COST}" python3 -c "
 import os
 costs = []
-for k in ['SEG1_COST', 'SEG2_COST', 'SEG3_COST', 'SEG4_COST']:
+for k in ['SEG1_COST', 'SEG2_COST', 'SEG3_COST', 'SEG4_COST', 'SEG5_COST']:
     try: costs.append(float(os.environ.get(k, '').strip()))
     except: pass
 print(f'{sum(costs):.2f}' if costs else 'N/A')
@@ -2273,9 +2379,12 @@ echo "║  全流程完成 — 耗时 & 费用汇总                            
 echo "╠══════════════════════════════════════════════════════════════╣"
 printf "║  段1  容器准备+环境检测+服务启动   %6s   \$%-8s║\n" "${SEG1_MIN}m${SEG1_SEC}s" "${SEG1_COST}"
 printf "║  段2  精度评测+调优+性能评测+调优  %6s   \$%-8s║\n" "${SEG2_MIN}m${SEG2_SEC}s" "${SEG2_COST}"
-printf "║  段3  打包发布                     %6s   \$%-8s║\n" "${SEG3_MIN}m${SEG3_SEC}s" "${SEG3_COST}"
+printf "║  段3  打包发布(V2 Pro)             %6s   \$%-8s║\n" "${SEG3_MIN}m${SEG3_SEC}s" "${SEG3_COST}"
 if [ "${QUALIFIED}" = "True" ]; then
-printf "║  段4  Plugin验证+发布              %6s   \$%-8s║\n" "${SEG4_MIN}m${SEG4_SEC}s" "${SEG4_COST}"
+printf "║  段4  Plugin验证+发布(V3 Max)      %6s   \$%-8s║\n" "${SEG4_MIN}m${SEG4_SEC}s" "${SEG4_COST}"
+fi
+if [ "${HAS_DISABLED_OPS:-no}" = "yes" ]; then
+printf "║  段5  V5算子扩展+发布(Royal)       %6s   \$%-8s║\n" "${SEG5_MIN}m${SEG5_SEC}s" "${SEG5_COST}"
 fi
 echo "║──────────────────────────────────────────────────────────────║"
 printf "║  总计                              %6s   \$%-8s║\n" "${PIPELINE_MIN}m${PIPELINE_SEC}s" "${TOTAL_COST}"
