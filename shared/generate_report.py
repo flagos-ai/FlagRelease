@@ -567,6 +567,15 @@ def generate_text_report(data: ReportData) -> str:
     """按照 FlagOS 标准报告模板生成 Markdown 报告。"""
     lines: List[str] = []
 
+    # ── 版本定义说明 ──
+    lines.append("> **自动化流程产出镜像版本：**")
+    lines.append("> - V1：tree版本=基础版：只带flagtree不开启任何flagos组件")
+    lines.append("> - V2：tree+gems=Pro版：开启flaggems且性能达到V1的80%，与V1的精度误差在5%以内")
+    lines.append("> - V3：tree+gems+plugin=Max版：在V2的基础上安装使用plugin，且性能达到V1的80%，与V1的精度误差在5%以内")
+    lines.append("> - V4：tree+gems+plugin=Flag-express版：在V3的基础上，性能表现超过V1版本")
+    lines.append("> - V5：tree+gems(应开尽开)+plugin=Royal Megamaster交付版本：携带了所有的FlagOS组件，所有算子能开尽开，只要服务能够顺利启动就ok")
+    lines.append("")
+
     # ── 上下文数据 ──
     ctx = data.context or {}
     wf = ctx.get("workflow", {}) or {}
