@@ -330,6 +330,27 @@ def _parse_oplist_txt(lines: List[str]) -> List[str]:
     return ops
 
 
+def _parse_oplist_to_func_names(lines: List[str]) -> List[str]:
+    """从 oplist txt 提取小写函数名列表。
+    格式: [DEBUG] flag_gems.ops.<module>.<func>: GEMS <NAME>
+    或: [DEBUG] flag_gems.runtime.backend.<vendor>.<arch>.ops.<module>.<func>: GEMS <NAME>
+    返回: ['zeros', 'arange', 'div', ...] 去重
+    """
+    funcs = set()
+    for line in lines:
+        m = re.match(
+            r'\[DEBUG\] flag_gems\.(?:ops|runtime\.backend\.\w+\.\w+\.ops)\.(\w+)(?:\.(\w+))?:\s*GEMS\s+',
+            line
+        )
+        if m:
+            # 优先取第二级（func），没有则取第一级（module）
+            func_name = m.group(2) or m.group(1)
+            funcs.add(func_name.lower())
+        elif not line.startswith('[DEBUG]') and line.strip():
+            funcs.add(line.strip().lower())
+    return sorted(funcs)
+
+
 def _render_ops_comparison(config_ops: List[str], txt_lines: List[str], stage_label: str) -> List[str]:
     """生成配置 vs 运行时 txt 的并排对比文本行。
 
@@ -649,6 +670,7 @@ def generate_text_report(data: ReportData) -> str:
     lines.append(f"| plugin上传时间 | {v3_upload_time} |")
 
     lines.append(f"| 模型 | {model.get('name', '-')} |")
+    lines.append(f"| 权重来源 | {model.get('url', '') or model.get('name', '-')} |")
     lines.append(f"| 权重数制 | {model.get('dtype', '-')} |")
     lines.append(f"| 计算数制（默认权重数制） | {model.get('dtype', '-')} |")
     lines.append(f"| 推理框架后端 | {runtime.get('framework', 'vllm')} |")
@@ -664,53 +686,100 @@ def generate_text_report(data: ReportData) -> str:
     lines.append(f"| release自动化工具版本 | v0.1.0 |")
 
     # ═══════════════════════════════════════════════
-    # 算子替换列表
+    # 算子替换列表（按版本展示）
     # ═══════════════════════════════════════════════
     lines.append("")
     lines.append("# 算子替换列表")
 
-    # 初始算子替换列表
-    lines.append("")
-    lines.append(f"## 初始算子替换列表（默认全开）")
-    if initial_oplist:
-        lines.append(f"共替换{_count_ops_from_oplist(initial_oplist)}个算子")
-        for line in initial_oplist:
-            if line.strip():
-                lines.append(line)
-    else:
-        lines.append("（无数据）")
+    # 各版本的算子数据
+    # V1: 不开启 FlagGems → 无算子白名单
+    # V2: 调优后的最终算子集 (final_oplist / operator_config)
+    # V3: Plugin 调优后 (operator_config_v3)
+    # V5: 扩展后 (v5_oplist / operator_config_v5)
+    version_ops_data = {}
 
-    # enable 算子列表
-    lines.append("")
-    lines.append(f"## enable 算子数（flaggems include 列表）")
-    if include_list:
-        lines.append("```yaml")
-        lines.append("include:")
-        for op in sorted(include_list):
-            lines.append(f"  - {op}")
-        lines.append("```")
-    else:
-        lines.append("（无数据）")
+    # V1 — 无 FlagGems
+    version_ops_data["v1"] = {"whitelist": [], "txt": []}
 
-    # 发布算子替换列表
-    lines.append("")
-    lines.append(f"## 发布算子替换列表（达标版本）")
-    if publish_oplist:
-        lines.append(f"共替换{_count_ops_from_oplist(publish_oplist)}个算子")
-        for line in publish_oplist:
-            if line.strip():
-                lines.append(line)
-    else:
-        lines.append("（无数据）")
+    # V0/V2 — 使用 final oplist（调优后）或 initial oplist
+    v2_whitelist = []
+    v2_txt_ops = []
+    if data.op_config and isinstance(data.op_config, dict):
+        v2_whitelist = data.op_config.get("enabled_ops", [])
+    elif include_list:
+        # 从 include 减去 disabled
+        v2_whitelist = [op for op in include_list if op not in set(disabled_ops)]
+    if not v2_whitelist and publish_oplist:
+        # fallback: 从 final txt 解析函数名
+        v2_whitelist = [l.strip() for l in publish_oplist if l.strip() and not l.startswith("[DEBUG]")]
+        if not v2_whitelist:
+            v2_whitelist = _parse_oplist_to_func_names(publish_oplist)
+    v2_txt_ops = _parse_oplist_to_func_names(publish_oplist) if publish_oplist else v2_whitelist
+    version_ops_data["v2"] = {"whitelist": v2_whitelist, "txt": v2_txt_ops}
 
-    # 禁用算子
-    lines.append("")
-    lines.append(f"## 禁用算子")
-    if disabled_ops:
-        for op in disabled_ops:
-            lines.append(f"- {op}")
-    else:
-        lines.append("（无禁用算子）")
+    # V3 — Plugin 调优后
+    v3_whitelist = []
+    if data.op_config_v3 and isinstance(data.op_config_v3, dict):
+        v3_whitelist = data.op_config_v3.get("enabled_ops", [])
+    if not v3_whitelist:
+        v3_whitelist = v2_whitelist  # fallback: 与 V2 相同
+    version_ops_data["v3"] = {"whitelist": v3_whitelist, "txt": v3_whitelist}
+
+    # V4 — 未实现，与 V3 相同
+    version_ops_data["v4"] = {"whitelist": v3_whitelist, "txt": v3_whitelist}
+
+    # V5 — 扩展后
+    v5_whitelist = []
+    v5_txt_ops = []
+    if data.op_config_v5 and isinstance(data.op_config_v5, dict):
+        v5_whitelist = data.op_config_v5.get("current_enabled_ops", [])
+    elif v5_oplist:
+        v5_whitelist = _parse_oplist_to_func_names(v5_oplist)
+    if not v5_whitelist:
+        v5_whitelist = v3_whitelist  # fallback
+    v5_txt_ops = _parse_oplist_to_func_names(v5_oplist) if v5_oplist else v5_whitelist
+    version_ops_data["v5"] = {"whitelist": v5_whitelist, "txt": v5_txt_ops}
+
+    # 输出各版本
+    for ver_key in ["v1", "v2", "v3", "v4", "v5"]:
+        ver_label = VERSION_LABELS[ver_key][0]
+        ops_data = version_ops_data[ver_key]
+        lines.append("")
+        lines.append(f"## {ver_label}")
+
+        # 算子白名单
+        lines.append("### 算子白名单")
+        wl = ops_data["whitelist"]
+        if wl:
+            lines.append("```json")
+            lines.append('"include": [')
+            for i, op in enumerate(sorted(wl)):
+                comma = "," if i < len(wl) - 1 else ""
+                lines.append(f'    "{op}"{comma}')
+            lines.append("]")
+            lines.append("```")
+        else:
+            if ver_key == "v1":
+                lines.append("（V1 不开启 FlagGems，无算子白名单）")
+            else:
+                lines.append("（无数据）")
+
+        # 算子替换列表（txt）
+        lines.append("### 算子替换列表（txt）")
+        txt = ops_data["txt"]
+        if txt:
+            lines.append("```json")
+            lines.append("[")
+            for i, op in enumerate(sorted(txt)):
+                comma = "," if i < len(txt) - 1 else ""
+                lines.append(f'    "{op}"{comma}')
+            lines.append("]")
+            lines.append("```")
+        else:
+            if ver_key == "v1":
+                lines.append("（V1 不开启 FlagGems，无算子替换）")
+            else:
+                lines.append("（无数据）")
 
     # ═══════════════════════════════════════════════
     # 评测结果 — 精度评测
@@ -763,7 +832,7 @@ def generate_text_report(data: ReportData) -> str:
     lines.append("|--------|------|")
     v1_gpqa = data.gpqa_versions.get("v1")
     v1_score = v1_gpqa.get("score", 0) if v1_gpqa else (eval_sec.get("v1_score") or 0)
-    for cmp_ver in ["v2", "v3", "v4"]:
+    for cmp_ver in ["v2", "v3", "v4", "v5"]:
         cmp_gpqa = data.gpqa_versions.get(cmp_ver)
         ver_label = VERSION_LABELS[cmp_ver][0]
         if cmp_ver == "v4" or not cmp_gpqa:
@@ -845,7 +914,7 @@ def generate_text_report(data: ReportData) -> str:
     v1_perf = data.perf_versions.get("v1")
     v1_metrics = _extract_perf_metrics(v1_perf) if v1_perf else {}
     v1_total = v1_metrics.get("Total token throughput (tok/s)", 0) if v1_metrics else 0
-    for cmp_ver in ["v2", "v3", "v4"]:
+    for cmp_ver in ["v2", "v3", "v4", "v5"]:
         ver_label = VERSION_LABELS[cmp_ver][0]
         cmp_perf = data.perf_versions.get(cmp_ver)
         cmp_metrics = _extract_perf_metrics(cmp_perf) if cmp_perf else {}
@@ -1034,6 +1103,17 @@ def generate_text_report(data: ReportData) -> str:
             elif isinstance(iss, str) and iss not in seen_titles:
                 issue_idx += 1
                 lines.append(f"{issue_idx}. {iss}")
+
+    # ═══════════════════════════════════════════════
+    # 发布的 README
+    # ═══════════════════════════════════════════════
+    readme_path = os.path.join(data.workspace, "results", "README.md")
+    readme_content = read_text(readme_path)
+    if readme_content:
+        lines.append("")
+        lines.append("# 发布的README")
+        lines.append("")
+        lines.append(readme_content)
 
     lines.append("")
     lines.append("---")
