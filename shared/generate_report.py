@@ -87,13 +87,23 @@ def read_csv_table(path: str) -> Optional[str]:
 
 
 def parse_issue_md(content: str) -> Dict[str, str]:
-    """从 issue markdown 提取标题、类型、复现步骤等。"""
-    result = {"title": "", "type": "", "steps": "", "description": "", "actual": ""}
+    """从 issue markdown 提取标题、类型、URL 等。"""
+    result = {"title": "", "type": "", "steps": "", "description": "", "actual": "", "url": "", "repo": ""}
 
     # 从 HTML 注释提取 type
     m = re.search(r'<!--\s*Type:\s*(\S+)\s*-->', content)
     if m:
         result["type"] = m.group(1)
+
+    # 从 HTML 注释提取 repo
+    m = re.search(r'<!--\s*Repo:\s*(\S+)\s*-->', content)
+    if m:
+        result["repo"] = m.group(1)
+
+    # 从 HTML 注释或正文提取 GitHub issue URL
+    m = re.search(r'(https://github\.com/[^\s)]+/issues/\d+)', content)
+    if m:
+        result["url"] = m.group(1)
 
     # 提取 ## Bug Report: xxx 标题
     m = re.search(r'## Bug Report:\s*(.+)', content)
@@ -971,6 +981,7 @@ def generate_text_report(data: ReportData) -> str:
     # ═══════════════════════════════════════════════
     # 提交的 Issue
     # ═══════════════════════════════════════════════
+    submitted_issues = data.get("issues", "submitted", default=[]) or []
     type_label = {
         "operator-crash": "算子崩溃",
         "accuracy-zero": "精度归零",
@@ -980,20 +991,49 @@ def generate_text_report(data: ReportData) -> str:
         "plugin-error": "Plugin 错误",
     }
 
-    if data.issue_files:
+    if data.issue_files or submitted_issues:
         lines.append("")
         lines.append("# 提交的 Issue")
-        for i, issue in enumerate(data.issue_files, 1):
+
+        # 合并两个来源：issue_files（本地 md 解析）+ submitted_issues（context.yaml 记录）
+        # 构建 issue 列表，优先从 submitted_issues 获取 URL
+        submitted_url_map: Dict[str, str] = {}  # title -> url
+        if submitted_issues and isinstance(submitted_issues, list):
+            for iss in submitted_issues:
+                if isinstance(iss, dict):
+                    t = iss.get("title", "")
+                    u = iss.get("url", "")
+                    if t and u:
+                        submitted_url_map[t] = u
+
+        issue_idx = 0
+        for issue in data.issue_files:
+            issue_idx += 1
             itype = type_label.get(issue["type"], issue["type"])
-            lines.append(f"{i}. [{itype}] {issue['title'] or '未知问题'}")
-            if issue["description"]:
-                first_line = issue["description"].split("\n")[0].strip()
-                lines.append(f"  - 描述：{first_line}")
-            if issue["steps"]:
-                lines.append("  - 复现步骤：")
-                for step_line in issue["steps"].splitlines():
-                    if step_line.strip():
-                        lines.append(f"    {step_line.strip()}")
+            title = issue["title"] or "未知问题"
+            # URL 优先级：issue md 内提取 > submitted_issues 记录
+            url = issue.get("url", "") or submitted_url_map.get(title, "")
+            if url:
+                lines.append(f"{issue_idx}. [{itype}] {title}  ")
+                lines.append(f"   {url}")
+            else:
+                lines.append(f"{issue_idx}. [{itype}] {title}")
+
+        # 补充 submitted_issues 中有 URL 但 issue_files 中没有的条目
+        seen_titles = {iss["title"] for iss in data.issue_files if iss.get("title")}
+        for iss in (submitted_issues or []):
+            if isinstance(iss, dict):
+                title = iss.get("title", "")
+                url = iss.get("url", "")
+                if title and title not in seen_titles and url:
+                    issue_idx += 1
+                    itype_raw = iss.get("type", "")
+                    itype = type_label.get(itype_raw, itype_raw)
+                    lines.append(f"{issue_idx}. [{itype}] {title}  ")
+                    lines.append(f"   {url}")
+            elif isinstance(iss, str) and iss not in seen_titles:
+                issue_idx += 1
+                lines.append(f"{issue_idx}. {iss}")
 
     lines.append("")
     lines.append("---")
