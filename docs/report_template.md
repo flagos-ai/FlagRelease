@@ -181,30 +181,12 @@ include:
 - 该模型目前是否达到正常模型发布标准（是否安装plugin成功）：否
 
 # 提交的 Issue
-1. [性能下降] Operator performance degradation on Ascend
-  - 描述：During performance benchmarking on model LLM-Research/Llama-3.2-1B-Instruct, the following operators were identified as causing significant performance degradation (<80% of native baseline).
-  - 复现步骤：
-    1. Set up environment on Ascend
-    2. Install dependencies (PyTorch + Triton + FlagGems + vLLM)
-    3. Run performance benchmark with V1 (native) and V2 (FlagGems enabled)
-    4. Compare V1 vs V2 throughput
-    5. Run operator search optimization
-2. [性能下降] Operator performance degradation: addmm, bmm, mm, rms_norm, softmax on Ascend
-  - 描述：During performance benchmarking, the following operators were identified as causing significant performance degradation.
-  - 复现步骤：
-    1. Set up environment on Ascend
-    2. Install dependencies
-    3. Run performance benchmark
-    4. Compare V1 vs V2 throughput
-    5. Run operator search optimization to identify problematic operators
-3. [Plugin 错误] vllm-plugin-FL error on ascend
-  - 描述：vllm-plugin-FL error encountered on model LLM-Research/Llama-3.2-1B-Instruct. Related components: vllm-plugin-FL.
-  - 复现步骤：
-    1. Set up environment on ascend
-    2. Install dependencies (PyTorch + Triton + FlagGems + vLLM)
-    3. Install vllm-plugin-FL (git clone + pip install --no-build-isolation)
-    4. Start vLLM inference service with plugin enabled
-    5. Observe plugin-related errors
+1. [性能下降] Operator performance degradation on Ascend  
+   https://github.com/flagos-ai/FlagGems/issues/19
+2. [性能下降] Operator performance degradation: addmm, bmm, mm, rms_norm, softmax on Ascend  
+   https://github.com/flagos-ai/FlagGems/issues/20
+3. [Plugin 错误] vllm-plugin-FL error on ascend  
+   https://github.com/flagos-ai/vllm-plugin-FL/issues/5
 
 ---
 
