@@ -114,13 +114,42 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 | **V0** (中间态) | FlagGems 全量算子开启的初始状态 | — | 不发布（仅作为调优起点） |
 | **V2** (Pro版) | FlagGems + FlagTree，精度≤5%，性能≥80% of V1 | `-v2` | 步骤8自动发布 |
 | **V3** (Max版) | V2 + Plugin，精度≤5%，性能≥80% of V1 | `-v3` | 步骤13自动发布 |
+| **V4** (精简版/Flag-express) | V3 基础上减少算子以提升性能，性能≥V3、接近/超 V1，保底≥1算子 | `-v4` | operator_reduction.py 自动发布 |
 | **V5** (Royal版) | V3 基础上最大化开启算子，仅需启动+精度达标 | `-v5` | 步骤15自动发布 |
 
-- **V1 基线**：不开启 flaggems 算子替换的版本（仅 FlagTree 生效），作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务，则标记"无 V1"，跳过 V1 基线测试
+- **V1 基线**：不开启 flaggems 算子替换的版本（仅 FlagTree 生效），作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务，则标记"无 V1"，跳过 V1 基线测试，精度基线回退 NV 基线（`nv_baseline.yaml`）
 - **V0**：进入自动化时 flaggems 全量开启状态。服务启动后以 `flaggems_enable_oplist.txt` 或 `gems.txt` 记录的算子为准
 - **V2 Pro**：经过算子调优（步骤5/7）后达标的版本。精度误差≤5%，性能≥80% of V1
 - **V3 Max**：在 V2 基础上安装 Plugin 并调优达标的版本。允许 Plugin 模式下继续关闭算子
+- **V4 精简 (Flag-express)**：在 V3 基础上通过 `operator_reduction.py` 逐个移除性能拖累算子，以性能为保留判据（非精度），硬约束至少保留 1 个算子。目标性能 ≥V3、接近/超过 V1
 - **V5 Royal**：在 V3 基础上尝试重新开启被禁用算子，仅需服务启动+精度达标（无性能要求）
+
+### 双 pipeline 分支（准入镜像分类驱动）
+
+环境检测（步骤2 `inspect_env.py`）输出 `entry_image_type`，编排层（`run_pipeline.sh`）据此确定性路由到对应 pipeline，**无需 Claude 判断**：
+
+| entry_image_type | 分支 | 准入镜像组成 | 版本路径 |
+|------------------|------|--------------|---------|
+| `gems_tree` | **A**（简单） | flaggems + flagtree，无 plugin | V1(裸启动) → V2(代码注入全量) → V3(切 plugin 白名单) → V4(减算子) → V5(应开尽开) |
+| `gems_tree_plugin` | **B**（复杂） | flaggems + flagtree + plugin | V1(三选) → V2(2.1/2.2) → V3(3.1/3.2) → V4 → V5 |
+| `native` | native | 无 flaggems | 仅精度/性能评测，不做算子调优与多版本发布 |
+
+**分支 A（gems_tree）工作流**：
+- V1：裸启动基线（不开 flaggems 算子替换），产出精度/性能基线；缺失时用 `nv_baseline.yaml` 兜底
+- V2：代码注入方式开启全量 flaggems 算子，经步骤5/7 调优达标
+- V3：切换到 plugin 白名单方式（与 V2 算子集一致），验证 plugin 路径
+- V4：`operator_reduction.py` 从 V3 减算子提性能
+- V5：`operator_expansion.py` 应开尽开最大化算子
+
+**分支 B（gems_tree_plugin）工作流**：
+- V1：**三选状态机**（`baseline_selector.py`）按优先级确定基础版依赖——
+  - `v1.1` VLLM_PLUGINS='' 纯净基线 → `v1.2` 厂商 platform plugin → `v1.3` fl plugin 但不开 flaggems
+  - 三者均失败 → `none`（强依赖 flaggems），精度基线回退 `nv_baseline.yaml`
+- V2：`2.1` 代码注入独立 V2 镜像；或 `2.2` V2=V3 同镜像（V1.3 场景，`--also-tag` 双 tag 发布）
+- V3：`3.1` 切厂商/fl plugin 白名单独立 V3；或 `3.2` V3=V2（同上双 tag）；厂商 plugin 不适配时用 `--incompatible-tag` 打不适配标记
+- V4 / V5：同分支 A
+
+- **发布仓库**：V1-V4 发布到 `harbor.baai.ac.cn/flagrelease-public`；**V5 发布到 `harbor.baai.ac.cn/flagrelease-project`**（交付 SVT 验收）
 
 ### native 场景工作流简化
 

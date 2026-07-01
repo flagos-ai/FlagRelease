@@ -130,7 +130,22 @@ environment:
 
 FlagTree 仅记录 `has_flagtree`，不影响场景分类。
 
-## 步骤 2.6 — vllm_flaggems 代码分析（仅 vllm_flaggems 场景）
+## 步骤 2.55 — 准入镜像分类（双 pipeline 路由依据）
+
+从 `inspect_env.py` JSON 输出的 `entry_classification` 字段读取准入镜像类型，写入 `context.yaml` 的 `workflow.entry_image_type`（编排层 `run_pipeline.sh` 据此路由到分支 A/B，**必须持久化，否则路由回退 unknown**）：
+
+```bash
+ENTRY_TYPE=$(docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/inspect_env.py --output-json" | python3 -c "import sys,json;print(json.load(sys.stdin).get('entry_classification',{}).get('entry_image_type','unknown'))")
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py --set workflow.entry_image_type=$ENTRY_TYPE --json"
+```
+
+| entry_image_type | 判定条件 | 路由分支 |
+|------------------|---------|---------|
+| `gems_tree` | flaggems + flagtree，无 plugin | A（简单：V1裸启动→V2代码注入→V3切plugin→V4减算子→V5） |
+| `gems_tree_plugin` | flaggems + flagtree + plugin | B（复杂：V1三选→V2(2.1/2.2)→V3(3.1/3.2)→V4→V5） |
+| `native` | 无 flaggems | native（仅评测，不发多版本） |
+
+
 
 当 `env_type == vllm_flaggems` 时，调用 `toggle_flaggems.py --action analyze` 深入分析代码中的 FlagGems 集成：
 

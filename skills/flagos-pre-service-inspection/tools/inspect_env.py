@@ -382,6 +382,56 @@ def classify_env_type(capabilities, integration):
         return "vllm_flaggems"
 
 
+def classify_entry_image_type(capabilities, flagtree):
+    """准入镜像分类 — 决定走哪条 pipeline（双 pipeline 架构的顶层开关）。
+
+    新流程按准入镜像类型分发：
+      - gems_tree        : flaggems + flagtree，无 plugin        → 分支 A（简单路径）
+      - gems_tree_plugin : flaggems + flagtree + plugin          → 分支 B（复杂路径）
+      - native           : 无 flaggems                           → 原 native 简化流程
+      - unknown          : 组件不完整（如仅 tree、仅 gems），交由编排层判断
+
+    Returns:
+        dict: {
+            entry_image_type: str,
+            has_flaggems: bool,
+            has_flagtree: bool,
+            has_plugin: bool,
+            pipeline_branch: str,   # A | B | native | ""
+            reason: str,
+        }
+    """
+    has_flaggems = capabilities.get("flaggems_installed", False)
+    has_plugin = capabilities.get("vllm_plugin_installed", False)
+    has_flagtree = bool(flagtree.get("installed", False))
+
+    if not has_flaggems:
+        entry_type = "native"
+        branch = "native"
+        reason = "未检测到 flaggems，走 native 简化流程"
+    elif has_plugin:
+        entry_type = "gems_tree_plugin"
+        branch = "B"
+        reason = "flaggems + plugin（+tree）预装，走分支 B（复杂路径，V1 三选/V2 分支）"
+    else:
+        entry_type = "gems_tree"
+        branch = "A"
+        reason = "flaggems（+tree）无 plugin，走分支 A（简单路径）"
+
+    # flagtree 缺失不改变分类，仅记录（flaggems 是核心判据，见 CLAUDE.md 场景定义）
+    if has_flaggems and not has_flagtree:
+        reason += "；⚠ 未检测到 flagtree"
+
+    return {
+        "entry_image_type": entry_type,
+        "has_flaggems": has_flaggems,
+        "has_flagtree": has_flagtree,
+        "has_plugin": has_plugin,
+        "pipeline_branch": branch,
+        "reason": reason,
+    }
+
+
 def extract_flaggems_code_details(integration):
     """从代码扫描结果中提取 flag_gems.enable() 调用详情（仅 vllm_flaggems 场景）
 
@@ -862,6 +912,7 @@ def collect_all():
             "has_flagtree": flagtree["installed"],
             **code_details,
         },
+        "entry_classification": classify_entry_image_type(capabilities, flagtree),
         "control_env": control_env,
         "inject_result": inject_result,
     }
@@ -895,6 +946,15 @@ def output_report(data):
     report.append(f"\n## 环境场景: {env_type} — {env_type_labels.get(env_type, '未知')}")
     if env_cls.get("has_flagtree"):
         report.append(f"  FlagTree:     已安装")
+
+    # 准入镜像分类（双 pipeline 分发开关）
+    entry_cls = data.get("entry_classification", {})
+    if entry_cls:
+        branch_labels = {"A": "分支 A（简单路径）", "B": "分支 B（复杂路径）",
+                         "native": "native 简化流程", "": "待定"}
+        report.append(f"\n## 准入镜像类型: {entry_cls.get('entry_image_type', 'unknown')} "
+                      f"→ {branch_labels.get(entry_cls.get('pipeline_branch', ''), '未知')}")
+        report.append(f"  判定依据: {entry_cls.get('reason', '-')}")
     if env_type == "vllm_flaggems":
         code_paths = env_cls.get('code_paths', [])
         if code_paths:

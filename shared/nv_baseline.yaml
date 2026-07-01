@@ -1,0 +1,53 @@
+# ============================================================================
+# nv_baseline.yaml — NVIDIA 参考精度基线表
+# ============================================================================
+# 用途：新流程中，V2/V3/V4/V5 的精度达标判据始终以 NV（NVIDIA）结果为基线，
+#       而非同芯片本地 V1。判据：(current_score - nv_score) / nv_score >= -0.05
+#       即当前精度相对 NV 的退化不超过 5%。
+#
+# 由 accuracy_compare.py --nv-baseline <模型名> 查表使用。
+#
+# 结构：
+#   models:
+#     <规范模型名>:
+#       aliases: [<别名1>, <别名2>, ...]   # 用于模糊匹配（大小写/下划线/连字符不敏感）
+#       metrics:
+#         gpqa_diamond: <NV 分数, 百分比>
+#         <其他指标>: <分数>
+#       source: <数据来源说明>
+#       updated_at: <YYYY-MM-DD>
+#
+# 匹配规则（accuracy_compare.py 实现）：
+#   1. 规范化模型名（转小写、去除 -_/ 空格）后精确匹配 key 或任一 alias
+#   2. 未命中则返回 nv_score=None，判据降级为"缺 NV 基线"（编排层决定是否用本地 V1 兜底）
+#
+# ⚠ 维护约定：
+#   - 分数为百分比数值（如 62.5 表示 62.5%），与 gpqa_result.json 的 score 字段同单位
+#   - 新增模型时补充 aliases，覆盖常见命名变体（含参数量后缀、Instruct 后缀等）
+#   - source 注明数据出处（官方榜单 / 内部 NV 实测 / 论文），便于追溯
+# ============================================================================
+
+# 默认容差（相对退化下限），可被 accuracy_compare.py --nv-tolerance 覆盖
+default_tolerance: 0.05
+
+models:
+  # ---- 示例条目（请按实测数据补充/替换）----
+  Qwen3-8B:
+    aliases:
+      - qwen3-8b
+      - Qwen3-8B-Instruct
+      - qwen3_8b
+    metrics:
+      gpqa_diamond: 0.0        # TODO: 填入 NV 实测 GPQA Diamond 分数
+    source: "TODO: 填入数据来源"
+    updated_at: "2026-07-01"
+
+  Qwen2.5-7B-Instruct:
+    aliases:
+      - qwen2.5-7b-instruct
+      - qwen2.5-7b
+      - Qwen2.5-7B
+    metrics:
+      gpqa_diamond: 0.0        # TODO
+    source: "TODO"
+    updated_at: "2026-07-01"
