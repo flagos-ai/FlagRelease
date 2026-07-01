@@ -149,7 +149,9 @@ class ReportData:
         self.gpqa_versions: Dict[str, Optional[dict]] = {}   # {v1: gpqa_json, v2: ..., v3: ..., v5: ...}
         self.perf_versions: Dict[str, Optional[dict]] = {}   # {v1: perf_json, v2: ..., v3: ..., v5: ...}
         self.op_config_v3: Optional[dict] = None
+        self.op_config_v4: Optional[dict] = None
         self.op_config_v5: Optional[dict] = None
+        self.nv_baseline: Optional[dict] = None
 
     def collect(self) -> bool:
         """收集数据，返回 False 表示无 context.yaml。"""
@@ -179,6 +181,7 @@ class ReportData:
             or read_json(os.path.join(r, "gpqa_flagos.json"))
         )
         self.gpqa_versions["v3"] = read_json(os.path.join(r, "gpqa_v3.json")) or read_json(os.path.join(r, "gpqa_plugin.json"))
+        self.gpqa_versions["v4"] = read_json(os.path.join(r, "gpqa_v4.json"))
         self.gpqa_versions["v5"] = read_json(os.path.join(r, "gpqa_v5.json"))
 
         # 多版本性能结果
@@ -189,11 +192,19 @@ class ReportData:
             or self.flagos_perf
         )
         self.perf_versions["v3"] = read_json(os.path.join(r, "v3_performance.json"))
+        self.perf_versions["v4"] = read_json(os.path.join(r, "v4_performance.json"))
         self.perf_versions["v5"] = read_json(os.path.join(r, "v5_performance.json"))
 
-        # V3/V5 算子配置
+        # V3/V4/V5 算子配置
         self.op_config_v3 = read_json(os.path.join(r, "operator_config_v3.json"))
+        self.op_config_v4 = read_json(os.path.join(r, "operator_config_v4.json"))
         self.op_config_v5 = read_json(os.path.join(r, "operator_config_v5.json"))
+
+        # NV 基线（无独立 V1 时精度基线回退来源）
+        self.nv_baseline = (
+            read_json(os.path.join(r, "nv_baseline.json"))
+            or read_yaml(os.path.join(self.workspace, "shared", "nv_baseline.yaml"))
+        )
 
         # traces
         traces_dir = os.path.join(self.workspace, "traces")
@@ -551,7 +562,7 @@ VERSION_LABELS = {
     "v1": ("V1", "-", "基础版(FlagTree only)"),
     "v2": ("V2", "Pro", "gems+tree达标版"),
     "v3": ("V3", "Max", "gems+tree+plugin达标版"),
-    "v4": ("V4", "Flag-express", "性能超V1(未实现)"),
+    "v4": ("V4", "Flag-express", "减算子提性能版(≥V3,近/超V1)"),
     "v5": ("V5", "Royal Megamaster", "最大化算子版"),
 }
 
@@ -725,8 +736,18 @@ def generate_text_report(data: ReportData) -> str:
         v3_whitelist = v2_whitelist  # fallback: 与 V2 相同
     version_ops_data["v3"] = {"whitelist": v3_whitelist, "txt": v3_whitelist}
 
-    # V4 — 未实现，与 V3 相同
-    version_ops_data["v4"] = {"whitelist": v3_whitelist, "txt": v3_whitelist}
+    # V4 — 减算子后（operator_reduction.py 产出 kept_ops）；无数据时回退 V3
+    v4_whitelist = []
+    if data.op_config_v4 and isinstance(data.op_config_v4, dict):
+        # operator_reduction 状态文件 current_enabled_ops，或结果 kept_ops
+        v4_whitelist = (
+            data.op_config_v4.get("current_enabled_ops")
+            or data.op_config_v4.get("kept_ops")
+            or []
+        )
+    if not v4_whitelist:
+        v4_whitelist = v3_whitelist  # fallback
+    version_ops_data["v4"] = {"whitelist": v4_whitelist, "txt": v4_whitelist}
 
     # V5 — 扩展后
     v5_whitelist = []

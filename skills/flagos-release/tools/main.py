@@ -141,9 +141,19 @@ def main():
     )
     parser.add_argument(
         "--version-tag",
-        choices=["v2", "v3", "v5"],
+        choices=["v1", "v2", "v3", "v4", "v5"],
         default="v2",
-        help="发布版本标签：v2=Pro版(gems+tree), v3=Max版(gems+tree+plugin), v5=Royal版(最大化算子)"
+        help="发布版本标签：v1=基础版, v2=Pro版(gems+tree), v3=Max版(gems+tree+plugin), v4=精简版(减算子), v5=Royal版(最大化算子)"
+    )
+    parser.add_argument(
+        "--also-tag",
+        default="",
+        help="额外的镜像 tag 版本（如 V1.3 场景 V2=V3 同镜像双 tag：--version-tag v2 --also-tag v3）"
+    )
+    parser.add_argument(
+        "--incompatible-tag",
+        default="",
+        help="不适配标记名（如 'Qwen3-8B-flagos-metax不适配'）；设置后只打不适配标签，不发布版本镜像"
     )
     parser.add_argument(
         "--plugin-mode",
@@ -198,6 +208,9 @@ def main():
 
     # 设置 version_tag 到 config
     config.version_tag = args.version_tag
+    # 双 tag / 不适配标记（新流程五版本发布）
+    config.also_tag = args.also_tag
+    config.incompatible_tag = args.incompatible_tag
     if args.version_tag in ("v3", "v5"):
         config.plugin_image_mode = True
         config.publish.existing_harbor_image = ""

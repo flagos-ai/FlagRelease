@@ -91,6 +91,13 @@ class PublishStage(BaseStage):
         publish_config = self.config.publish
         harbor_failed = False
 
+        # 不适配标记模式：只对源镜像打一个"不适配"标签并推送，不发布版本镜像/README/ModelScope
+        incompatible_tag = getattr(self.config, "incompatible_tag", "")
+        if incompatible_tag:
+            print(f"  不适配标记模式: {incompatible_tag}")
+            ok = self._tag_incompatible(incompatible_tag)
+            return self.make_result(ok, "不适配标记完成" if ok else "不适配标记失败")
+
         # 如果已有 Harbor 镜像地址，跳过 commit/tag/push
         if publish_config.existing_harbor_image:
             existing_image = publish_config.existing_harbor_image
@@ -122,6 +129,11 @@ class PublishStage(BaseStage):
                 if not success:
                     harbor_failed = True
                     print("  ⚠ Harbor 推送失败，继续执行后续步骤（README 生成、数据回传）")
+                else:
+                    # V2=V3 同镜像双 tag：额外打一个 --also-tag 版本 tag 并推送
+                    also_tag = getattr(self.config, "also_tag", "")
+                    if also_tag and not harbor_failed:
+                        self._tag_and_push_also(also_tag)
             else:
                 self.skip_step("推送 Harbor", "配置跳过")
 
@@ -556,7 +568,92 @@ class PublishStage(BaseStage):
             ))
             return False
 
+    def _tag_and_push_also(self, also_version: str) -> bool:
+        """V2=V3 同镜像双 tag 场景：把已推送的镜像另打一个版本 tag 并推送。
+
+        用于分支 A/B 中 V2 与 V3 实际为同一镜像（如 V1.3 → V2=V3）的场景，
+        避免重复 commit，直接对同一镜像加第二个版本 tag。
+        """
+        publish_config = self.config.publish
+        source = publish_config.harbor_path
+        if not source:
+            print("  ⚠ 双 tag 跳过：源 harbor_path 为空")
+            return False
+
+        # 将源 tag 的版本后缀替换为 also_version（如 ...-v2 → ...-v3；无后缀则追加）
+        import re
+        also_suffix = f"-{also_version}"
+        if re.search(r"-v[0-9]+$", source):
+            also_path = re.sub(r"-v[0-9]+$", also_suffix, source)
+        else:
+            also_path = f"{source}{also_suffix}"
+
+        print(f"[{self.name}] 双 tag 发布: {source} → {also_path}")
+        tag_cmd = f"docker tag {source} {also_path}"
+        rc = subprocess.run(tag_cmd, shell=True, capture_output=True, text=True)
+        if rc.returncode != 0:
+            print(f"  x 双 tag 打标失败: {rc.stderr[:200]}")
+            self.steps.append(StepResult(
+                step_name=f"双 tag ({also_version})", status=StepStatus.FAILED,
+                error=rc.stderr))
+            return False
+
+        if not self._ensure_harbor_login(also_path):
+            return False
+        push_cmd = f"docker push {also_path}"
+        rc = subprocess.run(push_cmd, shell=True, capture_output=True, text=True, timeout=7200)
+        ok = rc.returncode == 0
+        print(f"  {'+' if ok else 'x'} 双 tag 推送{'成功' if ok else '失败'}: {also_path}")
+        self.steps.append(StepResult(
+            step_name=f"双 tag 推送 ({also_version})",
+            status=StepStatus.SUCCESS if ok else StepStatus.FAILED,
+            output=also_path if ok else rc.stderr))
+        return ok
+
+    def _tag_incompatible(self, marker: str) -> bool:
+        """不适配标记：对源镜像打一个不适配 tag 并推送到 Harbor。
+
+        用于某版本（如厂商 plugin V3.1）验证不通过、需明确标注"不适配"的场景。
+        marker 形如 'Qwen3-8B-flagos-metax不适配'，作为镜像 tag 名。
+        """
+        publish_config = self.config.publish
+        # 源镜像：优先 existing_harbor_image，其次 commit 当前容器
+        source = publish_config.existing_harbor_image or publish_config.harbor_path
+        if not source and self.config.input_type == 'container':
+            if not self._commit_container():
+                return False
+            source = publish_config.harbor_path
+        if not source:
+            print("  x 不适配标记失败：无源镜像")
+            return False
+
+        registry = source.split("/")[0]
+        # 目标：<registry>/<project>/<marker>（复用源镜像的 registry+project 前缀）
+        project_prefix = "/".join(source.split(":")[0].split("/")[:-1])
+        marker_path = f"{project_prefix}/{marker}" if project_prefix else f"{registry}/{marker}"
+
+        print(f"[{self.name}] 不适配标记: {source} → {marker_path}")
+        rc = subprocess.run(f"docker tag {source} {marker_path}", shell=True,
+                            capture_output=True, text=True)
+        if rc.returncode != 0:
+            print(f"  x 打标失败: {rc.stderr[:200]}")
+            self.steps.append(StepResult(step_name="不适配标记", status=StepStatus.FAILED,
+                                         error=rc.stderr))
+            return False
+        if not self._ensure_harbor_login(marker_path):
+            return False
+        rc = subprocess.run(f"docker push {marker_path}", shell=True,
+                            capture_output=True, text=True, timeout=7200)
+        ok = rc.returncode == 0
+        print(f"  {'+' if ok else 'x'} 不适配标记推送{'成功' if ok else '失败'}: {marker_path}")
+        self.steps.append(StepResult(
+            step_name="不适配标记推送",
+            status=StepStatus.SUCCESS if ok else StepStatus.FAILED,
+            output=marker_path if ok else rc.stderr))
+        return ok
+
     # ==================== README 生成 ====================
+
 
     def _generate_readme(self) -> Optional[str]:
         """生成 README"""

@@ -13,12 +13,18 @@ set -euo pipefail
 
 CONTEXT_YAML="/flagos-workspace/shared/context.yaml"
 MODE=""
+# VLLM_PLUGINS 覆盖：未设=沿用旧自动行为；显式设置（含空串）=强制覆盖
+# 取值: "" (禁用所有 plugin) | "fl" | 厂商插件名(如 metax) | 逗号分隔多值
+VLLM_PLUGINS_OVERRIDE_SET=0
+VLLM_PLUGINS_OVERRIDE=""
 
 # 解析参数（支持 --mode flagos / --mode=flagos / 裸值）
 while [[ $# -gt 0 ]]; do
     case $1 in
         --mode=*) MODE="${1#--mode=}"; shift ;;
         --mode)   MODE="${2:-}"; shift; shift 2>/dev/null || true ;;
+        --vllm-plugins=*) VLLM_PLUGINS_OVERRIDE="${1#--vllm-plugins=}"; VLLM_PLUGINS_OVERRIDE_SET=1; shift ;;
+        --vllm-plugins)   VLLM_PLUGINS_OVERRIDE="${2:-}"; VLLM_PLUGINS_OVERRIDE_SET=1; shift; shift 2>/dev/null || true ;;
         *)        shift ;;
     esac
 done
@@ -172,8 +178,18 @@ if [ "$MODE" = "native" ]; then
     unset FLAGGEMS_CONTROL_MODE 2>/dev/null || true
 fi
 
+# VLLM_PLUGINS 决策：
+#   - 显式 --vllm-plugins（含空串）→ 强制覆盖（V1 三选场景：''/厂商插件/fl）
+#   - 未显式指定 → 沿用旧自动行为（plugin 场景默认 fl）
+if [ "$VLLM_PLUGINS_OVERRIDE_SET" = "1" ]; then
+    export VLLM_PLUGINS="$VLLM_PLUGINS_OVERRIDE"
+    if [ -z "$VLLM_PLUGINS_OVERRIDE" ]; then
+        echo "[start_service.sh] 显式覆盖：VLLM_PLUGINS=（空，禁用所有 vllm plugin）"
+    else
+        echo "[start_service.sh] 显式覆盖：VLLM_PLUGINS=${VLLM_PLUGINS_OVERRIDE}"
+    fi
 # plugin 场景：显式指定 VLLM_PLUGINS 避免多 platform plugin 冲突（ascend vs fl）
-if [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
+elif [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
     HAS_PLUGIN=$(PATH=/opt/conda/bin:$PATH python3 -c "
 import importlib.util
 print('yes' if importlib.util.find_spec('vllm_fl') else 'no')

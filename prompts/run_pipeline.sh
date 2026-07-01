@@ -975,6 +975,36 @@ else:
     fi
 fi
 
+# ===== 双 pipeline 路由：读取段1 inspect_env 产出的 entry_image_type =====
+# 分支 A (gems_tree): 简单路径 — V1裸启动 → V2代码注入 → V3切plugin → V4减算子 → V5
+# 分支 B (gems_tree_plugin): 复杂路径 — V1三选 → V2(2.1/2.2) → V3(3.1/3.2) → V4 → V5
+# 分类是确定性的（inspect_env.classify_entry_image_type），此处只读结果不做判断。
+ENTRY_IMAGE_TYPE=$(python3 -c "
+import yaml
+with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
+    ctx = yaml.safe_load(f)
+wf = ctx.get('workflow', {})
+# 优先读 workflow.entry_image_type；回退到 inspect_env 的 entry_classification
+et = wf.get('entry_image_type', '')
+if not et:
+    et = ctx.get('entry_classification', {}).get('entry_image_type', '')
+print(et or 'unknown')
+" 2>/dev/null) || ENTRY_IMAGE_TYPE="unknown"
+
+case "${ENTRY_IMAGE_TYPE}" in
+    gems_tree)         PIPELINE_BRANCH="A" ;;
+    gems_tree_plugin)  PIPELINE_BRANCH="B" ;;
+    native)            PIPELINE_BRANCH="native" ;;
+    *)                 PIPELINE_BRANCH="" ;;
+esac
+echo "══════════════════════════════════════════════════════════════"
+echo "  双 pipeline 路由: entry_image_type=${ENTRY_IMAGE_TYPE} → 分支 ${PIPELINE_BRANCH:-未知}"
+echo "══════════════════════════════════════════════════════════════"
+# 持久化分支决策到 context（供段2/3 及报告消费）
+if [ -n "${PIPELINE_BRANCH}" ]; then
+    docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py --set workflow.pipeline_branch='${PIPELINE_BRANCH}' --json" 2>/dev/null || true
+fi
+
 SKIP_SEG2=false
 IS_NATIVE=false
 if [ "${SERVICE_OK}" = "False" ]; then
@@ -989,7 +1019,24 @@ fi
 
 if [ "${SKIP_SEG2}" = "false" ]; then
 # ===== 段2: 4/5/6/7 (精度评测 + 精度调优 + 性能评测 + 性能调优) =====
-PROMPT_SEG2="容器名: ${SEG_CTR}，模型名: ${MODEL}，env_type: ${SEG_ENV}
+# 双 pipeline 分支指令：据段1路由结果注入，指引下游会话按对应 pipeline 定义执行
+case "${PIPELINE_BRANCH}" in
+    A)
+        BRANCH_DIRECTIVE="**PIPELINE 分支 A（gems_tree 简单路径）**：本次准入镜像为 flaggems+tree 无 plugin。按 CLAUDE.md 分支 A 工作流执行：V1(裸启动基线) → V2(代码注入全量算子) → V3(切 plugin 白名单) → V4(减算子提性能) → V5(应开尽开)。精度基线优先本地 V1，缺失时用 nv_baseline.yaml 兜底。"
+        ;;
+    B)
+        BRANCH_DIRECTIVE="**PIPELINE 分支 B（gems_tree_plugin 复杂路径）**：本次准入镜像为 flaggems+tree+plugin。按 CLAUDE.md 分支 B 工作流执行：V1(三选：baseline_selector.py 确定 v1.1/v1.2/v1.3/none) → V2(2.1 代码注入 或 2.2=V3 同镜像) → V3(3.1 切 plugin 白名单 或 3.2=V2) → V4(减算子) → V5(应开尽开)。若 V1=none（强依赖 flaggems），精度基线用 nv_baseline.yaml。"
+        ;;
+    native)
+        BRANCH_DIRECTIVE="**PIPELINE native 简化路径**：本次准入镜像无 flaggems，仅执行精度/性能评测，不做算子调优与多版本发布。"
+        ;;
+    *)
+        BRANCH_DIRECTIVE=""
+        ;;
+esac
+PROMPT_SEG2="容器名: ${SEG_CTR}，模型名: ${MODEL}，env_type: ${SEG_ENV}，pipeline分支: ${PIPELINE_BRANCH:-未定}
+
+${BRANCH_DIRECTIVE}
 
 **变量定义（后续命令中直接使用）**：CONTAINER=${SEG_CTR}
 ${COMMON_TOKENS}

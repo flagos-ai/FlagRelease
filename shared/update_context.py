@@ -181,6 +181,17 @@ def _validate_ok_field(ctx, key_path):
         try:
             with open(acc_files[0], "r") as f:
                 data = json.load(f)
+            # NV 基线模式（新流程）：优先信任 aligned 字段 + rel_drop 判据
+            if data.get("baseline_mode") == "nv_reference":
+                # 缺 NV 基线时不阻断（编排层已决定兜底）
+                if data.get("missing_nv"):
+                    return None
+                if data.get("aligned") is False:
+                    rd = data.get("rel_drop_pct", 0)
+                    return (f"设置 {key_path}=true 失败: 相对 NV 退化 {rd:.1f}% "
+                            f"超容差 (文件: {acc_files[0]})")
+                return None
+            # 本地 V1 基线模式（向后兼容）：读 drop
             drop = data.get("accuracy_drop") or data.get("drop") or 0
             if isinstance(drop, str):
                 drop = float(drop.strip('%')) / 100
