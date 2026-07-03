@@ -4,12 +4,15 @@
 
 支持两种基线模式：
   1. 本地 V1 基线（向后兼容）：--v1 <json> --v2 <json>
-     判据：drop = v1_score - v2_score <= threshold（下降不超过阈值百分点）
+     判据：rel_drop = (v1_score - v2_score) / v1_score <= threshold
+     即当前精度相对 V1 的退化不超过 threshold（默认 5%，相对口径）
 
   2. NV 参考基线（新流程默认）：--v2 <json> --nv-baseline <模型名>
      判据：(v2_score - nv_score) / nv_score >= -tolerance
      即当前精度相对 NV 的退化不超过 tolerance（默认 5%）
      NV 分数从 shared/nv_baseline.yaml 查表获得
+
+  两种模式均为「相对退化」口径，阈值单位统一为比例（0.05 = 5%）。
 
 Usage:
     # 本地 V1 基线（旧）
@@ -32,7 +35,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-DEFAULT_THRESHOLD = 5.0        # 本地 V1 基线模式：下降百分点阈值
+DEFAULT_THRESHOLD = 0.05       # 本地 V1 基线模式：相对退化容差（5%，与 NV 模式统一）
 DEFAULT_NV_TOLERANCE = 0.05    # NV 基线模式：相对退化容差（5%）
 
 # 缺 NV 基线的专用退出码 / 信号
@@ -140,7 +143,11 @@ def lookup_nv_score(model_name: str, metric: str,
 # ==================== 对比逻辑 ====================
 
 def compare_v1(v1_path: str, v2_path: str, threshold: float) -> Dict[str, Any]:
-    """本地 V1 基线对比（向后兼容）"""
+    """本地 V1 基线对比（向后兼容）。
+
+    判据：rel_drop = (v1_score - v2_score) / v1_score <= threshold
+    即当前精度相对 V1 的退化不超过 threshold（默认 5%，与 NV 模式统一为相对口径）。
+    """
     v1_data = load_result(v1_path)
     v2_data = load_result(v2_path)
 
@@ -175,18 +182,26 @@ def compare_v1(v1_path: str, v2_path: str, threshold: float) -> Dict[str, Any]:
             result["message"] = f"V2 分数缺失 ({v2_path})"
         return result
 
+    if v1_score <= 0:
+        result["aligned"] = False
+        result["diff"] = None
+        result["message"] = f"V1 分数非法（<=0: {v1_score}），无法计算相对退化"
+        return result
+
     drop = v1_score - v2_score
+    rel_drop = drop / v1_score
     diff = round(abs(v2_score - v1_score), 2)
-    aligned = drop <= threshold
+    aligned = rel_drop <= threshold
 
     result["diff"] = diff
     result["drop"] = round(drop, 2)
+    result["rel_drop"] = round(rel_drop, 4)
     result["aligned"] = aligned
     result["v2_vs_v1"] = round(v2_score - v1_score, 2)
     result["message"] = (
-        f"精度达标: V1={v1_score:.2f}%, V2={v2_score:.2f}%, 下降={drop:.2f}% (阈值 {threshold}%)"
+        f"精度达标: V1={v1_score:.2f}%, V2={v2_score:.2f}%, 相对退化={rel_drop*100:.2f}% (阈值 {threshold*100:.0f}%)"
         if aligned else
-        f"精度不达标: V1={v1_score:.2f}%, V2={v2_score:.2f}%, 下降={drop:.2f}% > 阈值 {threshold}%"
+        f"精度不达标: V1={v1_score:.2f}%, V2={v2_score:.2f}%, 相对退化={rel_drop*100:.2f}% > 阈值 {threshold*100:.0f}%"
     )
     return result
 
@@ -288,9 +303,11 @@ def print_human(result: Dict[str, Any]):
         print(f"  V2 (FlagOS):  {v2['score']:.2f}%" if v2["score"] is not None else "  V2 (FlagOS):  N/A")
         if result["diff"] is not None:
             print(f"  偏差:         {result['diff']:.2f}%")
+            if result.get("rel_drop") is not None:
+                print(f"  相对退化:     {result['rel_drop'] * 100:.2f}%")
             if result.get("drop") is not None and result["drop"] < 0:
                 print(f"  方向:         V2 高于 V1（不触发调优）")
-            print(f"  阈值:         {result['threshold']}%（仅下降超阈值时不达标）")
+            print(f"  容差:         {result['threshold'] * 100:.0f}%（相对退化超容差时不达标）")
             status = "✓ 达标" if result["aligned"] else "✗ 不达标"
             print(f"  结论:         {status}")
         else:
@@ -303,7 +320,7 @@ def main():
     parser.add_argument("--v1", help="V1 (Native) 评测结果 JSON（本地 V1 基线模式）")
     parser.add_argument("--v2", required=True, help="待判定的评测结果 JSON（V2/V3/V4/V5）")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD,
-                        help=f"本地 V1 模式：下降百分点阈值（默认 {DEFAULT_THRESHOLD}%%）")
+                        help=f"本地 V1 模式：相对退化容差，比例值（默认 {DEFAULT_THRESHOLD} = {DEFAULT_THRESHOLD*100:.0f}%%）")
     # NV 基线模式
     parser.add_argument("--nv-baseline", metavar="MODEL",
                         help="启用 NV 基线模式：按模型名查 nv_baseline.yaml")

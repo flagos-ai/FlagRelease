@@ -191,13 +191,20 @@ def _validate_ok_field(ctx, key_path):
                     return (f"设置 {key_path}=true 失败: 相对 NV 退化 {rd:.1f}% "
                             f"超容差 (文件: {acc_files[0]})")
                 return None
-            # 本地 V1 基线模式（向后兼容）：读 drop
-            drop = data.get("accuracy_drop") or data.get("drop") or 0
-            if isinstance(drop, str):
-                drop = float(drop.strip('%')) / 100
-            if abs(drop) > threshold:
-                return (f"设置 {key_path}=true 失败: 精度下降 {abs(drop)*100:.1f}% "
-                        f"> 阈值 {threshold*100:.0f}% (文件: {acc_files[0]})")
+            # 本地 V1 基线模式：优先信任 aligned 字段 + rel_drop（相对退化口径）
+            if data.get("aligned") is False:
+                rd = data.get("rel_drop")
+                rd_pct = (rd * 100) if isinstance(rd, (int, float)) else data.get("drop", 0)
+                return (f"设置 {key_path}=true 失败: 精度相对退化 {rd_pct:.1f}% "
+                        f"超阈值 {threshold*100:.0f}% (文件: {acc_files[0]})")
+            if data.get("aligned") is True:
+                return None
+            # 回退：无 aligned 字段的旧结果，用 rel_drop（相对比例）比对
+            rel_drop = data.get("rel_drop")
+            if isinstance(rel_drop, (int, float)):
+                if rel_drop > threshold:
+                    return (f"设置 {key_path}=true 失败: 精度相对退化 {rel_drop*100:.1f}% "
+                            f"> 阈值 {threshold*100:.0f}% (文件: {acc_files[0]})")
         except (json.JSONDecodeError, IOError, ValueError):
             pass
 

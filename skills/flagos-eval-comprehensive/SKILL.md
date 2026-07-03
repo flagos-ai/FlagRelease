@@ -537,28 +537,32 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 脚本逻辑：
 1. 读取 `results/gpqa_native.json`（V1）和 `results/gpqa_flagos.json`（V2）
 2. 提取 `score` 字段
-3. 计算 `accuracy_diff = V1_score - V2_score`（正值表示V2下降）
-4. 判定：`accuracy_diff ≤ 5.0%` → 通过（退出码 0）；`> 5.0%` → 不达标（退出码 1）。V2高于V1也算达标
+3. 计算 `rel_drop = (V1_score - V2_score) / V1_score`（相对退化，正值表示 V2 下降）
+4. 判定：`rel_drop ≤ 5%` → 通过（退出码 0）；`> 5%` → 不达标（退出码 1）。V2 高于 V1 也算达标
+   > 精度判据统一为「相对退化」口径（本地 V1 与 NV 基线一致），阈值单位为比例（0.05 = 5%）
 
 | CLI 参数 | 说明 |
 |----------|------|
 | `--v1` | V1 (Native) 评测结果 JSON |
 | `--v2` | V2 (FlagGems) 评测结果 JSON |
-| `--threshold` | 下降阈值百分比（默认 5.0%） |
+| `--threshold` | 本地 V1 模式：相对退化容差，比例值（默认 0.05 = 5%） |
+| `--nv-baseline` | 启用 NV 基线模式：按模型名查 nv_baseline.yaml |
+| `--nv-tolerance` | NV 基线模式：相对退化容差（默认表内 default_tolerance 或 0.05） |
 | `--json` | JSON 格式输出 |
 | `--output` | 结果输出文件路径 |
 
 ## 对比输出格式
 
 ```
-精度对比 (V1 vs V2)
+GPQA Diamond 精度对比
 ========================================
-V1 (Native):        62.12%
-V2 (Full FlagGems):  59.09%
-偏差:                3.03%
-阈值:                5.0%
-结论:                通过 ✓
-当前启用算子:         38 个
+基线模式:     本地 V1
+V1 (Native):  62.12%
+V2 (FlagOS):  59.09%
+偏差:         3.03%
+相对退化:     4.88%
+容差:         5%（相对退化超容差时不达标）
+结论:         ✓ 达标
 ========================================
 ```
 
