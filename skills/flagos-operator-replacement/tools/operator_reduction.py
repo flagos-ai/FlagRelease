@@ -425,7 +425,7 @@ def run_reduction(
             print("  ▶ V4 最终精度终检...")
             accuracy_ok, final_score = run_accuracy_guard(
                 gpqa_script, gpqa_config,
-                os.path.join(output_dir, "gpqa_v4_final.json"),
+                os.path.join(output_dir, "gpqa_v4.json"),
                 accuracy_baseline, accuracy_guard
             )
             accuracy_rel_drop_pct = round(

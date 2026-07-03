@@ -80,12 +80,14 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 11 Plugin 精度评测   → 与 V1 基线对比 → 不达标则算子调优（plugin 模式）
 12 Plugin 性能评测   → 与 V1 基线对比 → 不达标则算子调优（plugin 模式）
 13 V3发布(Max)       → tag 后缀 -v3，[不达标]issue + 镜像上传(私有) / [达标]镜像上传 + 更新 README
+--- V4 减算子流程（qualified=true 时触发，紧接 V3）---
+13.5 V4减算子(Flag-express) → operator_reduction.py 在 V3 达标算子集上逐个减算子提性能，收尾精度终检（相对退化≤5% 为成立前提，保底≥1算子）→ tag 后缀 -v4，plugin 镜像模式发布
 --- V5 扩展流程（有禁用算子时触发）---
 14 V5算子扩展       → operator_expansion.py 逐个重新开启被禁算子（仅需启动+精度）
 15 V5发布(Royal)    → tag 后缀 -v5，打包发布（无达标门槛）
 ```
 
-执行顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → [qualified=true] → 9 → 10 → 11 → 12 → 13 → [has_disabled_ops] → 14 → 15
+执行顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → [qualified=true] → 9 → 10 → 11 → 12 → 13 → [qualified=true] → 13.5(V4) → [has_disabled_ops] → 14 → 15
 
 **算子累计禁用规则**：5 禁用精度问题算子 → 6 在此基础上测性能 → 7 继续禁用性能问题算子。步骤 10-12 复用步骤 5/7 的最终算子集，不重新调优。各步骤详细流程见对应 SKILL.md 的"编排层指令"章节。
 
