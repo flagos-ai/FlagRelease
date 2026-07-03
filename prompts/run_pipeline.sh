@@ -1934,6 +1934,144 @@ else
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] qualified=${QUALIFIED}，跳过 Plugin 流程（步骤 9-13）"
 fi
 
+# ===== 段4.5: V4 减算子 + 发布 (步骤 13.5) =====
+# 触发条件：qualified=true（V3 通过 → 必出 V4/V5）。V4 在 V3 plugin 镜像基础上减算子提性能，
+# 精度终检以 V1（或 NV）基线为准，rel_drop≤5% 是 V4 成立前提。
+# 强制同步 context（读取段4/plugin 的最新产出）
+CTX_FILE="/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+SHARED_CTX="/data/flagos-workspace/${MODEL}/shared/context.yaml"
+if [ -f "${SHARED_CTX}" ]; then
+    cp "${SHARED_CTX}" "${CTX_FILE}"
+elif [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+    docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+fi
+CTX_INFO=$(read_context "${MODEL}" 2>/dev/null) || CTX_INFO=""
+[ -n "$(echo "$CTX_INFO" | cut -d'|' -f1)" ] && SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
+
+SEG4V4_ELAPSED=0
+SEG4V4_MIN=0
+SEG4V4_SEC=0
+
+# 幂等检查：V4 是否已完成（ledger 13_5_v4_reduction 非 pending）
+SEG4V4_DONE=$(python3 -c "
+import yaml
+try:
+    with open('${CTX_FILE}') as f:
+        ctx = yaml.safe_load(f)
+    ledger = ctx.get('workflow_ledger', {}).get('steps', [])
+    items = ledger if isinstance(ledger, list) else list(ledger.values()) if isinstance(ledger, dict) else []
+    for s in items:
+        if isinstance(s, dict) and str(s.get('step','')).startswith('13_5') and s.get('status') in ('success','failed','skipped'):
+            print('yes'); exit()
+except: pass
+print('no')
+" 2>/dev/null) || SEG4V4_DONE="no"
+
+if [ "${QUALIFIED}" = "True" ] && [ "${SEG4V4_DONE}" = "no" ] && [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+
+# 提取精度基线：优先本次 V1(gpqa_native.json) 得分，缺失时回退 accuracy_compare.json 的 nv_score
+V4_ACC_BASELINE=$(docker exec "${SEG_CTR}" bash -c "
+python3 -c \"
+import json
+baseline = 0.0
+try:
+    with open('/flagos-workspace/results/gpqa_native.json') as f:
+        d = json.load(f)
+    s = d.get('score')
+    if s and float(s) > 0:
+        baseline = float(s)
+except: pass
+if baseline <= 0:
+    try:
+        with open('/flagos-workspace/results/accuracy_compare.json') as f:
+            d = json.load(f)
+        nv = (d.get('nv') or {}).get('score') or d.get('nv_score')
+        if nv and float(nv) > 0:
+            baseline = float(nv)
+    except: pass
+print(baseline)
+\"" 2>/dev/null) || V4_ACC_BASELINE="0.0"
+
+echo ""
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  段4.5  V4 减算子 + 发布  (步骤 13.5)                        ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
+SEG4V4_START_TS=$(date +%s)
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] 段4.5 开始 (V4 Flag-express 减算子, 精度基线=${V4_ACC_BASELINE})"
+
+PROMPT_SEG4V4="容器名: ${SEG_CTR}，模型名: ${MODEL}
+
+**变量定义**：CONTAINER=${SEG_CTR}
+${COMMON_TOKENS}
+
+执行步骤13.5（V4 减算子）和 V4 发布。
+
+**前段状态**：容器 ${SEG_CTR} 已就绪，步骤1-13 已全部完成，V3(Max) 已发布且 qualified=true。
+V4 在 V3 的达标算子集基础上逐个减算子提性能，收尾做精度终检。
+
+**步骤13.5 V4 减算子（通过脚本自动执行）**：
+operator_reduction.py 是自包含脚本，内部完成逐算子减除 + 收尾精度终检。一条命令执行：
+  docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/operator_reduction.py \\
+    --context-yaml /flagos-workspace/shared/context.yaml \\
+    --v1-perf /flagos-workspace/results/native_performance.json \\
+    --v3-perf /flagos-workspace/results/flagos_optimized.json \\
+    --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh --mode flagos' \\
+    --accuracy-baseline ${V4_ACC_BASELINE} \\
+    --accuracy-guard 5.0 \\
+    --output-dir /flagos-workspace/results/ \\
+    --state-path /flagos-workspace/results/operator_config_v4.json \\
+    --json\"
+使用 Bash(timeout=600000) 前台执行（脚本可能运行数小时）。
+脚本退出码 0 = V4 成立（精度终检达标或缺基线未验证）；1 = 精度终检不达标，V4 不成立。
+读取输出的 JSON 结果，更新 context.yaml 的 v4_reduction 字段（含 kept_ops/reduced_ops/v4_ratio_v1_pct/accuracy_ok/accuracy_verified）和 workflow_ledger（步骤 13_5_v4_reduction）。
+产出文件：operator_config_v4.json / v4_performance.json / v4_oplist.txt / gpqa_v4.json。
+
+**说明**：若 --accuracy-baseline 为 0（V1=none 且无 NV 基线），脚本会跳过精度终检并标记 accuracy_verified=false，V4 仍产出但报告注明未验证。
+
+**V4 发布**：
+  docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
+  python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --version-tag v4
+
+**进度输出**：步骤开始/完成时输出 [步骤13.5] 标记。
+**完成标志**：输出 \"[段4.5] V4 减算子+发布完成\" 后停止所有操作。"
+
+mkdir -p "${LOG_DIR}"
+claude -p "${PROMPT_SEG4V4}" \
+    --permission-mode auto \
+    --output-format stream-json \
+    --verbose \
+    --debug-file "${DEBUG_FILE}.seg4v4" \
+    --max-turns 500 \
+    2>&1 | tee -a "${LOG_FILE}" \
+         | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 14 --cost-file "${LOG_DIR}/seg4v4_cost.txt" --load-durations "${LOG_DIR}/seg4_durations.json" --durations-file "${LOG_DIR}/seg4v4_durations.json" ${FILTER_FLAGS} || true
+
+SEG4V4_END_TS=$(date +%s)
+SEG4V4_ELAPSED=$(( SEG4V4_END_TS - SEG4V4_START_TS ))
+SEG4V4_MIN=$(( SEG4V4_ELAPSED / 60 ))
+SEG4V4_SEC=$(( SEG4V4_ELAPSED % 60 ))
+echo ""
+echo "┌──────────────────────────────────────────────────────────────┐"
+echo "│  段4.5 完成 — 耗时 ${SEG4V4_MIN}m ${SEG4V4_SEC}s                                   │"
+echo "└──────────────────────────────────────────────────────────────┘"
+
+# 强制同步 context
+if [ -f "${SHARED_CTX}" ]; then
+    cp "${SHARED_CTX}" "${CTX_FILE}"
+elif docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+    docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+fi
+
+else
+    if [ "${QUALIFIED}" != "True" ]; then
+        echo ""
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] qualified=${QUALIFIED}，跳过段4.5（V4 减算子）"
+    elif [ "${SEG4V4_DONE}" = "yes" ]; then
+        echo ""
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] V4 已完成（ledger 13_5 非 pending），跳过段4.5"
+    fi
+fi
+
 # ===== 段5: V5 算子扩展 + 发布 (步骤 14-15) =====
 # 触发条件：段4完成（不要求 plugin qualified，V5 从当前最终状态出发）
 # V5 通过独立脚本完成全部循环，Claude 仅负责调用脚本 + 发布
@@ -2012,7 +2150,7 @@ claude -p "${PROMPT_SEG5}" \
     --max-turns 500 \
     2>&1 | tee -a "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
-         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 14 --cost-file "${LOG_DIR}/seg5_cost.txt" ${FILTER_FLAGS} || true
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 15 --cost-file "${LOG_DIR}/seg5_cost.txt" --load-durations "${LOG_DIR}/seg4v4_durations.json" ${FILTER_FLAGS} || true
 
 SEG5_END_TS=$(date +%s)
 SEG5_ELAPSED=$(( SEG5_END_TS - SEG5_START_TS ))

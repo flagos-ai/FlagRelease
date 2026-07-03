@@ -177,13 +177,16 @@ PIPELINE_STEPS = [
     ('11', 'Plugin精度', '[11]'),
     ('12', 'Plugin性能', '[12]'),
     ('13', 'Plugin发布', '[13]'),
+    ('13.5', 'V4减算子',  '[13.5]'),
+    ('14', 'V5扩展',      '[14]'),
+    ('15', 'V5发布',      '[15]'),
 ]
 
-# 匹配 [步骤X] 开始 / 完成 / 失败 / 跳过（支持两位数步骤号）
-RE_STEP_START = re.compile(r'\[步骤(\d{1,2})\].*(?:开始|启动)')
-RE_STEP_DONE = re.compile(r'\[步骤(\d{1,2})\].*(?:完成|结束)')
-RE_STEP_FAIL = re.compile(r'\[步骤(\d{1,2})\].*失败')
-RE_STEP_SKIP = re.compile(r'\[步骤(\d{1,2})\].*跳过')
+# 匹配 [步骤X] 开始 / 完成 / 失败 / 跳过（支持两位数步骤号及小数步骤号如 13.5）
+RE_STEP_START = re.compile(r'\[步骤(\d{1,2}(?:\.\d)?)\].*(?:开始|启动)')
+RE_STEP_DONE = re.compile(r'\[步骤(\d{1,2}(?:\.\d)?)\].*(?:完成|结束)')
+RE_STEP_FAIL = re.compile(r'\[步骤(\d{1,2}(?:\.\d)?)\].*失败')
+RE_STEP_SKIP = re.compile(r'\[步骤(\d{1,2}(?:\.\d)?)\].*跳过')
 
 
 class ProgressBar:
@@ -216,8 +219,8 @@ class ProgressBar:
                 with open(load_durations) as f:
                     prev = json.load(f)
                 for k, v in prev.items():
-                    idx = int(k) - 1
-                    if 0 <= idx < len(self.step_durations) and v is not None:
+                    idx = self._normalize(str(k))
+                    if idx >= 0 and v is not None:
                         self.step_durations[idx] = v
             except Exception:
                 pass
