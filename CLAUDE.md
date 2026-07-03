@@ -70,7 +70,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 2 环境检测           → inspect_env.py 场景分类 + FlagGems 集成分析
 3 启服务             → V1(native) + V2(flagos) 启动验证 → 异常自动 issue
 4 精度评测           → V1/V2 GPQA Diamond 对比 → 异常自动 issue
-5 精度算子调优       → [条件] env_type≠native 且 V2精度下降>5% 时分组排查定位问题算子（最多3轮）
+5 精度算子调优       → [条件] env_type≠native 且 V2精度相对退化>5% 时分组排查定位问题算子（最多3轮）
 6 性能评测           → V1/V2 4k1k benchmark 对比 → 异常自动 issue
 7 性能算子调优       → [条件] env_type≠native 且 ratio<80% 时逐个禁用直到达标
 8 V2发布(Pro)        → 打包 + 上传，tag 后缀 -v2（统一私有发布，报告注明是否达标）
@@ -101,7 +101,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 ### V5 算子扩展流程（步骤 14-15）
 
 - 触发条件：步骤 13 完成后，且存在被禁用的算子（`optimization.disabled_ops` 非空）
-- 目标：从 V3 基础上最大化开启算子，仅需服务可启动 + 精度误差 ≤5%（**无性能要求**）
+- 目标：从 V3 基础上最大化开启算子，仅需服务可启动 + 精度相对退化 ≤5%（**无性能要求**）
 - 执行方式：通过 `operator_expansion.py` 脚本全自动完成逐算子探测循环，Claude 仅负责调用脚本和发布
 - 镜像 tag：原 date_tag 追加 `-v5`（如 `202603301143-v5`）
 - V5 不设达标门槛：只要扩展脚本执行完成即发布，无论最终开启了多少算子
@@ -112,17 +112,18 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 |------|------|--------------|---------|
 | **V1** (基础版) | 仅 FlagTree，不开启 FlagGems | `-v1` | 阶段一手动发布 |
 | **V0** (中间态) | FlagGems 全量算子开启的初始状态 | — | 不发布（仅作为调优起点） |
-| **V2** (Pro版) | FlagGems + FlagTree，精度≤5%，性能≥80% of V1 | `-v2` | 步骤8自动发布 |
-| **V3** (Max版) | V2 + Plugin，精度≤5%，性能≥80% of V1 | `-v3` | 步骤13自动发布 |
-| **V4** (精简版/Flag-express) | V3 基础上减少算子以提升性能，性能≥V3、接近/超 V1，保底≥1算子 | `-v4` | operator_reduction.py 自动发布 |
-| **V5** (Royal版) | V3 基础上最大化开启算子，仅需启动+精度达标 | `-v5` | 步骤15自动发布 |
+| **V2** (Pro版) | FlagGems + FlagTree，精度相对退化≤5%，性能≥80% of V1 | `-v2` | 步骤8自动发布 |
+| **V3** (Max版) | V2 + Plugin，精度相对退化≤5%，性能≥80% of V1 | `-v3` | 步骤13自动发布 |
+| **V4** (精简版/Flag-express) | V3 基础上减少算子以提升性能，性能≥V3、接近/超 V1，**精度相对退化≤5%（版本成立前提）**，保底≥1算子 | `-v4` | operator_reduction.py 自动发布 |
+| **V5** (Royal版) | V3 基础上最大化开启算子，仅需启动+精度相对退化≤5% | `-v5` | 步骤15自动发布 |
 
 - **V1 基线**：不开启 flaggems 算子替换的版本（仅 FlagTree 生效），作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务，则标记"无 V1"，跳过 V1 基线测试，精度基线回退 NV 基线（`nv_baseline.yaml`）
 - **V0**：进入自动化时 flaggems 全量开启状态。服务启动后以 `flaggems_enable_oplist.txt` 或 `gems.txt` 记录的算子为准
-- **V2 Pro**：经过算子调优（步骤5/7）后达标的版本。精度误差≤5%，性能≥80% of V1
+- **V2 Pro**：经过算子调优（步骤5/7）后达标的版本。精度相对退化≤5%，性能≥80% of V1
 - **V3 Max**：在 V2 基础上安装 Plugin 并调优达标的版本。允许 Plugin 模式下继续关闭算子
-- **V4 精简 (Flag-express)**：在 V3 基础上通过 `operator_reduction.py` 逐个移除性能拖累算子，以性能为保留判据（非精度），硬约束至少保留 1 个算子。目标性能 ≥V3、接近/超过 V1
-- **V5 Royal**：在 V3 基础上尝试重新开启被禁用算子，仅需服务启动+精度达标（无性能要求）
+- **V4 精简 (Flag-express)**：在 V3 基础上通过 `operator_reduction.py` 逐个移除性能拖累算子，以性能为移除判据，硬约束至少保留 1 个算子。**精度相对退化≤5% 是 V4 成立的前提**：逐轮移除时做精度护栏，收尾再做最终精度终检，不达标则 V4 不成立（success=False）。目标性能 ≥V3、接近/超过 V1
+- **V5 Royal**：在 V3 基础上尝试重新开启被禁用算子，仅需服务启动+精度相对退化≤5%（无性能要求）
+- **精度判据口径**：所有版本的精度达标均以「相对退化」计算——`rel_drop = (基线 - 当前) / 基线 ≤ 5%`，基线为本地 V1 或 NV 参考（`nv_baseline.yaml`）。见 `accuracy_compare.py`
 
 ### 双 pipeline 分支（准入镜像分类驱动）
 
@@ -324,7 +325,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 | 文件 | 写入时机 |
 |------|---------|
 | `logs/issues_startup.log` | 服务启动失败、崩溃（不含超时） |
-| `logs/issues_accuracy.log` | V2精度下降 >5%、评测报错 |
+| `logs/issues_accuracy.log` | V2精度相对退化 >5%、评测报错 |
 | `logs/issues_performance.log` | 任一并发级别 V2/V1 < 80% |
 
 统一格式：
@@ -415,7 +416,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 ### 数据完整性约束
 
 28. **每个 Skill 完成后必须写入对应的 trace JSON**
-29. **workflow 状态字段必须与实际数据一致**。`accuracy_ok=true` 仅当V2精度下降 ≤ 阈值；`performance_ok=true` 仅当 min_ratio ≥ target_ratio。**禁止直接通过 `update_context.py --set workflow.performance_ok=true` 或 `--set workflow.accuracy_ok=true` 设置**——这两个字段只能由 `operator_search.py`（调优达标时自动设置）或 `update_context.py` 的内置校验逻辑设置。`update_context.py` 已增加写入校验：设置这两个字段为 true 时会自动验证最新结果文件，不达标则拒绝写入
+29. **workflow 状态字段必须与实际数据一致**。`accuracy_ok=true` 仅当V2精度相对退化 ≤ 阈值；`performance_ok=true` 仅当 min_ratio ≥ target_ratio。**禁止直接通过 `update_context.py --set workflow.performance_ok=true` 或 `--set workflow.accuracy_ok=true` 设置**——这两个字段只能由 `operator_search.py`（调优达标时自动设置）或 `update_context.py` 的内置校验逻辑设置。`update_context.py` 已增加写入校验：设置这两个字段为 true 时会自动验证最新结果文件，不达标则拒绝写入
 30. **工具脚本失败后必须读取 `/flagos-workspace/logs/_last_error.json`**，将错误同步到 context.yaml
 31. **流程中断后自动诊断**。新会话启动时应优先读取 `logs/failure_diagnosis.json` 了解中断原因
 32. **编排层生成的 JSON 必须包含 `_meta` 字段说明**

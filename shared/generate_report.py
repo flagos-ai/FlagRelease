@@ -668,6 +668,8 @@ def generate_text_report(data: ReportData) -> str:
     lines.append("")
     lines.append("| 项目 | 内容 |")
     lines.append("|------|------|")
+    project_name = ctx.get("project", {}).get("name", "") or model.get("project_name", "")
+    lines.append(f"| 项目名称 | {project_name or '-'} |")
     lines.append(f"| 开始时间 | {timing.get('workflow_start', '-')} |")
 
     # gems+tree 上传时间 = 步骤8完成时间
@@ -681,6 +683,7 @@ def generate_text_report(data: ReportData) -> str:
     lines.append(f"| plugin上传时间 | {v3_upload_time} |")
 
     lines.append(f"| 模型 | {model.get('name', '-')} |")
+    lines.append(f"| 模型类型 | {model.get('model_type', '') or '文本生成'} |")
     lines.append(f"| 权重来源 | {model.get('url', '') or model.get('name', '-')} |")
     lines.append(f"| 权重数制 | {model.get('dtype', '-')} |")
     lines.append(f"| 计算数制（默认权重数制） | {model.get('dtype', '-')} |")
@@ -736,7 +739,7 @@ def generate_text_report(data: ReportData) -> str:
         v3_whitelist = v2_whitelist  # fallback: 与 V2 相同
     version_ops_data["v3"] = {"whitelist": v3_whitelist, "txt": v3_whitelist}
 
-    # V4 — 减算子后（operator_reduction.py 产出 kept_ops）；无数据时回退 V3
+    # V4 — 减算子后（operator_reduction.py 产出 kept_ops）；无真实数据时留空（如实显示无数据，不套用 V3）
     v4_whitelist = []
     if data.op_config_v4 and isinstance(data.op_config_v4, dict):
         # operator_reduction 状态文件 current_enabled_ops，或结果 kept_ops
@@ -745,8 +748,6 @@ def generate_text_report(data: ReportData) -> str:
             or data.op_config_v4.get("kept_ops")
             or []
         )
-    if not v4_whitelist:
-        v4_whitelist = v3_whitelist  # fallback
     version_ops_data["v4"] = {"whitelist": v4_whitelist, "txt": v4_whitelist}
 
     # V5 — 扩展后
@@ -819,13 +820,10 @@ def generate_text_report(data: ReportData) -> str:
         lines.append("| 数据集 | 评测条数 | 正确率(%) | 开启算子数 | FlagOS配置 |")
         lines.append("|--------|---------|-----------|-----------|-----------|")
 
-        if ver_key == "v4":
-            # V4 未实现，保留空行
-            lines.append(f"| GPQA_Diamond | - | - | - | - |")
-        elif gpqa:
+        if gpqa:
             score = gpqa.get("score", "-")
             total = gpqa.get("total_questions", "-")
-            # 算子数：V1 无 FlagGems，V2 从 final_oplist，V3 从 v3 config，V5 从 v5_expansion
+            # 算子数：V1 无 FlagGems，V2 从 final_oplist，V3 从 v3 config，V4 减算子后，V5 从 v5_expansion
             op_count = "-"
             if ver_key == "v1":
                 op_count = "-"
@@ -837,6 +835,14 @@ def generate_text_report(data: ReportData) -> str:
                     op_count = str(len(data.op_config_v3.get("enabled_ops", [])))
                 elif publish_oplist:
                     op_count = str(_count_ops_from_oplist(publish_oplist))
+            elif ver_key == "v4":
+                if data.op_config_v4:
+                    v4_ops = (
+                        data.op_config_v4.get("current_enabled_ops")
+                        or data.op_config_v4.get("kept_ops")
+                        or []
+                    )
+                    op_count = str(len(v4_ops)) if v4_ops else "-"
             elif ver_key == "v5":
                 if v5_exp.get("final_enabled_count"):
                     op_count = str(v5_exp["final_enabled_count"])
@@ -856,7 +862,7 @@ def generate_text_report(data: ReportData) -> str:
     for cmp_ver in ["v2", "v3", "v4", "v5"]:
         cmp_gpqa = data.gpqa_versions.get(cmp_ver)
         ver_label = VERSION_LABELS[cmp_ver][0]
-        if cmp_ver == "v4" or not cmp_gpqa:
+        if not cmp_gpqa:
             lines.append(f"| V1 VS {ver_label} | - |")
         else:
             cmp_score = cmp_gpqa.get("score", 0)
@@ -892,7 +898,7 @@ def generate_text_report(data: ReportData) -> str:
         lines.append("| 模型名 | 厂商 | TFLOPS（单卡） | 卡数 | TFLOPS（单卡） × 卡数 | 4k-1k 64并发 - mean TTFT（ms） | 4k-1k 64并发 - P99 TTFT（ms） | 4k-1k 64并发 - output toks/s | 4k-1k 64并发 - total tok/s | 4k-1k 64并发 - Mean TPOT (ms) | 开算子数 | FlagOS配置 | 单算力吞吐 |")
         lines.append("|--------|------|---------------|------|---------------------|------|------|------|------|------|------|------|------|")
 
-        if ver_key == "v4" or not metrics:
+        if not metrics:
             lines.append(f"| {model_name} | {vendor} | {tflops_str} | {gpu_count} | {total_tflops_str} | - | - | - | - | - | - | {config_label} | - |")
         else:
             ttft = metrics.get("Mean TTFT (ms)", "-")
@@ -913,6 +919,14 @@ def generate_text_report(data: ReportData) -> str:
                     op_count = str(len(data.op_config_v3.get("enabled_ops", [])))
                 elif publish_oplist:
                     op_count = str(_count_ops_from_oplist(publish_oplist))
+            elif ver_key == "v4":
+                if data.op_config_v4:
+                    v4_ops = (
+                        data.op_config_v4.get("current_enabled_ops")
+                        or data.op_config_v4.get("kept_ops")
+                        or []
+                    )
+                    op_count = str(len(v4_ops)) if v4_ops else "-"
             elif ver_key == "v5":
                 if v5_exp.get("final_enabled_count"):
                     op_count = str(v5_exp["final_enabled_count"])
@@ -939,7 +953,7 @@ def generate_text_report(data: ReportData) -> str:
         ver_label = VERSION_LABELS[cmp_ver][0]
         cmp_perf = data.perf_versions.get(cmp_ver)
         cmp_metrics = _extract_perf_metrics(cmp_perf) if cmp_perf else {}
-        if cmp_ver == "v4" or not cmp_metrics:
+        if not cmp_metrics:
             lines.append(f"| V1 VS {ver_label} | - |")
         else:
             cmp_total = cmp_metrics.get("Total token throughput (tok/s)", 0)
@@ -1005,10 +1019,19 @@ def generate_text_report(data: ReportData) -> str:
     lines.append(f"  - V3：{v3_harbor or '-'}")
 
     # V4
-    lines.append(f"  - V4：-")
+    versions_ctx = ctx.get("versions", {}) or {}
+    v4_harbor = (
+        release.get("v4_harbor_image", "")
+        or (versions_ctx.get("v4", {}) or {}).get("harbor_image", "")
+    )
+    lines.append(f"  - V4：{v4_harbor or '-'}")
 
     # V5
-    v5_harbor = release.get("v5_harbor_image", "") or v5_exp.get("image_url", "")
+    v5_harbor = (
+        release.get("v5_harbor_image", "")
+        or v5_exp.get("image_url", "")
+        or (versions_ctx.get("v5", {}) or {}).get("harbor_image", "")
+    )
     lines.append(f"  - V5：{v5_harbor or '-'}")
 
     lines.append("")
