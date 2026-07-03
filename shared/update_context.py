@@ -149,7 +149,10 @@ def _validate_ok_field(ctx, key_path):
     if key_path == "workflow.performance_ok":
         target_ratio = get_nested(ctx, "workflow.target_ratio", 0.8)
         # 检查最新的性能结果文件
-        perf_files = sorted(glob.glob(f"{results_dir}/flagos_*.json") +
+        # search_summary.json 是唯一带 final_ratio/performance_ok 的权威摘要（operator_search.py 产出），
+        # 优先扫描它；flagos_*.json / search_step_*.json 是扁平 benchmark（无顶层 ratio），仅作兜底
+        perf_files = sorted(glob.glob(f"{results_dir}/search_summary*.json") +
+                           glob.glob(f"{results_dir}/flagos_*.json") +
                            glob.glob(f"{results_dir}/search_step_*.json"),
                            key=lambda f: os.path.getmtime(f) if os.path.exists(f) else 0,
                            reverse=True)
@@ -160,8 +163,22 @@ def _validate_ok_field(ctx, key_path):
         try:
             with open(perf_files[0], "r") as f:
                 data = json.load(f)
-            # 从 search_summary 或 benchmark 结果中提取 ratio
-            ratio = data.get("final_ratio") or data.get("ratio") or 0
+            # 优先信任 search_summary 的 performance_ok 字段（与搜索判定同源）
+            if data.get("performance_ok") is False:
+                fr = data.get("final_ratio")
+                fr_str = f"{fr*100:.1f}%" if isinstance(fr, (int, float)) else "?"
+                return (f"设置 {key_path}=true 失败: 最新搜索摘要 performance_ok=false "
+                        f"(ratio={fr_str}, 文件: {perf_files[0]})")
+            if data.get("performance_ok") is True:
+                return None
+            # 无 performance_ok 字段：尝试从 final_ratio/ratio 取比值
+            ratio = data.get("final_ratio")
+            if ratio is None:
+                ratio = data.get("ratio")
+            if ratio is None:
+                # 扁平 benchmark 文件无顶层 ratio，无法就地判定 → 不阻断
+                # （避免误拒：真正的达标判据在 search_summary.json 中）
+                return None
             if isinstance(ratio, dict):
                 ratio = min(ratio.values()) if ratio else 0
             if ratio < target_ratio:
