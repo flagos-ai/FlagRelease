@@ -47,7 +47,7 @@ STOP_ON_ERROR=false
 FORCE=false
 VERBOSE_FLAG=""
 PROXY_FLAG=""
-MODEL_TIMEOUT=36000  # 单模型超时（秒），默认 10 小时
+MODEL_TIMEOUT=54000  # 单模型超时（秒），默认 15 小时
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --stop-on-error) STOP_ON_ERROR=true; shift ;;
