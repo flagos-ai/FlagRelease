@@ -192,6 +192,10 @@ for line in lines:
     # ERROR 行标记（仍检测致命信号，但跳过进度匹配）
     is_error_line = bool(re.match(r'^(?:\([^)]+\)\s+)?ERROR\s', s))
 
+    # 已知无害警告跳过
+    if "vllm._C" in s or "Failed to import from vllm._C" in s:
+        continue
+
     # 致命信号
     for pat, label in FATAL:
         if pat.search(s):

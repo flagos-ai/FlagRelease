@@ -51,3 +51,33 @@ models:
       gpqa_diamond: 0.0        # TODO
     source: "TODO"
     updated_at: "2026-07-01"
+
+  gemma-3-1b-it:
+    aliases:
+      - google/gemma-3-1b-it
+      - gemma3-1b-it
+      - gemma_3_1b_it
+    metrics:
+      gpqa_diamond: 8.0
+    source: "NV 实测"
+    updated_at: "2026-07-03"
+
+  glm-4-9b-chat:
+    aliases:
+      - THUDM/glm-4-9b-chat
+      - glm4-9b-chat
+      - glm_4_9b_chat
+    metrics:
+      gpqa_diamond: 24.0
+    source: "NV 实测"
+    updated_at: "2026-07-03"
+
+  Hunyuan-7B-Instruct:
+    aliases:
+      - tencent/Hunyuan-7B-Instruct
+      - hunyuan-7b-instruct
+      - hunyuan_7b_instruct
+    metrics:
+      gpqa_diamond: 70.0
+    source: "NV 实测"
+    updated_at: "2026-07-03"
