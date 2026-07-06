@@ -11,6 +11,9 @@
 
 set -euo pipefail
 
+# Source DTK env (set +eu needed: env.sh uses unbound vars)
+set +eu; [ -f /opt/dtk/env.sh ] && source /opt/dtk/env.sh 2>/dev/null; set -eu
+
 CONTEXT_YAML="/flagos-workspace/shared/context.yaml"
 MODE=""
 # VLLM_PLUGINS 覆盖：未设=沿用旧自动行为；显式设置（含空串）=强制覆盖

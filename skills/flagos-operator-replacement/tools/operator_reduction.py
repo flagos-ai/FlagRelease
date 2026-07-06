@@ -153,12 +153,16 @@ def composite_throughput(out_tp: float, total_tp: float) -> float:
 # =============================================================================
 
 def write_control_file(enabled_ops: List[str], control_file: str = DEFAULT_CONTROL_FILE):
-    """写入算子白名单控制文件 + 持久化环境变量"""
+    """写入算子白名单控制文件 + 持久化环境变量（兼容 plugin 模式）"""
     os.makedirs(os.path.dirname(control_file), exist_ok=True)
     with open(control_file, 'w') as f:
         json.dump({"include": sorted(enabled_ops)}, f, indent=2, ensure_ascii=False)
     _persist_env("FLAGGEMS_CONTROL_MODE", "only_enable")
     _persist_env("USE_FLAGGEMS", "1")
+    # Plugin 模式兼容：设置 VLLM_FL_FLAGOS_WHITELIST 并清除 BLACKLIST
+    if os.environ.get("VLLM_FL_PREFER_ENABLED") == "true":
+        _persist_env("VLLM_FL_FLAGOS_WHITELIST", ",".join(sorted(enabled_ops)))
+        _remove_env("VLLM_FL_FLAGOS_BLACKLIST")
 
 
 def _persist_env(key: str, value: str):
@@ -173,16 +177,56 @@ def _persist_env(key: str, value: str):
     os.environ[key] = value
 
 
+def _remove_env(key: str):
+    etc_env = "/etc/environment"
+    if os.path.exists(etc_env):
+        with open(etc_env, 'r') as f:
+            lines = [l for l in f.readlines() if not l.startswith(f"{key}=")]
+        with open(etc_env, 'w') as f:
+            f.writelines(lines)
+    os.environ.pop(key, None)
+
+
+def _load_etc_environment():
+    """加载 /etc/environment 中 FlagGems 相关变量到 os.environ"""
+    etc_env = "/etc/environment"
+    if not os.path.exists(etc_env):
+        return
+    with open(etc_env, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, _, val = line.partition('=')
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key.startswith(('USE_FLAGGEMS', 'FLAGGEMS_', 'VLLM_FL_')):
+                os.environ[key] = val
+
+
 def restart_and_wait(service_cmd: str, wait_script: str, port: int = 8000,
                      model_name: str = "", timeout: int = 300,
                      max_timeout: int = 1800) -> bool:
     """重启服务并等待就绪，返回是否成功"""
+    # 用 pkill -9 强杀所有 vllm/sglang 及其 worker 进程
+    subprocess.run(
+        "pkill -9 -f 'vllm|sglang|multiprocessing.spawn' 2>/dev/null; sleep 3",
+        shell=True, capture_output=True
+    )
+    # 等待端口释放
+    for _ in range(15):
+        rc = subprocess.run(
+            f"ss -tlnp 2>/dev/null | grep -q ':{port}\\b'",
+            shell=True, capture_output=True
+        )
+        if rc.returncode != 0:
+            break
+        time.sleep(1)
+    time.sleep(2)
+
     for cache_dir in ["/root/.triton/cache/", "/tmp/triton_cache/", "/root/.flaggems/code_cache/"]:
         if os.path.exists(cache_dir):
             subprocess.run(f"rm -rf {cache_dir}", shell=True, capture_output=True)
-
-    subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null; sleep 3", shell=True, capture_output=True)
-    time.sleep(5)
 
     subprocess.Popen(
         service_cmd, shell=True,
@@ -190,17 +234,20 @@ def restart_and_wait(service_cmd: str, wait_script: str, port: int = 8000,
         stderr=subprocess.STDOUT
     )
 
-    wait_cmd = (
-        f"{wait_script} --port {port}"
-        f" --timeout {timeout} --max-timeout {max_timeout}"
-        f" --log-path {DEFAULT_LOG}"
-        f" --mode flagos"
-    )
-    if model_name:
-        wait_cmd += f" --model-name '{model_name}'"
-
-    rc, stdout, stderr = run_cmd(wait_cmd, timeout=max_timeout + 60)
-    return rc == 0
+    # 简单轮询 health endpoint，不依赖日志监控
+    start_t = time.time()
+    while time.time() - start_t < max_timeout:
+        try:
+            rc = subprocess.run(
+                f"curl -s -o /dev/null -w '%{{http_code}}' http://127.0.0.1:{port}/health",
+                shell=True, capture_output=True, text=True, timeout=10
+            )
+            if rc.stdout.strip() == "200":
+                return True
+        except Exception:
+            pass
+        time.sleep(10)
+    return False
 
 
 def run_benchmark(benchmark_script: str, output_dir: str, output_name: str) -> Tuple[float, float]:
@@ -542,6 +589,9 @@ def main():
     parser.add_argument("--max-timeout", type=int, default=1800)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+
+    # 加载 /etc/environment 中的 FlagGems 相关变量（docker exec 不继承）
+    _load_etc_environment()
 
     ctx = load_context(args.context_yaml)
     enabled_ops = get_enabled_ops(ctx)
