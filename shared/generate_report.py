@@ -127,6 +127,36 @@ def parse_issue_md(content: str) -> Dict[str, str]:
 # 数据收集
 # =============================================================================
 
+def _ops_from_context(ctx: Optional[dict], ver: str) -> List[str]:
+    """从 context.yaml 回退提取某版本的启用算子列表。
+
+    results/operator_config*.json 依赖 docker cp 同步，缺失时会导致报告算子栏全空。
+    context.yaml 由各段可靠同步（context_snapshot.yaml），作为回退数据源。
+    返回启用算子列表（可能为空）。
+    """
+    if not isinstance(ctx, dict):
+        return []
+    versions = ctx.get("versions", {}) or {}
+    vd = versions.get(ver, {}) if isinstance(versions, dict) else {}
+    if isinstance(vd, dict):
+        for key in ("enabled_ops", "current_enabled_ops", "kept_ops", "final_enabled_ops"):
+            ops = vd.get(key)
+            if isinstance(ops, list) and ops:
+                return list(ops)
+    # v2/v3 兜底：optimization.enabled_ops（减去 disabled）
+    if ver in ("v2", "v3"):
+        opt = ctx.get("optimization", {}) or {}
+        if isinstance(opt, dict):
+            enabled = opt.get("enabled_ops")
+            if isinstance(enabled, list) and enabled:
+                return list(enabled)
+            initial = (ctx.get("service", {}) or {}).get("initial_operator_list", [])
+            disabled = set(opt.get("disabled_ops", []) or [])
+            if isinstance(initial, list) and initial:
+                return [op for op in initial if op not in disabled]
+    return []
+
+
 class ReportData:
     """从工作目录收集所有可用数据。"""
 
@@ -231,7 +261,7 @@ class ReportData:
                     self.issue_files.append(parse_issue_md(content))
 
         # oplists
-        for name in ("initial_oplist", "accuracy_tuned_oplist", "final_oplist", "v5_oplist"):
+        for name in ("initial_oplist", "accuracy_tuned_oplist", "final_oplist", "v4_oplist", "v5_oplist"):
             lines = read_lines(os.path.join(r, f"{name}.txt"))
             if lines:
                 self.oplists[name] = lines
@@ -728,6 +758,9 @@ def generate_text_report(data: ReportData) -> str:
         v2_whitelist = [l.strip() for l in publish_oplist if l.strip() and not l.startswith("[DEBUG]")]
         if not v2_whitelist:
             v2_whitelist = _parse_oplist_to_func_names(publish_oplist)
+    if not v2_whitelist:
+        # fallback: context.yaml（results 产物缺失时的可靠回退源）
+        v2_whitelist = _ops_from_context(data.context, "v2")
     v2_txt_ops = _parse_oplist_to_func_names(publish_oplist) if publish_oplist else v2_whitelist
     version_ops_data["v2"] = {"whitelist": v2_whitelist, "txt": v2_txt_ops}
 
@@ -735,6 +768,8 @@ def generate_text_report(data: ReportData) -> str:
     v3_whitelist = []
     if data.op_config_v3 and isinstance(data.op_config_v3, dict):
         v3_whitelist = data.op_config_v3.get("enabled_ops", [])
+    if not v3_whitelist:
+        v3_whitelist = _ops_from_context(data.context, "v3")
     if not v3_whitelist:
         v3_whitelist = v2_whitelist  # fallback: 与 V2 相同
     version_ops_data["v3"] = {"whitelist": v3_whitelist, "txt": v3_whitelist}
@@ -748,7 +783,12 @@ def generate_text_report(data: ReportData) -> str:
             or data.op_config_v4.get("kept_ops")
             or []
         )
-    version_ops_data["v4"] = {"whitelist": v4_whitelist, "txt": v4_whitelist}
+    if not v4_whitelist:
+        # fallback: context.yaml versions.v4（results 产物缺失时）；仍为空则如实显示无数据
+        v4_whitelist = _ops_from_context(data.context, "v4")
+    v4_oplist = data.oplists.get("v4_oplist", [])
+    v4_txt_ops = _parse_oplist_to_func_names(v4_oplist) if v4_oplist else v4_whitelist
+    version_ops_data["v4"] = {"whitelist": v4_whitelist, "txt": v4_txt_ops}
 
     # V5 — 扩展后
     v5_whitelist = []
@@ -757,6 +797,8 @@ def generate_text_report(data: ReportData) -> str:
         v5_whitelist = data.op_config_v5.get("current_enabled_ops", [])
     elif v5_oplist:
         v5_whitelist = _parse_oplist_to_func_names(v5_oplist)
+    if not v5_whitelist:
+        v5_whitelist = _ops_from_context(data.context, "v5")
     if not v5_whitelist:
         v5_whitelist = v3_whitelist  # fallback
     v5_txt_ops = _parse_oplist_to_func_names(v5_oplist) if v5_oplist else v5_whitelist
