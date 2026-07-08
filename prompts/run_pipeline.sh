@@ -1120,7 +1120,7 @@ ${SEG2_CTX_SUMMARY}
 **算子调优**：
 - 步骤4完成后如 accuracy_ok=false → 立即执行步骤5（5完成后再进入6）
 - 步骤5精度算子调优采用**累积禁用**策略：第1轮禁用组A，第2轮禁用组A+B，第3轮禁用组A+B+C（每轮在上一轮基础上追加禁用，而非独立禁用单组）
-- 步骤5每轮算子控制按 env_type 区分：**plugin 场景**用 diagnose_ops.py 输出的 cumulative_test_env.env_inline（VLLM_FL_FLAGOS_BLACKLIST 等）作启动命令内联前缀重启，与步骤7性能调优 operator_search.py 走相同的 env_inline 路径，**禁止写 /root/flaggems_ops_control.json**（plugin 下 VLLM_FL_PREFER_ENABLED=true 使控制文件无效，写它会调优空转）；**非 plugin 场景**才用 cumulative_test_env.control_file 写控制文件 + FLAGGEMS_CONTROL_MODE=only_enable 经 start_service.sh 启动。两者均**不使用** toggle_flaggems.py --action modify-enable --disabled-ops
+- 步骤5每轮算子控制的路径判据是**当前实际控制方式**而非 env_type（vllm_fl 包存在≠plugin 控制生效）：执行 docker exec \$CONTAINER grep -q '^VLLM_FL_PREFER_ENABLED=true' /etc/environment，命中=plugin_env 路径，未命中=control_file 路径。**plugin_env 路径**用 diagnose_ops.py 输出的 cumulative_test_env.env_inline（VLLM_FL_FLAGOS_BLACKLIST 等）作启动命令内联前缀重启，与步骤7性能调优 operator_search.py 走相同的 env_inline 路径，**禁止写 /root/flaggems_ops_control.json**（VLLM_FL_PREFER_ENABLED=true 使控制文件无效，写它会调优空转）；**control_file 路径**（含分支 B V1=v1.1/v1.2 场景的 V2——baseline_selector 已清除 PREFER_ENABLED，flaggems 经注入代码+控制文件生效，即使镜像装有 vllm_fl 包）用 cumulative_test_env.control_file 写控制文件 + FLAGGEMS_CONTROL_MODE=only_enable 经 start_service.sh 启动。两者均**不使用** toggle_flaggems.py --action modify-enable --disabled-ops
 - 步骤6完成后如 performance_ok=false → 执行步骤7（elimination 逐删策略）
 - 调优后产出 V3 结果（flagos_optimized.json），更新 context.yaml
 
@@ -1139,7 +1139,7 @@ ${SEG2_CTX_SUMMARY}
     --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh' \\
     --max-rounds 50\"
 - operator_search.py 已封装 next→配置→重启→benchmark→update 全流程，含 GPU 显存释放验证和可用性前置检查
-- 步骤5精度算子调优：通过 diagnose_ops.py accuracy-groups 获取分组和累积配置，每轮按 env_type 应用（plugin=env_inline 内联重启，非 plugin=写控制文件经 start_service.sh）+ 重启服务 + fast_gpqa.py 评测；轮次上限=分组数（绝对上限 8）
+- 步骤5精度算子调优：通过 diagnose_ops.py accuracy-groups 获取分组和累积配置，每轮按实际控制方式应用（/etc/environment 有 VLLM_FL_PREFER_ENABLED=true → env_inline 内联重启；否则写控制文件经 start_service.sh）+ 重启服务 + fast_gpqa.py 评测；轮次上限=分组数（绝对上限 8）
 
 **进度输出**：步骤开始/完成时输出 [步骤X] 标记，关键命令后输出 ✓/✗ 结果摘要。
 

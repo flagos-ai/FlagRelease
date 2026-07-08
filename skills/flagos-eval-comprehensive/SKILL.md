@@ -578,14 +578,14 @@ V2精度下降 > 5% 时：
      --plugin-mode --json
    ```
 3. 按组逐轮累积禁用测试：第1轮禁用组A，第2轮禁用组A+B，第3轮禁用组A+B+C
-4. **每轮算子控制方式**（按 env_type 区分，plugin 场景与性能调优 operator_search.py 走相同的 env_inline 路径）：
-   - **plugin 场景（`vllm_plugin_flaggems`）**：worker 只读环境变量、**不读控制文件**。使用 `diagnose_ops.py` 输出的当轮 `cumulative_test_env.env_inline`（已含 `VLLM_FL_FLAGOS_BLACKLIST` / `VLLM_FL_OOT_BLACKLIST`）作为启动命令内联前缀重启服务：
+4. **每轮算子控制方式**（判据是**当前实际控制方式**而非 env_type——vllm_fl 包存在≠plugin 控制生效。判定：`grep -q '^VLLM_FL_PREFER_ENABLED=true' /etc/environment` 命中=plugin_env 路径，未命中=control_file 路径。plugin_env 路径与性能调优 operator_search.py 走相同的 env_inline 路径）：
+   - **plugin_env 路径**：worker 只读环境变量、**不读控制文件**。使用 `diagnose_ops.py` 输出的当轮 `cumulative_test_env.env_inline`（已含 `VLLM_FL_FLAGOS_BLACKLIST` / `VLLM_FL_OOT_BLACKLIST`）作为启动命令内联前缀重启服务：
      ```bash
      # env_inline 形如: USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true VLLM_FL_FLAGOS_BLACKLIST=softmax,layer_norm
      <env_inline> nohup vllm serve ... > /flagos-workspace/logs/startup_flagos.log 2>&1 &
      ```
      > ⚠️ **禁止写 `/root/flaggems_ops_control.json`**：plugin 模式 `VLLM_FL_PREFER_ENABLED=true` 会使注入代码 `pass`，控制文件完全无效，写它会导致每轮禁用不生效、调优空转。
-   - **非 plugin 场景（`vllm_flaggems`）**：使用当轮 `cumulative_test_env.control_file` 白名单写入 `/root/flaggems_ops_control.json`（`{"include": [...]}`），通过 `start_service.sh` 启动（自动推断 `FLAGGEMS_CONTROL_MODE=only_enable`）。
+   - **control_file 路径**（含分支 B V1=v1.1/v1.2 场景的 V2：baseline_selector 已清除 `VLLM_FL_PREFER_ENABLED`，flaggems 经注入代码+控制文件生效，即使镜像装有 vllm_fl 包）：使用当轮 `cumulative_test_env.control_file` 白名单写入 `/root/flaggems_ops_control.json`（`{"include": [...]}`），通过 `start_service.sh` 启动（自动推断 `FLAGGEMS_CONTROL_MODE=only_enable`）。
    - **不使用** `toggle_flaggems.py --action modify-enable --disabled-ops`
 5. 某轮累积禁用后精度恢复（下降 ≤5%）→ 达标即停，保留所有已累积禁用的算子
 6. **每轮输出算子状态**（见下方格式）
@@ -889,7 +889,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 - **轮次上限 = 分组数**（分几组跑几轮，绝对上限 8 轮），达标即停
 - **累积禁用**：第1轮禁用组A，第2轮禁用组A+B，第3轮禁用组A+B+C……逐组追加，直至覆盖所有组（每轮在上一轮基础上追加禁用）
 - 达标标准：累积禁用后 V2 精度下降 ≤5%（相对 V1）
-- **算子控制方式**（按 env_type 区分，见模块 C 第4步）：plugin 场景用 `cumulative_test_env.env_inline`（`VLLM_FL_FLAGOS_BLACKLIST` 等）内联重启，**禁止写控制文件**（plugin 下无效）；非 plugin 场景才用 `cumulative_test_env.control_file` 白名单写 `/root/flaggems_ops_control.json` + `FLAGGEMS_CONTROL_MODE=only_enable`
+- **算子控制方式**（按当前实际控制方式区分——`grep -q '^VLLM_FL_PREFER_ENABLED=true' /etc/environment` 命中与否，见模块 C 第4步）：plugin_env 路径用 `cumulative_test_env.env_inline`（`VLLM_FL_FLAGOS_BLACKLIST` 等）内联重启，**禁止写控制文件**（该模式下无效）；control_file 路径才用 `cumulative_test_env.control_file` 白名单写 `/root/flaggems_ops_control.json` + `FLAGGEMS_CONTROL_MODE=only_enable`
 
 执行后必须完成：
 - 写入 `context.yaml` 的 `eval.excluded_ops_accuracy` 和 `optimization` 字段

@@ -149,7 +149,7 @@ if [ -f /etc/environment ]; then
     while IFS='=' read -r key val; do
         [[ -z "$key" || "$key" == \#* ]] && continue
         case "$key" in
-            USE_FLAGGEMS|FLAGGEMS_*|VLLM_FL_*)
+            USE_FLAGGEMS|FLAGGEMS_*|VLLM_FL_*|VLLM_PLUGINS)
                 val="${val%\"}" ; val="${val#\"}"
                 val="${val%\'}" ; val="${val#\'}"
                 export "$key=$val"
@@ -181,9 +181,12 @@ if [ "$MODE" = "native" ]; then
     unset FLAGGEMS_CONTROL_MODE 2>/dev/null || true
 fi
 
-# VLLM_PLUGINS 决策：
-#   - 显式 --vllm-plugins（含空串）→ 强制覆盖（V1 三选场景：''/厂商插件/fl）
-#   - 未显式指定 → 沿用旧自动行为（plugin 场景默认 fl）
+# VLLM_PLUGINS 决策（优先级从高到低）：
+#   1. 显式 --vllm-plugins（含空串）→ 强制覆盖（V1 三选场景：''/厂商插件/fl）
+#   2. 持久化/继承值（含空串）→ 沿用。V1 三选定案后由 baseline_selector.py 固化到
+#      /etc/environment；V3 起由 persist_op_config.py 固化为 fl。V2 由此继承 V1 的
+#      plugin（如 metax），修复"USE_FLAGGEMS=1 即强制 fl 覆盖厂商插件"的归因混淆
+#   3. 均未设置 → 旧自动兜底（USE_FLAGGEMS=1 且 vllm_fl 存在 → fl）
 if [ "$VLLM_PLUGINS_OVERRIDE_SET" = "1" ]; then
     export VLLM_PLUGINS="$VLLM_PLUGINS_OVERRIDE"
     if [ -z "$VLLM_PLUGINS_OVERRIDE" ]; then
@@ -191,7 +194,10 @@ if [ "$VLLM_PLUGINS_OVERRIDE_SET" = "1" ]; then
     else
         echo "[start_service.sh] 显式覆盖：VLLM_PLUGINS=${VLLM_PLUGINS_OVERRIDE}"
     fi
-# plugin 场景：显式指定 VLLM_PLUGINS 避免多 platform plugin 冲突（ascend vs fl）
+elif [ -n "${VLLM_PLUGINS+x}" ]; then
+    export VLLM_PLUGINS
+    echo "[start_service.sh] 继承持久化 plugin 配置：VLLM_PLUGINS='${VLLM_PLUGINS}'"
+# 旧自动兜底：显式指定 VLLM_PLUGINS 避免多 platform plugin 冲突（ascend vs fl）
 elif [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
     HAS_PLUGIN=$(PATH=/opt/conda/bin:$PATH python3 -c "
 import importlib.util
