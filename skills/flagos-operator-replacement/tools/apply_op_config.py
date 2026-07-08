@@ -25,16 +25,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-
-def env_to_inline(env_dict):
-    """将 env dict 转为内联前缀字符串: VAR1=val1 VAR2=val2"""
-    parts = []
-    for k, v in env_dict.items():
-        if " " in v or "'" in v:
-            parts.append(f"{k}='{v}'")
-        else:
-            parts.append(f"{k}={v}")
-    return " ".join(parts)
+# env 构建走统一共享模块（唯一权威实现）
+from flagos_op_config import build_op_env, env_to_inline
 
 
 def generate(mode, oot_blacklist=None, flagos_blacklist=None, flagos_whitelist=None, per_op=None):
@@ -46,41 +38,31 @@ def generate(mode, oot_blacklist=None, flagos_blacklist=None, flagos_whitelist=N
       "full"    -> USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true
       "custom"  -> 按 whitelist/blacklist 自定义（白名单优先）
     """
-    env = {}
-
-    if mode == "native":
-        env["USE_FLAGGEMS"] = "0"
-        env["VLLM_FL_PREFER_ENABLED"] = "false"
-    elif mode == "full":
-        env["USE_FLAGGEMS"] = "1"
-        env["VLLM_FL_PREFER_ENABLED"] = "true"
-    elif mode == "custom":
-        env["USE_FLAGGEMS"] = "1"
-        env["VLLM_FL_PREFER_ENABLED"] = "true"
-        if oot_blacklist:
-            bl = ",".join(oot_blacklist) if isinstance(oot_blacklist, list) else oot_blacklist
-            env["VLLM_FL_OOT_BLACKLIST"] = bl
-        # 白名单优先，黑名单兜底
-        if flagos_whitelist:
-            wl = ",".join(flagos_whitelist) if isinstance(flagos_whitelist, list) else flagos_whitelist
-            env["VLLM_FL_FLAGOS_WHITELIST"] = wl
-        elif flagos_blacklist:
-            bl = ",".join(flagos_blacklist) if isinstance(flagos_blacklist, list) else flagos_blacklist
-            env["VLLM_FL_FLAGOS_BLACKLIST"] = bl
-        if per_op:
-            env["VLLM_FL_PER_OP"] = per_op
-    else:
+    if mode not in ("native", "full", "custom"):
         print(f"ERROR: unknown mode '{mode}'", file=sys.stderr)
         sys.exit(1)
+
+    def as_list(v):
+        if v is None:
+            return None
+        return v if isinstance(v, list) else [s for s in str(v).split(",") if s]
+
+    env = build_op_env(
+        mode=mode,
+        enabled_ops=as_list(flagos_whitelist),
+        disabled_ops=as_list(flagos_blacklist),
+        oot_blacklist=as_list(oot_blacklist),
+        per_op=per_op,
+    )
 
     result = {
         "success": True,
         "mode": mode,
         "env_vars": env,
         "env_inline": env_to_inline(env),
-        "oot_blacklist": oot_blacklist or [],
-        "flagos_blacklist": flagos_blacklist or [],
-        "flagos_whitelist": flagos_whitelist or [],
+        "oot_blacklist": as_list(oot_blacklist) or [],
+        "flagos_blacklist": as_list(flagos_blacklist) or [],
+        "flagos_whitelist": as_list(flagos_whitelist) or [],
         "timestamp": datetime.now().isoformat(),
     }
     print(json.dumps(result, indent=2, ensure_ascii=False))

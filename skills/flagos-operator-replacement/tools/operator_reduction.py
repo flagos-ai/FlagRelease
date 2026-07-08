@@ -39,6 +39,15 @@ import yaml
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 
+# 算子配置应用走统一共享模块（唯一权威实现，见 flagos_op_config.py）
+from flagos_op_config import (
+    is_plugin_env as _is_plugin_env,
+    persist_env as _persist_env,
+    write_op_config as write_control_file,
+    load_etc_environment as _load_etc_environment,
+    DEFAULT_CONTROL_FILE,
+)
+
 
 # =============================================================================
 # 常量
@@ -48,7 +57,7 @@ DEFAULT_WAIT_SCRIPT = "/flagos-workspace/scripts/wait_for_service.sh"
 DEFAULT_BENCHMARK_SCRIPT = "/flagos-workspace/scripts/benchmark_runner.py"
 DEFAULT_FAST_GPQA_SCRIPT = "/flagos-workspace/scripts/fast_gpqa.py"
 DEFAULT_GPQA_CONFIG = "/flagos-workspace/scripts/fast_gpqa_config.yaml"
-DEFAULT_CONTROL_FILE = "/root/flaggems_ops_control.json"
+# DEFAULT_CONTROL_FILE 由 flagos_op_config 提供（统一共享模块）
 DEFAULT_LOG = "/flagos-workspace/logs/startup_v4.log"
 
 # 性能增益判定：移除算子后综合吞吐提升超过此比例才确认移除（默认 1%）
@@ -149,88 +158,10 @@ def composite_throughput(out_tp: float, total_tp: float) -> float:
 
 
 # =============================================================================
-# 服务控制（与 operator_expansion.py 一致）
+# 服务控制
+# 算子配置应用（_is_plugin_env / write_control_file / _persist_env / _load_etc_environment）
+# 已收敛到统一共享模块 flagos_op_config（见文件头 import），此处不再保留本地副本。
 # =============================================================================
-
-def _is_plugin_env() -> bool:
-    """判断当前是否为 plugin 控制环境"""
-    return os.environ.get("VLLM_FL_PREFER_ENABLED") == "true" or _env_has("VLLM_FL_PREFER_ENABLED")
-
-
-def _env_has(key: str) -> bool:
-    """Check if key exists in /etc/environment"""
-    etc_env = "/etc/environment"
-    if not os.path.exists(etc_env):
-        return False
-    with open(etc_env) as f:
-        return any(l.startswith(f"{key}=") for l in f)
-
-
-def _clear_env(key: str):
-    """从 /etc/environment 中移除某个变量"""
-    etc_env = "/etc/environment"
-    if not os.path.exists(etc_env):
-        return
-    with open(etc_env, 'r') as f:
-        lines = [l for l in f.readlines() if not l.startswith(f"{key}=")]
-    with open(etc_env, 'w') as f:
-        f.writelines(lines)
-    os.environ.pop(key, None)
-
-
-def write_control_file(enabled_ops: List[str], control_file: str = DEFAULT_CONTROL_FILE):
-    """根据环境类型选择算子控制方式：plugin 环境用 WHITELIST，非 plugin 用控制文件。
-
-    plugin 环境下允许 enabled_ops 为空（USE_FLAGGEMS=0），此时 plugin 仍可独立运行。
-    """
-    if _is_plugin_env():
-        # plugin 模式：通过环境变量控制，清除可能冲突的 BLACKLIST
-        _clear_env("VLLM_FL_FLAGOS_BLACKLIST")
-        if enabled_ops:
-            _persist_env("USE_FLAGGEMS", "1")
-            whitelist = ",".join(sorted(enabled_ops))
-            _persist_env("VLLM_FL_FLAGOS_WHITELIST", whitelist)
-        else:
-            _persist_env("USE_FLAGGEMS", "0")
-            _persist_env("VLLM_FL_FLAGOS_WHITELIST", "")
-        _persist_env("VLLM_FL_PREFER_ENABLED", "true")
-    else:
-        # 非 plugin：通过控制文件
-        _persist_env("USE_FLAGGEMS", "1")
-        os.makedirs(os.path.dirname(control_file), exist_ok=True)
-        with open(control_file, 'w') as f:
-            json.dump({"include": sorted(enabled_ops)}, f, indent=2, ensure_ascii=False)
-        _persist_env("FLAGGEMS_CONTROL_MODE", "only_enable")
-
-
-def _persist_env(key: str, value: str):
-    etc_env = "/etc/environment"
-    lines = []
-    if os.path.exists(etc_env):
-        with open(etc_env, 'r') as f:
-            lines = [l for l in f.readlines() if not l.startswith(f"{key}=")]
-    lines.append(f"{key}={value}\n")
-    with open(etc_env, 'w') as f:
-        f.writelines(lines)
-    os.environ[key] = value
-
-
-def _load_etc_environment():
-    """加载 /etc/environment 中 FlagGems 相关变量到 os.environ"""
-    etc_env = "/etc/environment"
-    if not os.path.exists(etc_env):
-        return
-    with open(etc_env, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#') or '=' not in line:
-                continue
-            key, _, val = line.partition('=')
-            key = key.strip()
-            val = val.strip().strip('"').strip("'")
-            if key.startswith(('USE_FLAGGEMS', 'FLAGGEMS_', 'VLLM_FL_')):
-                os.environ[key] = val
-
 
 def restart_and_wait(service_cmd: str, wait_script: str, port: int = 8000,
                      model_name: str = "", timeout: int = 300,
