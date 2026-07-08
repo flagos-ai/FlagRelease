@@ -102,15 +102,16 @@ python3 skills/flagos-container-preparation/tools/check_model_local.py \
 
 ## 入口 2 — 已有镜像
 
-1. 自动检测 GPU 厂商
-2. **根据 GPU 厂商选择对应模板**，填充变量后生成 docker run 命令并自动执行
-3. 验证容器状态
+1. **镜像就绪保证（由 `run_pipeline.sh` 编排层完成，本 skill 无需执行）**：pipeline 启动时已做 `docker image inspect` 存在性检查，不在本地则 `docker pull`（直连失败按代理列表重试），全部失败则整个任务明确退出——**执行层禁止再跑 docker pull，也禁止因"镜像不存在/docker run 失败"降级复用旧容器**
+2. 自动检测 GPU 厂商
+3. **根据 GPU 厂商选择对应模板**，填充变量后生成 docker run 命令并自动执行
+4. 验证容器状态
 
 ### docker run 命令模板
 
 | 变量 | 说明 | 来源 |
 |------|------|------|
-| `${CONTAINER_NAME}` | 容器名称 | 自动生成，含冲突检测（见下方命名规则） |
+| `${CONTAINER_NAME}` | 容器名称 | **由 `run_pipeline.sh` 编排层预生成并注入 prompt（含冲突时间戳），执行层必须原样使用，禁止自行生成/判断**（见下方命名规则） |
 | `${MODEL_PATH}` | 宿主机模型路径 | `check_model_local.py` 搜索：**找到则使用实际路径**（如 `/home/admin/workspace/models/Qwen3-0.6B`）；**未找到则使用 `/data/models/<model_name>`**（预创建并挂载空目录，容器内下载） |
 | `${CONTAINER_MODEL_PATH}` | 容器内模型路径 | 与 `${MODEL_PATH}` 保持一致（宿主机路径原样映射到容器内同路径） |
 | `${WORKSPACE_PATH}` | 宿主机工作目录 | `/data/flagos-workspace` |
@@ -121,13 +122,16 @@ python3 skills/flagos-container-preparation/tools/check_model_local.py \
 
 ### 容器命名与冲突处理（镜像模式专用）
 
-容器名生成规则：
+容器名由 `run_pipeline.sh` 编排层**确定性预生成**（规则如下），通过 prompt 注入执行层：
 1. 基础名称：`<model_short_name>_flagos`（如 `Qwen3-8B_flagos`）
 2. 创建前检测：`docker inspect --type=container <基础名称>`
 3. 如不存在 → 直接使用基础名称
-4. 如已存在 → 追加时间戳：`<model_short_name>_flagos_<MMDD_HHMM>`（如 `Qwen3-8B_flagos_0410_1500`）
+4. 如已存在 → 追加时间戳：`<model_short_name>_flagos_<MMDD_HHMM>`（同分钟再冲突则 `<MMDD_HHMMSS>`）
 
-**禁止行为**：镜像模式下禁止复用任何已存在的容器，即使该容器是由同一镜像创建的。必须通过 `docker run` 创建全新容器。
+**禁止行为**（真机事故教训：曾因 docker run 失败降级复用旧容器，导致旧镜像跑新任务、结果错误归属）：
+- 镜像模式下禁止复用任何已存在的容器，即使该容器是由同一镜像创建的。必须通过 `docker run` 创建全新容器
+- docker run 失败**不是**复用的理由——修正变量重试/借鉴挂载参数重试（容器名不变）仍失败则终止任务
+- 执行层禁止改动编排层注入的容器名
 
 #### 模板 A：NVIDIA
 

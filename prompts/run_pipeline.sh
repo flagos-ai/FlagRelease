@@ -200,6 +200,54 @@ if [ -n "$MODEL_PATH" ] && [ -z "${MODEL_FOUND_ON_HOST:-}" ]; then
     fi
 fi
 
+# ========== 镜像模式：镜像存在性检查 + 拉取（确定性归 shell，agent 不参与） ==========
+# 修复真机问题：镜像不在本地时无 pull 步骤 → docker run 失败 → agent 沿"借鉴已有容器"
+# 降级滑坡成复用旧容器（旧镜像跑新任务，结果错误归属）。此处 shell 强制保证镜像就绪。
+if $IMAGE_MODE; then
+    echo "[pre-flight] 检查镜像是否在本地: ${IMAGE}"
+    if docker image inspect "${IMAGE}" &>/dev/null; then
+        echo "  ✓ 镜像已在本地"
+    else
+        echo "  镜像不在本地，开始拉取（可能需要数分钟）..."
+        PULL_OK=false
+        # 直连尝试
+        if docker pull "${IMAGE}" 2>&1 | tail -3; then
+            docker image inspect "${IMAGE}" &>/dev/null && PULL_OK=true
+        fi
+        # 失败则按代理列表逐个重试（CLAUDE.md 网络策略）
+        if ! $PULL_OK && [ -n "${PROXY_LIST}" ]; then
+            IFS=',' read -ra PROXIES <<< "${PROXY_LIST}"
+            for PROXY in "${PROXIES[@]}"; do
+                echo "  直连失败，尝试代理: ${PROXY}"
+                if http_proxy="${PROXY}" https_proxy="${PROXY}" docker pull "${IMAGE}" 2>&1 | tail -3; then
+                    docker image inspect "${IMAGE}" &>/dev/null && PULL_OK=true && break
+                fi
+            done
+        fi
+        if ! $PULL_OK; then
+            echo "错误: 镜像拉取失败: ${IMAGE}"
+            echo "  已尝试直连$([ -n "${PROXY_LIST}" ] && echo "及全部代理")。请检查镜像地址/网络/Harbor凭证后重试。"
+            echo "  （明确失败退出，禁止降级复用旧容器——旧镜像跑新任务会产生错误归属的结果）"
+            exit 1
+        fi
+        echo "  ✓ 镜像拉取成功"
+    fi
+
+    # ---------- 容器名确定性预生成（冲突必然追加时间戳，agent 只消费不判断） ----------
+    MODEL_SHORT_FOR_NAME=$(echo "${MODEL}" | sed 's|.*/||')
+    CONTAINER_NAME_PRE="${MODEL_SHORT_FOR_NAME}_flagos"
+    if docker inspect --type=container "${CONTAINER_NAME_PRE}" &>/dev/null; then
+        CONTAINER_NAME_PRE="${MODEL_SHORT_FOR_NAME}_flagos_$(date +%m%d_%H%M)"
+        # 极端情况同一分钟内重跑：再冲突则加秒
+        if docker inspect --type=container "${CONTAINER_NAME_PRE}" &>/dev/null; then
+            CONTAINER_NAME_PRE="${MODEL_SHORT_FOR_NAME}_flagos_$(date +%m%d_%H%M%S)"
+        fi
+        echo "[pre-flight] 同名容器已存在，本次容器名（强制新建）: ${CONTAINER_NAME_PRE}"
+    else
+        echo "[pre-flight] 本次容器名: ${CONTAINER_NAME_PRE}"
+    fi
+fi
+
 # ========== Banner ==========
 echo "============================================================"
 echo "  FlagOS 全自动迁移流程"
@@ -345,13 +393,13 @@ if $IMAGE_MODE; then
     STEP1=$(cat <<STEP1_EOF
 1. 容器准备（从镜像创建）：
    - ${MODEL_NOTE}
+   - 镜像已由编排层确保存在于本地（已完成存在性检查/拉取），**禁止执行 docker pull**
+   - **容器名已由编排层确定: \${CONTAINER_NAME}=${CONTAINER_NAME_PRE}，必须原样使用，禁止自行生成/判断/修改**
    - 检测 GPU 厂商（nvidia-smi / npu-smi 等），选择 SKILL.md 中对应的 docker run 模板
    - **NVIDIA 模板（严格执行，仅替换变量值，禁止增删参数）**：
      docker run -itd --name=\${CONTAINER_NAME} --gpus=all --network=host -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} -v /data/flagos-workspace/${MODEL}:/flagos-workspace ${IMAGE}
-   - **降级策略**：模板失败 → 检查变量值修正后重试 → 仍失败则 docker inspect 借鉴已有容器挂载配置重试一次 → 仍失败则终止
-   - 容器名自动生成为 <model_short_name>_flagos（如 Qwen3-8B_flagos）
-   - 如同名容器已存在，追加时间戳：<model_short_name>_flagos_<MMDD_HHMM>
-   - 镜像模式下禁止复用已有容器，必须 docker run 新建${DOWNLOAD_NOTE}
+   - **降级策略**：模板失败 → 检查变量值修正后重试 → 仍失败可 docker inspect 同类容器**仅抄参考其挂载/设备参数拼新的 docker run 命令**（容器名仍必须用 ${CONTAINER_NAME_PRE}），重试一次 → 仍失败则终止
+   - **绝对禁止复用任何已存在的容器**（包括同镜像创建的）。docker run 失败不是复用的理由——复用旧容器=旧镜像跑新任务，产出错误归属，比失败更糟${DOWNLOAD_NOTE}
    - bash skills/flagos-container-preparation/tools/setup_workspace.sh \${CONTAINER} ${MODEL} --skip-archive 部署工具脚本（宿主机已归档，跳过容器内归档避免移走正在写入的日志）
    - 写入容器内 /flagos-workspace/shared/context.yaml（entry.type=new_container, image.name=${IMAGE}）+ traces/01_container_preparation.json
    - **记录实际 docker run 命令到 context**：步骤1完成后，将实际成功执行的完整 docker run 命令写入 context.yaml：
