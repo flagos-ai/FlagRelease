@@ -578,13 +578,18 @@ V2精度下降 > 5% 时：
      --plugin-mode --json
    ```
 3. 按组逐轮累积禁用测试：第1轮禁用组A，第2轮禁用组A+B，第3轮禁用组A+B+C
-4. **每轮算子控制方式**（与性能调优 operator_search.py 一致）：
-   - 从 `diagnose_ops.py` 输出的当轮 `cumulative_test_env.control_file` 获取白名单
-   - 写入控制文件 `/root/flaggems_ops_control.json`（格式：`{"include": [启用算子列表]}`）
-   - 通过 `start_service.sh` 启动服务（`start_service.sh` 会自动从控制文件推断 `FLAGGEMS_CONTROL_MODE=only_enable`，无需手动写 `/etc/environment`）
+4. **每轮算子控制方式**（按 env_type 区分，plugin 场景与性能调优 operator_search.py 走相同的 env_inline 路径）：
+   - **plugin 场景（`vllm_plugin_flaggems`）**：worker 只读环境变量、**不读控制文件**。使用 `diagnose_ops.py` 输出的当轮 `cumulative_test_env.env_inline`（已含 `VLLM_FL_FLAGOS_BLACKLIST` / `VLLM_FL_OOT_BLACKLIST`）作为启动命令内联前缀重启服务：
+     ```bash
+     # env_inline 形如: USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true VLLM_FL_FLAGOS_BLACKLIST=softmax,layer_norm
+     <env_inline> nohup vllm serve ... > /flagos-workspace/logs/startup_flagos.log 2>&1 &
+     ```
+     > ⚠️ **禁止写 `/root/flaggems_ops_control.json`**：plugin 模式 `VLLM_FL_PREFER_ENABLED=true` 会使注入代码 `pass`，控制文件完全无效，写它会导致每轮禁用不生效、调优空转。
+   - **非 plugin 场景（`vllm_flaggems`）**：使用当轮 `cumulative_test_env.control_file` 白名单写入 `/root/flaggems_ops_control.json`（`{"include": [...]}`），通过 `start_service.sh` 启动（自动推断 `FLAGGEMS_CONTROL_MODE=only_enable`）。
    - **不使用** `toggle_flaggems.py --action modify-enable --disabled-ops`
 5. 某轮累积禁用后精度恢复（下降 ≤5%）→ 达标即停，保留所有已累积禁用的算子
 6. **每轮输出算子状态**（见下方格式）
+7. **每轮必须验证生效**：重启后确认 worker 进程真实生效——plugin 场景 `cat /proc/<vllm-pid>/environ | tr '\0' '\n' | grep VLLM_FL_FLAGOS_BLACKLIST` 应含本轮禁用算子；两种场景均可读 `/tmp/flaggems_enable_oplist.txt`（权威来源）确认禁用算子已不在启用列表
 
 ## 每轮算子状态输出（强制）
 
@@ -725,7 +730,7 @@ docker exec $CONTAINER bash -c "bash /flagos-workspace/scripts/wait_for_service.
 
 **迭代控制**：
 - 每轮记录关闭了哪些算子
-- 最多迭代 3 轮，超限标记 `workflow.accuracy_ok: false` 进入步骤4
+- **轮次上限 = `diagnose_ops.py` 分组数**（分几组跑几轮，累积禁用覆盖所有组），绝对上限 8 轮防失控；跑满上限仍不达标才标记 `workflow.accuracy_ok: false` 进入步骤4
 - 每轮输出算子状态报告
 
 ### 精度问题日志写入
@@ -775,7 +780,7 @@ ISSUE_EOF"
 **反馈规则**：
 - 状态为"通过"时不显示"问题算子"和"建议操作"
 - 每次重新评测后更新"已累计剔除"计数
-- 如果 3 轮优化后仍不达标，标记 `workflow.accuracy_ok: false`，进入下一步
+- 如果跑满轮次上限（=分组数，绝对上限 8 轮）后仍不达标，标记 `workflow.accuracy_ok: false`，进入下一步
 
 ---
 
@@ -867,7 +872,7 @@ else:
 每轮评测完成后，**立即**调用 checkpoint 工具写入结果，确保会话超时不丢失进度：
 
 ```bash
-# ROUND: 当前轮次 (1/2/3)
+# ROUND: 当前轮次 (从 1 起递增，上限 = 分组数，绝对上限 8)
 # SCORE: 本轮评测得分 (如 22.0)
 # BASELINE: V1 基线分数 (如 22.0)
 # DISABLED_OPS: 本轮累积禁用的算子，逗号分隔 (如 "addmm,mm,bmm")
@@ -881,10 +886,10 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 ### 固化选择
 
 - 使用 `diagnose_ops.py accuracy-groups` 分组排查（不使用逐个排查）
-- **最多 3 轮**（3 组），达标即停
-- **累积禁用**：第1轮禁用组A，第2轮禁用组A+B，第3轮禁用组A+B+C（每轮在上一轮基础上追加禁用）
+- **轮次上限 = 分组数**（分几组跑几轮，绝对上限 8 轮），达标即停
+- **累积禁用**：第1轮禁用组A，第2轮禁用组A+B，第3轮禁用组A+B+C……逐组追加，直至覆盖所有组（每轮在上一轮基础上追加禁用）
 - 达标标准：累积禁用后 V2 精度下降 ≤5%（相对 V1）
-- **算子控制方式**：每轮使用 `cumulative_test_env.control_file` 白名单写入 `/root/flaggems_ops_control.json`，设置 `FLAGGEMS_CONTROL_MODE=only_enable`（与性能调优 operator_search.py 一致）
+- **算子控制方式**（按 env_type 区分，见模块 C 第4步）：plugin 场景用 `cumulative_test_env.env_inline`（`VLLM_FL_FLAGOS_BLACKLIST` 等）内联重启，**禁止写控制文件**（plugin 下无效）；非 plugin 场景才用 `cumulative_test_env.control_file` 白名单写 `/root/flaggems_ops_control.json` + `FLAGGEMS_CONTROL_MODE=only_enable`
 
 执行后必须完成：
 - 写入 `context.yaml` 的 `eval.excluded_ops_accuracy` 和 `optimization` 字段

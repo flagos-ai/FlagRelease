@@ -81,7 +81,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 12 Plugin 性能评测   → 与 V1 基线对比 → 不达标则算子调优（plugin 模式）
 13 V3发布(Max)       → tag 后缀 -v3，[不达标]issue + 镜像上传(私有) / [达标]镜像上传 + 更新 README
 --- V4 减算子流程（qualified=true 时触发，紧接 V3）---
-13.5 V4减算子(Flag-express) → operator_reduction.py 在 V3 达标算子集上逐个减算子提性能，收尾精度终检（相对退化≤5% 为成立前提，保底≥1算子）→ tag 后缀 -v4，plugin 镜像模式发布
+13.5 V4减算子(Flag-express) → operator_reduction.py 两阶段（阶段1性能搜索不测精度、阶段2精度回溯）在 V3 达标算子集上减算子提性能，追求性能绝对值最大化、达标基准是超越 V3（不与 V1 比），保底≥1算子，精度相对退化≤5% 为成立前提 → tag 后缀 -v4，plugin 镜像模式发布
 --- V5 扩展流程（有禁用算子时触发）---
 14 V5算子扩展       → operator_expansion.py 逐个重新开启被禁算子（仅需启动+精度）
 15 V5发布(Royal)    → tag 后缀 -v5，打包发布（无达标门槛）
@@ -89,13 +89,13 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 
 执行顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → [qualified=true] → 9 → 10 → 11 → 12 → 13 → [qualified=true] → 13.5(V4) → [has_disabled_ops] → 14 → 15
 
-**算子累计禁用规则**：5 禁用精度问题算子 → 6 在此基础上测性能 → 7 继续禁用性能问题算子。步骤 10-12 复用步骤 5/7 的最终算子集，不重新调优。各步骤详细流程见对应 SKILL.md 的"编排层指令"章节。
+**算子累计禁用规则**：5 禁用精度问题算子 → 6 在此基础上测性能 → 7 继续禁用性能问题算子。步骤 10-12 以步骤 5/7 的最终算子集为起点：**达标则不重新调优；不达标则按三级递进（先 issue → plugin 模式关算子调优 → 全关仍不达标才判框架问题）在 plugin 模式下继续调优**（见步骤 11/12 说明与 line 98）。各步骤详细流程见对应 SKILL.md 的"编排层指令"章节。
 
 **Plugin 流程特殊规则**：
 - 触发条件：步骤 8 完成且 `workflow.qualified=true`，否则步骤 9-13 全部 skipped
 - 崩溃停止：步骤 9 安装失败或步骤 10 服务崩溃 → 写 issue → 设 `plugin_workflow.crash_stopped=true` → **停止任务**
 - Issue 路由：步骤 9-13 所有 issue 通过 `issue_reporter.py full --type plugin-error --repo flagos-ai/vllm-plugin-FL` 提交（只保存本地文件）
-- **Plugin 阶段允许算子调优**：步骤 11/12 精度/性能不达标时，允许使用 `operator_search.py run --plugin-mode --final-output-name v3_performance --state-path operator_config_v3.json` 在 Plugin 模式下继续关闭算子，直到达标。调优前仍先提交 issue 记录问题
+- **Plugin 阶段算子调优（三级递进）**：步骤 11/12 精度/性能不达标时，按三级递进处理：①先提交 issue 记录问题；②用 `operator_search.py run --plugin-mode --final-output-name v3_performance --state-path operator_config_v3.json` 在 Plugin 模式下继续关闭算子直到达标；③若全关 flaggems 算子仍不达标，判定为框架问题，提交 plugin-error issue 并按不达标发布处理
 - 算子集初始化：以主流程已达标的算子集（含步骤 5/7 的禁用列表）为起点，在此基础上累加禁用
 - 镜像 tag：原 date_tag 追加 `-v3`（如 `202603301143-v3`）
 - Plugin 不达标发布：调优后仍不达标时，先提交 issue，再打包镜像上传 Harbor（私有），不更新 ModelScope/HuggingFace README
@@ -116,14 +116,14 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 | **V0** (中间态) | FlagGems 全量算子开启的初始状态 | — | 不发布（仅作为调优起点） |
 | **V2** (Pro版) | FlagGems + FlagTree，精度相对退化≤5%，性能≥80% of V1 | `-v2` | 步骤8自动发布 |
 | **V3** (Max版) | V2 + Plugin，精度相对退化≤5%，性能≥80% of V1 | `-v3` | 步骤13自动发布 |
-| **V4** (精简版/Flag-express) | V3 基础上减少算子以提升性能，性能≥V3、接近/超 V1，**精度相对退化≤5%（版本成立前提）**，保底≥1算子 | `-v4` | operator_reduction.py 自动发布 |
+| **V4** (精简版/Flag-express) | V3 基础上减算子以提升性能，追求性能绝对值最大化、**达标基准是超越 V3（不与 V1 比较）**，**精度相对退化≤5%（版本成立前提）**，保底≥1算子 | `-v4` | operator_reduction.py 自动发布 |
 | **V5** (Royal版) | V3 基础上最大化开启算子，仅需启动+精度相对退化≤5% | `-v5` | 步骤15自动发布 |
 
 - **V1 基线**：不开启 flaggems 算子替换的版本（仅 FlagTree 生效），作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务，则标记"无 V1"，跳过 V1 基线测试，精度基线回退 NV 基线（`nv_baseline.yaml`）
 - **V0**：进入自动化时 flaggems 全量开启状态。服务启动后以 `flaggems_enable_oplist.txt` 或 `gems.txt` 记录的算子为准
 - **V2 Pro**：经过算子调优（步骤5/7）后达标的版本。精度相对退化≤5%，性能≥80% of V1
 - **V3 Max**：在 V2 基础上安装 Plugin 并调优达标的版本。允许 Plugin 模式下继续关闭算子
-- **V4 精简 (Flag-express)**：在 V3 基础上通过 `operator_reduction.py` 逐个移除性能拖累算子，以性能为移除判据，硬约束至少保留 1 个算子。**精度相对退化≤5% 是 V4 成立的前提**：逐轮移除时做精度护栏，收尾再做最终精度终检，不达标则 V4 不成立（success=False）。目标性能 ≥V3、接近/超过 V1
+- **V4 精简 (Flag-express)**：在 V3 基础上通过 `operator_reduction.py` 减算子提性能，**两阶段**：阶段1 性能搜索（从 V3 基线起逐个试禁用，仅当禁用后吞吐 > 当前基线才提交、基线动态推进，全程不测精度）；阶段2 精度回溯（按性能从高到低取组合测精度，达标即产出，不达标回退次优，最坏回退 V3 等价）。**追求性能绝对值最大化，达标基准是超越 V3（不与 V1 比较，V1 仅报告参考）**，硬约束至少保留 1 个算子（plugin 也不例外）。**精度相对退化≤5% 是 V4 成立前提**，收尾做最终精度终检，不达标则 V4 不成立（success=False）。V4 成立需同时满足：超越 V3 + 保留≥1算子 + 精度达标
 - **V5 Royal**：在 V3 基础上尝试重新开启被禁用算子，仅需服务启动+精度相对退化≤5%（无性能要求）
 - **精度判据口径**：所有版本的精度达标均以「相对退化」计算——`rel_drop = (基线 - 当前) / 基线 ≤ 5%`，基线为本地 V1 或 NV 参考（`nv_baseline.yaml`）。见 `accuracy_compare.py`
 
@@ -208,7 +208,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 | Plugin 服务崩溃 | 写 issue 到 `flagos-ai/vllm-plugin-FL` → 停止任务 | 不切回非 plugin 模式 |
 | Plugin issue 路由 | 步骤 9-13 所有 issue → `flagos-ai/vllm-plugin-FL` | 非 FlagGems 仓库 |
 | Plugin 镜像命名 | 原 tag 追加 `-plugin` 后缀 | 自动生成 |
-| Plugin 算子集 | 复用主流程已达标的算子集（含步骤 5/7 禁用列表） | 不重新调优 |
+| Plugin 算子集 | 复用主流程已达标的算子集（含步骤 5/7 禁用列表） | 达标不重新调优；不达标进三级递进继续调优 |
 | 网络代理切换 | 从 `FLAGOS_PROXY_LIST` 逐个尝试 | 网络操作失败时自动切换代理重试，全部失败才终止 |
 | 容器内代理传递 | `docker exec -e http_proxy=<proxy> -e https_proxy=<proxy>` | 所有需要外网的 docker exec 命令必须传入代理 |
 

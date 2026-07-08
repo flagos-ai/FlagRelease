@@ -112,15 +112,58 @@ def get_v1_score(v1_result_path: str) -> Optional[float]:
 # 核心逻辑
 # =============================================================================
 
+def _is_plugin_env() -> bool:
+    """判断当前是否为 plugin 控制环境"""
+    return os.environ.get("VLLM_FL_PREFER_ENABLED") == "true" or _env_has("VLLM_FL_PREFER_ENABLED")
+
+
+def _env_has(key: str) -> bool:
+    """Check if key exists in /etc/environment"""
+    etc_env = "/etc/environment"
+    if not os.path.exists(etc_env):
+        return False
+    with open(etc_env) as f:
+        return any(l.startswith(f"{key}=") for l in f)
+
+
+def _clear_env(key: str):
+    """从 /etc/environment 中移除某个变量"""
+    etc_env = "/etc/environment"
+    if not os.path.exists(etc_env):
+        return
+    with open(etc_env, 'r') as f:
+        lines = [l for l in f.readlines() if not l.startswith(f"{key}=")]
+    with open(etc_env, 'w') as f:
+        f.writelines(lines)
+    os.environ.pop(key, None)
+
+
 def write_control_file(enabled_ops: List[str], control_file: str = DEFAULT_CONTROL_FILE):
-    """写入算子白名单控制文件"""
-    os.makedirs(os.path.dirname(control_file), exist_ok=True)
-    control = {"include": sorted(enabled_ops)}
-    with open(control_file, 'w') as f:
-        json.dump(control, f, indent=2, ensure_ascii=False)
-    # 设置环境变量
-    _persist_env("FLAGGEMS_CONTROL_MODE", "only_enable")
-    _persist_env("USE_FLAGGEMS", "1")
+    """根据环境类型选择算子控制方式：plugin 环境用 WHITELIST env，非 plugin 用控制文件。
+
+    ⚠ plugin 场景（VLLM_FL_PREFER_ENABLED=true）下控制文件完全失效（注入代码 pass），
+    必须走 VLLM_FL_FLAGOS_WHITELIST env。此前本函数缺 plugin 分支 → V5 在 plugin 下扩算子
+    静默不生效（见 v5-operator-expansion-whitelist-bug）。现与 operator_reduction.write_control_file 对齐。
+    """
+    if _is_plugin_env():
+        # plugin 模式：通过环境变量控制，清除可能冲突的 BLACKLIST
+        _clear_env("VLLM_FL_FLAGOS_BLACKLIST")
+        if enabled_ops:
+            _persist_env("USE_FLAGGEMS", "1")
+            whitelist = ",".join(sorted(enabled_ops))
+            _persist_env("VLLM_FL_FLAGOS_WHITELIST", whitelist)
+        else:
+            _persist_env("USE_FLAGGEMS", "0")
+            _persist_env("VLLM_FL_FLAGOS_WHITELIST", "")
+        _persist_env("VLLM_FL_PREFER_ENABLED", "true")
+    else:
+        # 非 plugin：通过控制文件
+        os.makedirs(os.path.dirname(control_file), exist_ok=True)
+        control = {"include": sorted(enabled_ops)}
+        with open(control_file, 'w') as f:
+            json.dump(control, f, indent=2, ensure_ascii=False)
+        _persist_env("FLAGGEMS_CONTROL_MODE", "only_enable")
+        _persist_env("USE_FLAGGEMS", "1")
 
 
 def _persist_env(key: str, value: str):
