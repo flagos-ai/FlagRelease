@@ -389,6 +389,9 @@ def persist_env_vars(disabled_ops):
     env_vars = {
         "USE_FLAGGEMS": "1",
         "VLLM_FL_PREFER_ENABLED": "true",
+        # V3 起 plugin 状态推进为 fl：覆盖 V1 三选固化的厂商插件/空值，
+        # start_service.sh 未显式传 --vllm-plugins 时继承此值
+        "VLLM_PLUGINS": "fl",
     }
     if disabled_ops:
         env_vars["VLLM_FL_FLAGOS_BLACKLIST"] = ",".join(sorted(disabled_ops))

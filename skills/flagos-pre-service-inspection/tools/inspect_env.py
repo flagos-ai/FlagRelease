@@ -690,6 +690,84 @@ def _build_inject_block(caps, indent="", extra_kwargs=None):
     return "\n".join(indent + line for line in lines)
 
 
+# ============ 冷注入（base 镜像源码无 flag_gems 引用时从零插入） ============
+# 原理：flag_gems.enable() 必须在每个 worker 进程内、模型加载前执行（FlagGems 官方
+# how_to_use 文档）。model runner 模块是每个 worker 都会 import 的文件，在其尾部
+# 插入 env 门控代码块 = worker import 时执行，天然早于模型实例化。
+# 锚点用 importlib.find_spec 解析真实路径（不硬编码 python 版本/site-packages 布局）。
+
+_COLD_ANCHOR_MODULES = [
+    "vllm_ascend.worker.model_runner_v1",   # 华为（vllm-ascend 覆盖原生 runner）
+    "vllm.v1.worker.gpu_model_runner",      # 原生 V1 引擎 runner
+    "vllm.worker.model_runner",             # 兜底：V0 引擎 runner
+]
+
+
+def _find_cold_inject_anchors():
+    """解析冷注入锚点文件列表：已知模块表 + vllm_* 厂商包泛化扫描。
+
+    返回去重后的存在文件路径列表。命中的锚点全部注入（注入块 env 门控幂等，
+    实际加载哪个 runner 由运行时 platform 决定，静态判定不可靠）。
+    """
+    import importlib.util as _ilu
+    anchors = []
+
+    for mod in _COLD_ANCHOR_MODULES:
+        try:
+            spec = _ilu.find_spec(mod)
+            if spec and spec.origin and os.path.isfile(spec.origin):
+                anchors.append(spec.origin)
+        except (ImportError, ModuleNotFoundError, ValueError, Exception):
+            continue
+
+    # 泛化扫描：vllm 同级目录下的 vllm_* 厂商包内 *model_runner*.py
+    # （覆盖已知表之外的厂商 runner；排除 vllm_fl —— plugin 路径自身接管算子控制）
+    try:
+        spec = _ilu.find_spec("vllm")
+        if spec and spec.submodule_search_locations:
+            pkg_parent = os.path.dirname(list(spec.submodule_search_locations)[0])
+            for entry in sorted(os.listdir(pkg_parent)):
+                if not entry.startswith("vllm_") or entry.startswith("vllm_fl"):
+                    continue
+                vendor_dir = os.path.join(pkg_parent, entry)
+                if not os.path.isdir(vendor_dir):
+                    continue
+                for py_file in Path(vendor_dir).rglob("*model_runner*.py"):
+                    anchors.append(str(py_file))
+    except Exception:
+        pass
+
+    return sorted(set(anchors))
+
+
+def _cold_inject_single_file(code_path, caps):
+    """对单个锚点文件在模块尾部追加 env 门控注入块（try/except 包裹，异常不炸 worker）"""
+    if not code_path or not os.path.isfile(code_path):
+        return {"injected": False, "file": code_path, "error": "file not found"}
+
+    content = Path(code_path).read_text(encoding="utf-8", errors="ignore")
+    if FLAGGEMS_INJECT_MARKER in content:
+        return {"injected": True, "already": True, "file": code_path}
+
+    inner = _build_inject_block(caps, indent="    ")
+    block = (
+        "\n\n# FlagGems 冷注入：模块尾部，worker import 时执行（由 FlagOS inspect_env 自动注入）\n"
+        "try:\n"
+        f"{inner}\n"
+        "except Exception as _fg_cold_exc:\n"
+        "    import sys as _fgsys\n"
+        '    print(f"[flagos-cold-inject] FlagGems enable skipped: {_fg_cold_exc}", file=_fgsys.stderr)\n'
+    )
+
+    backup_path = code_path + ".flagos_backup"
+    Path(backup_path).write_text(content, encoding="utf-8")
+    Path(code_path).write_text(content + block, encoding="utf-8")
+
+    print(f"  ✓ 已冷注入环境变量驱动代码到 {code_path}（模块尾部）")
+    print(f"    备份: {backup_path}")
+    return {"injected": True, "file": code_path, "backup": backup_path, "mode": "cold"}
+
+
 def _inject_single_file(code_path, caps):
     """对单个文件注入环境变量驱动代码，替换 flag_gems.enable()/only_enable() 调用"""
     if not code_path or not os.path.isfile(code_path):
@@ -730,7 +808,12 @@ def _inject_single_file(code_path, caps):
 
 
 def _inject_control_code(code_details, caps):
-    """注入环境变量驱动的算子控制代码到所有包含 flag_gems.enable() 的文件"""
+    """注入环境变量驱动的算子控制代码到所有包含 flag_gems.enable() 的文件
+
+    双模式：
+    - replace：源码已有 flag_gems.enable() 调用点 → 原位替换（原有逻辑）
+    - cold：全镜像无调用点（plugin 镜像常态）→ 解析 model runner 锚点从零插入
+    """
     code_paths = code_details.get("code_paths", [])
 
     # 向后兼容：如果没有 code_paths，使用旧的 code_path
@@ -739,8 +822,17 @@ def _inject_control_code(code_details, caps):
         if code_path:
             code_paths = [{"file": code_path, "enable_call": "", "priority": 1}]
 
+    inject_mode = "replace"
     if not code_paths:
-        return {"injected": False, "error": "no code_paths found"}
+        # 冷注入：无既有调用点，锚点=每个 worker 都会 import 的 model runner 模块
+        anchors = _find_cold_inject_anchors()
+        if not anchors:
+            return {"injected": False, "mode": "cold",
+                    "error": "no code_paths and no cold-inject anchors found"}
+        print(f"  源码无 flag_gems 调用点，冷注入锚点: {anchors}")
+        code_paths = [{"file": p, "enable_call": "", "priority": i + 1}
+                      for i, p in enumerate(anchors)]
+        inject_mode = "cold"
 
     results = []
     injected_count = 0
@@ -749,7 +841,10 @@ def _inject_control_code(code_details, caps):
 
     for cp in code_paths:
         filepath = cp["file"]
-        r = _inject_single_file(filepath, caps)
+        if inject_mode == "cold":
+            r = _cold_inject_single_file(filepath, caps)
+        else:
+            r = _inject_single_file(filepath, caps)
         results.append(r)
         if r.get("injected"):
             if r.get("already"):
@@ -780,6 +875,7 @@ def _inject_control_code(code_details, caps):
     print(f"  ✓ 共处理 {len(code_paths)} 个文件: {injected_count} 新注入, {already_count} 已注入")
     return {
         "injected": True,
+        "mode": inject_mode,
         "file": first_file,
         "backup": first_backup,
         "files": [r["file"] for r in results if r.get("injected")],
@@ -868,12 +964,19 @@ def collect_all():
     code_details = extract_flaggems_code_details(integration)
     caps = capabilities["capabilities"]
 
-    # 非 plugin 环境：一次性注入环境变量驱动代码 + 写入控制环境变量
+    # 一次性注入环境变量驱动代码（两处共用同一能力）：
+    # - vllm_flaggems：replace 模式（原位替换既有调用点）+ 写控制环境变量
+    # - vllm_plugin_flaggems：通常 cold 模式（plugin 镜像源码无调用点）。注入块自带
+    #   plugin 门控（VLLM_FL_PREFER_ENABLED 存在则 pass），plugin 路径下静默不干扰；
+    #   分支 B V2.1（vendor plugin + 代码注入）依赖此注入生效。不写控制环境变量，
+    #   避免干扰 V1 三选。
     inject_result = {}
     control_env = {}
     if env_type == "vllm_flaggems":
         inject_result = _inject_control_code(code_details, caps)
         control_env = _write_control_env_vars(env_type, caps)
+    elif env_type == "vllm_plugin_flaggems":
+        inject_result = _inject_control_code(code_details, caps)
     elif env_type == "native":
         control_env = _write_control_env_vars(env_type, caps)
 

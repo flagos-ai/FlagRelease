@@ -217,6 +217,8 @@ SCRIPT_MAP=(
     "skills/flagos-service-startup/tools/service_monitor.py:scripts/service_monitor.py"
     # 服务启动（供 operator_search.py 调用）
     "skills/flagos-service-startup/tools/start_service.sh:scripts/start_service.sh"
+    # V1 三选状态机（分支 B，选定后固化 VLLM_PLUGINS + 写 context baseline.*）
+    "skills/flagos-service-startup/tools/baseline_selector.py:scripts/baseline_selector.py"
     # TP 推算
     "skills/flagos-service-startup/tools/calc_tp_size.py:scripts/calc_tp_size.py"
     # 性能测试

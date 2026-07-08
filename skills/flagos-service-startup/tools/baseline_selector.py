@@ -68,6 +68,100 @@ def clear_caches():
             subprocess.run(f"rm -rf {d}", shell=True, capture_output=True)
 
 
+def detect_vendor_plugin() -> str:
+    """从 vllm.platform_plugins 入口点自动推导厂商插件名（排除 fl）。
+
+    确定性逻辑：枚举已注册的 platform plugin，去掉 fl 后剩下的即厂商插件；
+    多个厂商插件时取字典序第一个（实际镜像中厂商 platform plugin 只有一个）。
+    """
+    names = []
+    try:
+        from importlib.metadata import entry_points
+        eps = entry_points()
+        group_eps = eps.select(group="vllm.platform_plugins") if hasattr(eps, "select") \
+            else eps.get("vllm.platform_plugins", [])
+        names = [ep.name for ep in group_eps]
+    except Exception:
+        try:
+            import pkg_resources
+            names = [ep.name for ep in pkg_resources.iter_entry_points("vllm.platform_plugins")]
+        except Exception:
+            return ""
+    vendors = sorted(n for n in names if n != "fl")
+    return vendors[0] if vendors else ""
+
+
+def _persist_plugin_state(result: Dict[str, Any]) -> Dict[str, Any]:
+    """选定后确定性落盘（不靠编排层转记）：
+
+    1. VLLM_PLUGINS=<选中值>（含空串）持久化到 /etc/environment
+       → start_service.sh 后续启动（V2 等）未显式传参时继承，废除 auto-fl 覆盖
+    2. v1.1/v1.2 场景清除 VLLM_FL_PREFER_ENABLED
+       → V2.1 冷注入块的 plugin 门控放行 + 调优工具链走控制文件路径
+    3. baseline.* 写入 context.yaml
+    """
+    persisted = {"vllm_plugins": False, "prefer_enabled_cleared": False, "context": False}
+
+    try:
+        from flagos_op_config import persist_env, clear_env
+    except ImportError:
+        # 宿主机/未部署共享模块时的最小实现（容器内 scripts/ 平铺目录可直接 import）
+        ETC = "/etc/environment"
+
+        def persist_env(key, value):
+            lines = []
+            if os.path.exists(ETC):
+                with open(ETC) as f:
+                    lines = [l for l in f.readlines() if not l.startswith(f"{key}=")]
+            lines.append(f"{key}={value}\n")
+            with open(ETC, "w") as f:
+                f.writelines(lines)
+            os.environ[key] = value
+
+        def clear_env(key):
+            if os.path.exists(ETC):
+                with open(ETC) as f:
+                    lines = [l for l in f.readlines() if not l.startswith(f"{key}=")]
+                with open(ETC, "w") as f:
+                    f.writelines(lines)
+            os.environ.pop(key, None)
+
+    try:
+        if result["v1_variant"] == "none":
+            # 三选均失败（强依赖 flaggems）：不持久化空 VLLM_PLUGINS，
+            # 保留 start_service.sh 的 auto-fl 兜底（V2 大概率需要 fl+flaggems 才能起）
+            print("  - V1=none，跳过 VLLM_PLUGINS 持久化（保留 auto-fl 兜底）")
+        else:
+            persist_env("VLLM_PLUGINS", result["vllm_plugins"])
+            persisted["vllm_plugins"] = True
+            print(f"  ✓ VLLM_PLUGINS='{result['vllm_plugins']}' 已持久化到 /etc/environment")
+        if result["v1_variant"] in ("v1.1", "v1.2"):
+            clear_env("VLLM_FL_PREFER_ENABLED")
+            persisted["prefer_enabled_cleared"] = True
+            print("  ✓ VLLM_FL_PREFER_ENABLED 已清除（V2.1 代码注入路径生效前提）")
+    except Exception as e:
+        print(f"  WARN: plugin 状态持久化失败: {e}")
+
+    # context.yaml 落盘（update_context.py 与本脚本在容器内同目录）
+    update_ctx = os.path.join(os.path.dirname(os.path.abspath(__file__)), "update_context.py")
+    if os.path.isfile(update_ctx):
+        rc, _, err = run_cmd(
+            f"{sys.executable} {update_ctx}"
+            f" --set 'baseline.v1_variant={result['v1_variant']}'"
+            f" --set 'baseline.vllm_plugins={result['vllm_plugins']}'"
+            f" --set 'baseline.vendor_plugin={result['vendor_plugin']}'"
+            f" --set 'baseline.v1_available={str(result['v1_available']).lower()}'",
+            timeout=60,
+        )
+        persisted["context"] = rc == 0
+        if rc != 0:
+            print(f"  WARN: context 写入失败: {err.strip()[:200]}")
+    else:
+        print(f"  WARN: 未找到 update_context.py（{update_ctx}），跳过 context 写入")
+
+    return persisted
+
+
 def start_variant(service_cmd: str, vllm_plugins: str, use_flaggems: bool,
                   wait_script: str, port: int, model_name: str,
                   log_path: str, max_timeout: int) -> bool:
@@ -215,24 +309,37 @@ def main():
     parser = argparse.ArgumentParser(description="V1 基线三选状态机（分支 B）")
     parser.add_argument("--service-startup-cmd", required=True,
                         help="服务启动命令（不含 --mode/--vllm-plugins，本脚本自动追加）")
-    parser.add_argument("--vendor-plugin", default="",
-                        help="厂商 platform plugin 名（如 metax），为空则跳过 V1.2")
+    parser.add_argument("--vendor-plugin", default="auto",
+                        help="厂商 platform plugin 名（如 metax）。默认 auto=从 "
+                             "vllm.platform_plugins 入口点自动推导（排除 fl）；"
+                             "显式传空串则跳过 V1.2")
     parser.add_argument("--wait-script", default=DEFAULT_WAIT_SCRIPT)
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--model-name", default="")
     parser.add_argument("--max-timeout", type=int, default=1800)
     parser.add_argument("--output", help="结果 JSON 输出路径")
+    parser.add_argument("--no-persist", action="store_true",
+                        help="跳过 VLLM_PLUGINS 持久化与 context 写入（调试用）")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
+    vendor_plugin = args.vendor_plugin
+    if vendor_plugin == "auto":
+        vendor_plugin = detect_vendor_plugin()
+        print(f"[baseline_selector] 厂商插件自动推导: '{vendor_plugin or '(未发现，跳过 V1.2)'}'")
+
     result = select_v1(
         service_cmd=args.service_startup_cmd,
-        vendor_plugin=args.vendor_plugin,
+        vendor_plugin=vendor_plugin,
         wait_script=args.wait_script,
         port=args.port,
         model_name=args.model_name,
         max_timeout=args.max_timeout,
     )
+
+    # 选定后确定性落盘：VLLM_PLUGINS 持久化 + v1.1/v1.2 清 PREFER_ENABLED + context 写入
+    if not args.no_persist:
+        result["persisted"] = _persist_plugin_state(result)
 
     if args.output:
         os.makedirs(os.path.dirname(args.output), exist_ok=True)
