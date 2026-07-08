@@ -352,9 +352,19 @@ def run_reduction(
     model_name: str = "",
     max_timeout: int = 1800,
 ) -> Dict[str, Any]:
-    """贪心减算子：每轮测量移除各候选算子后的性能，移除增益最大且为正者。
+    """V4 减算子：两阶段——性能搜索（不测精度）+ 精度回溯（按性能从高到低）。
 
-    硬约束：非 plugin 环境至少保留 1 个算子；plugin 环境可减至 0。
+    追求性能绝对值最大化，达标基准是"超越 V3"（不与 V1 比较），且至少保留 1 个算子。
+
+    阶段1（性能搜索，全程不测精度）：从 V3 基线起，按顺序逐个试禁用算子，仅当禁用后
+      吞吐 > 当前基线时才提交该删除（基线动态推进），记入 improvements 序列；否则保留
+      该算子。禁用后崩溃的算子标记为必需并跳过。benchmark 次数 O(N)。
+    阶段2（精度回溯）：用性能最优组合测精度，达标即产出 V4；不达标则回退次优组合，
+      依次进行；最坏回退到 V3 基线（improvements[0]），V4 等价 V3 仍成立。
+
+    注：gain_threshold/max_rounds 入参保留兼容 CLI，已不用于提前终止。
+
+    硬约束：至少保留 1 个算子（plugin 也不例外）。
     """
     state = load_json(state_path)
     if not state:
@@ -375,14 +385,14 @@ def run_reduction(
 
     current_ops = state.get("current_enabled_ops", enabled_ops.copy())
     reduced_ops = state.get("reduced_ops", [])
-    # plugin 环境允许减至 0 算子（USE_FLAGGEMS=0 时 plugin 仍可独立运行）
-    min_ops = 0 if _is_plugin_env() else 1
+    # V4 成立前提之一：至少保留 1 个算子（plugin 也不例外，V4 追求"用算子换性能"而非关闭全部）
+    min_ops = 1
 
     # 建立当前基线性能（V3 起点）
     print(f"\n{'=' * 60}")
     print(f"  V4 算子精简 (Flag-express) — 起点 {len(current_ops)} 个算子")
-    print(f"  V3 综合吞吐: {v3_composite:.1f} tok/s | V1 综合吞吐: {v1_composite:.1f} tok/s")
-    print(f"  目标: 性能 ≥ V3，接近/超过 V1 | 保底至少 {min_ops} 个算子")
+    print(f"  V3 综合吞吐: {v3_composite:.1f} tok/s")
+    print(f"  目标: 性能绝对值最大化且 ≥ V3 | 保底至少 {min_ops} 个算子 | 精度相对退化 ≤ 护栏")
     print(f"{'=' * 60}\n")
 
     print("  ▶ 测量当前配置基线性能...")
@@ -397,81 +407,139 @@ def run_reduction(
     print(f"  ✓ 当前基线综合吞吐: {best_composite:.1f} tok/s\n")
 
     round_num = len(state.get("probed_rounds", []))
-    round_limit = max_rounds if max_rounds > 0 else len(current_ops)
 
-    while len(current_ops) > min_ops and round_num < round_limit:
-        round_num += 1
-        print(f"\n[轮次 {round_num}] 当前 {len(current_ops)} 个算子，逐个探测移除增益")
-        print("-" * 40)
+    # ==================== 阶段1：性能搜索（全程不测精度）====================
+    # 按顺序逐个尝试禁用算子，只提交"能超过当前基线"的删除：
+    #   - 禁用后吞吐 > 当前基线 → 提交（基线动态推进到新组合），记入 improvements 列表
+    #   - 禁用后吞吐 ≤ 当前基线 → 不提交（保留该算子），继续试下一个
+    #   - 禁用后服务崩溃 → 标记必需算子，保留并跳过
+    # 此阶段不做任何精度评测（省时间），精度校验推迟到阶段2。
+    # improvements：按性能递增的组合序列，每个元素 {"removed","enabled","composite"}。
 
-        best_gain = 0.0
-        best_op = None
-        best_op_composite = best_composite
-        probe_detail = []
-
-        for op in list(current_ops):
-            if len(current_ops) - 1 < min_ops:
-                break  # 保底约束
-            trial_ops = [o for o in current_ops if o != op]
-            print(f"  ▶ 尝试移除 {op} (剩 {len(trial_ops)} 个)...")
-            ok, out_tp, total_tp = measure_config(
-                trial_ops, service_cmd, wait_script, benchmark_script,
-                output_dir, f"r{round_num}_{op}", port, model_name, max_timeout
-            )
-            if not ok:
-                print(f"    ✗ 移除 {op} 后服务无法启动 → 保留")
-                probe_detail.append({"op": op, "service_ok": False})
-                continue
-            trial_composite = composite_throughput(out_tp, total_tp)
-            gain = (trial_composite - best_composite) / best_composite if best_composite > 0 else 0
-            print(f"    吞吐 {trial_composite:.1f} tok/s (增益 {gain * 100:+.2f}%)")
-            probe_detail.append({"op": op, "service_ok": True,
-                                 "composite": round(trial_composite, 2),
-                                 "gain_pct": round(gain * 100, 2)})
-            if gain > best_gain:
-                best_gain = gain
-                best_op = op
-                best_op_composite = trial_composite
-
-        state.setdefault("probed_rounds", []).append({
-            "round": round_num,
-            "probes": probe_detail,
-            "selected": best_op,
-            "gain_pct": round(best_gain * 100, 2),
-        })
-
-        if best_op is None or best_gain < gain_threshold:
-            print(f"\n  ⤷ 本轮无正增益（最佳 {best_gain * 100:+.2f}% < 阈值 {gain_threshold * 100:.1f}%），停止精简")
-            save_json(state, state_path)
-            break
-
-        # 精度护栏：确认移除前校验精度不崩
-        trial_ops = [o for o in current_ops if o != best_op]
-        guard_ok = True
-        if accuracy_baseline > 0:
-            print(f"  ▶ 精度护栏校验（移除 {best_op}）...")
-            write_control_file(trial_ops)
-            restart_and_wait(service_cmd, wait_script, port=port,
-                             model_name=model_name, max_timeout=max_timeout)
-            guard_ok, gscore = run_accuracy_guard(
-                gpqa_script, gpqa_config,
-                os.path.join(output_dir, f"gpqa_v4_guard_r{round_num}.json"),
-                accuracy_baseline, accuracy_guard
-            )
-            if not guard_ok:
-                print(f"    ✗ 移除 {best_op} 导致精度退化超护栏 (score={gscore:.1f}%) → 保留并停止")
-                state["probed_rounds"][-1]["accuracy_rejected"] = best_op
-                save_json(state, state_path)
-                break
-
-        # 确认移除
-        current_ops = trial_ops
-        reduced_ops.append(best_op)
-        best_composite = best_op_composite
-        state["current_enabled_ops"] = current_ops
-        state["reduced_ops"] = reduced_ops
+    # 定序：沿用给定算子顺序（与 elimination 的 search_ops 一致，无需额外探测定序）
+    probe_order = state.get("probe_order")
+    if probe_order is None:
+        probe_order = list(current_ops)
+        state["probe_order"] = probe_order
         save_json(state, state_path)
-        print(f"\n  ✓ 确认移除 {best_op} → 综合吞吐 {best_composite:.1f} tok/s，剩 {len(current_ops)} 个算子")
+
+    # improvements 第 0 个元素恒为 V3 基线（未减算子），作阶段2精度全不达标时的兜底
+    improvements = state.get("improvements", [])
+    if not improvements:
+        improvements.append({
+            "removed": [],
+            "enabled": list(current_ops),
+            "composite": round(best_composite, 2),
+        })
+        state["improvements"] = improvements
+        save_json(state, state_path)
+
+    committed_removed = list(state.get("committed_removed", []))  # 已提交禁用（构成当前基线）
+    essential_ops = list(state.get("essential_ops", []))          # 禁用后崩溃 → 必需保留
+    probe_idx = state.get("probe_idx", 0)
+    base_enabled = [o for o in probe_order if o not in committed_removed]
+
+    while probe_idx < len(probe_order) and len(base_enabled) > min_ops:
+        op = probe_order[probe_idx]
+        probe_idx += 1
+        if op in committed_removed or op in essential_ops:
+            state["probe_idx"] = probe_idx
+            continue
+        trial_enabled = [o for o in base_enabled if o != op]
+        if len(trial_enabled) < min_ops:
+            break  # 保底约束：至少保留 min_ops 个算子
+        round_num += 1
+        print(f"\n[阶段1 搜索 {probe_idx}/{len(probe_order)}] 试禁用 '{op}' → 剩 {len(trial_enabled)} 个，"
+              f"对比当前基线 {best_composite:.1f} tok/s")
+        ok, out_tp, total_tp = measure_config(
+            trial_enabled, service_cmd, wait_script, benchmark_script,
+            output_dir, f"probe_{probe_idx}_{op}", port, model_name, max_timeout
+        )
+        if not ok:
+            print(f"    ✗ 禁用 {op} 后服务无法启动 → 标记必需算子，保留并跳过")
+            essential_ops.append(op)
+            state["essential_ops"] = essential_ops
+            state["probe_idx"] = probe_idx
+            save_json(state, state_path)
+            continue
+        trial_composite = composite_throughput(out_tp, total_tp)
+        gain = (trial_composite - best_composite) / best_composite if best_composite > 0 else 0
+        improved = trial_composite > best_composite
+        print(f"    吞吐 {trial_composite:.1f} tok/s (相对基线 {gain * 100:+.2f}%) → "
+              f"{'提交（性能提升，基线推进）' if improved else '不提交（未超过基线，保留该算子）'}")
+        probe_rec = {
+            "round": round_num,
+            "tried_op": op,
+            "composite": round(trial_composite, 2),
+            "gain_pct": round(gain * 100, 2),
+            "committed": improved,
+        }
+        if improved:
+            # 提交：基线动态推进到该组合，记入改进序列
+            committed_removed = committed_removed + [op]
+            base_enabled = trial_enabled
+            best_composite = trial_composite
+            improvements.append({
+                "removed": list(committed_removed),
+                "enabled": list(base_enabled),
+                "composite": round(trial_composite, 2),
+            })
+            state["improvements"] = improvements
+            state["committed_removed"] = committed_removed
+        state["probe_idx"] = probe_idx
+        state.setdefault("probed_rounds", []).append(probe_rec)
+        save_json(state, state_path)
+
+    subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null", shell=True, capture_output=True)
+    time.sleep(5)
+
+    # ==================== 阶段2：精度回溯（按性能从高到低）====================
+    # 用性能最优组合测精度，达标即产出；不达标则回退次优组合，依次进行。
+    # 最坏情况：回退到 V3 基线（improvements[0]，未减算子），V4 等价 V3 仍成立。
+    ranked = sorted(improvements, key=lambda c: c["composite"], reverse=True)
+    print(f"\n{'=' * 60}")
+    print(f"  阶段1 完成：共 {len(improvements)} 个性能组合（含 V3 基线），按性能从高到低逐个测精度")
+    print(f"{'=' * 60}")
+    selected = None
+    for cand in ranked:
+        # V3 基线组合（未减算子）精度天然达标，作兜底直接选中，无需再测
+        if not cand["removed"]:
+            selected = cand
+            print(f"  ⤷ 回退至 V3 基线（未减算子，等价 V3）：吞吐 {cand['composite']:.1f} tok/s")
+            break
+        if accuracy_baseline <= 0:
+            # 无精度基线无法校验 → 取性能最优组合，收尾终检再兜底重判
+            selected = cand
+            print(f"  ⤷ 无精度基线，直接取性能最优组合：减 {len(cand['removed'])} 个 → {cand['composite']:.1f} tok/s")
+            break
+        print(f"  ▶ 测精度：减 {len(cand['removed'])} 个算子，吞吐 {cand['composite']:.1f} tok/s ...")
+        write_control_file(cand["enabled"])
+        restart_and_wait(service_cmd, wait_script, port=port,
+                         model_name=model_name, max_timeout=max_timeout)
+        guard_ok, gscore = run_accuracy_guard(
+            gpqa_script, gpqa_config,
+            os.path.join(output_dir, f"gpqa_v4_guard_{len(cand['removed'])}ops.json"),
+            accuracy_baseline, accuracy_guard
+        )
+        subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null", shell=True, capture_output=True)
+        time.sleep(5)
+        if guard_ok:
+            print(f"    ✓ 精度达标 (score={gscore:.1f}%) → 选定该组合为 V4")
+            selected = cand
+            break
+        print(f"    ✗ 精度不达标 (score={gscore:.1f}%) → 回退次优组合")
+
+    if selected is None:
+        selected = improvements[0]  # 兜底（V3 基线恒在列，理论不触发）
+
+    current_ops = list(selected["enabled"])
+    reduced_ops = list(selected["removed"])
+    best_composite = selected["composite"]
+    state["current_enabled_ops"] = current_ops
+    state["reduced_ops"] = reduced_ops
+    state["selected_candidate"] = selected
+    save_json(state, state_path)
+    print(f"\n  ✓ 最终选定：减 {len(reduced_ops)} 个算子，剩 {len(current_ops)} 个，综合吞吐 {best_composite:.1f} tok/s")
 
     # 停止服务
     subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null", shell=True, capture_output=True)
@@ -519,9 +587,9 @@ def run_reduction(
                   "→ 精度状态标记为未验证，编排层需以 V1/NV 基线兜底后重判")
     subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null", shell=True, capture_output=True)
 
-    v4_ratio_v1 = (final_composite / v1_composite) if v1_composite > 0 else 0
+    # V4 追求性能绝对值最大化，达标基准是"超越 V3"，不与 V1 比较（V1 仅作报告参考）
     beats_v3 = final_composite >= v3_composite
-    beats_v1 = v1_composite > 0 and final_composite >= v1_composite
+    kept_at_least_one = len(current_ops) >= 1
 
     state["completed"] = True
     state["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -531,22 +599,26 @@ def run_reduction(
     state["accuracy_ok"] = accuracy_ok
     save_json(state, state_path)
 
-    # 精度是所有版本成立的前提：终检明确不达标 → V4 不成立（success=False）
-    # 缺基线未验证（accuracy_ok is None）→ success 保持 True，但标记 accuracy_verified=False
+    # V4 成立准则（三条同时满足）：
+    #   1. 性能超越 V3（beats_v3）— 追求绝对值最大，达标基准是 V3 而非 V1
+    #   2. 至少保留 1 个算子（kept_at_least_one）
+    #   3. 精度终检达标（accuracy_ok is not False）— 精度是所有版本成立前提
+    # 缺精度基线（accuracy_ok is None）→ 精度视为未证伪，不阻断 success，但标记 accuracy_verified=False
     accuracy_verified = accuracy_ok is not None
-    success = (accuracy_ok is not False)
+    success = beats_v3 and kept_at_least_one and (accuracy_ok is not False)
 
     result = {
         "success": success,
         "reduced_ops": reduced_ops,
         "kept_ops": sorted(current_ops),
         "final_enabled_count": len(current_ops),
-        "v1_composite": round(v1_composite, 2),
+        "v1_composite": round(v1_composite, 2),  # 仅报告参考，不参与 V4 达标判定
         "v3_composite": round(v3_composite, 2),
         "v4_composite": round(final_composite, 2),
-        "v4_ratio_v1_pct": round(v4_ratio_v1 * 100, 2),
+        "v4_ratio_v1_pct": round((final_composite / v1_composite) * 100, 2) if v1_composite > 0 else None,
         "beats_v3": beats_v3,
-        "beats_v1": beats_v1,
+        "beats_v1": (v1_composite > 0 and final_composite >= v1_composite),  # 仅报告参考
+        "kept_at_least_one": kept_at_least_one,
         "reduction_rounds": round_num,
         "final_output_tp": round(final_out, 2),
         "final_total_tp": round(final_total, 2),
@@ -558,16 +630,24 @@ def run_reduction(
         "accuracy_rel_drop_pct": accuracy_rel_drop_pct,
         "accuracy_guard_pct": accuracy_guard,
     }
-    if accuracy_ok is False:
-        result["reason"] = "V4 精度终检不达标（精度是版本成立前提）"
+    if not success:
+        reasons = []
+        if accuracy_ok is False:
+            reasons.append("精度终检不达标（精度是版本成立前提）")
+        if not beats_v3:
+            reasons.append(f"性能未超越 V3（V4={final_composite:.1f} < V3={v3_composite:.1f} tok/s）")
+        if not kept_at_least_one:
+            reasons.append("未保留任何算子（V4 要求至少 1 个）")
+        result["reason"] = "V4 不成立：" + "；".join(reasons)
 
     print(f"\n{'#' * 60}")
     print(f"# V4 算子精简结果 (Flag-express)")
     print(f"#   起点算子: {len(state['initial_enabled_ops'])} 个")
     print(f"#   移除算子: {len(reduced_ops)} 个 → {reduced_ops}")
     print(f"#   最终保留: {len(current_ops)} 个")
-    print(f"#   V4 综合吞吐: {final_composite:.1f} tok/s")
-    print(f"#   相对 V1 性能比: {v4_ratio_v1 * 100:.1f}% | 超过 V3: {beats_v3} | 超过 V1: {beats_v1}")
+    print(f"#   V4 综合吞吐: {final_composite:.1f} tok/s (V3={v3_composite:.1f}) | 超过 V3: {beats_v3}")
+    _v1r = f"{final_composite / v1_composite * 100:.1f}%" if v1_composite > 0 else "N/A"
+    print(f"#   相对 V1 性能比（仅参考）: {_v1r}")
     if accuracy_ok is None:
         print(f"#   精度终检: 未验证（缺基线）")
     else:
@@ -623,15 +703,43 @@ def main():
     # 加载 /etc/environment 中的 FlagGems 相关变量（docker exec 不继承）
     _load_etc_environment()
 
+    # 完成标记文件：正常跑完（无论成功/失败判定）时写入，供 pipeline 段结束轮询校验。
+    # 中断/崩溃则不会写 → pipeline 据此判断"任务未真正完成"，不会静默跳过。
+    done_marker = os.path.join(args.output_dir, "v4_reduction.done")
+    # 起始先清除可能残留的旧标记（断点续跑时上一轮的），避免误判
+    try:
+        if os.path.exists(done_marker):
+            os.remove(done_marker)
+    except OSError:
+        pass
+
+    def _write_done(exit_code: int, res: dict):
+        try:
+            with open(done_marker, "w") as f:
+                json.dump({
+                    "exit_code": exit_code,
+                    "success": res.get("success"),
+                    "final_composite": res.get("v4_composite"),
+                    "reduced_count": len(res.get("reduced_ops", []) or []),
+                    "kept_count": res.get("final_enabled_count"),
+                    "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            print(f"⚠ 写完成标记失败（不影响结果）: {e}")
+
     ctx = load_context(args.context_yaml)
     enabled_ops = get_enabled_ops(ctx)
     if not enabled_ops:
         print("错误: 无法从 context 获取 V3 启用算子列表")
+        _write_done(1, {"success": False, "reason": "无法获取 V3 启用算子列表"})
         sys.exit(1)
-    min_ops = 0 if _is_plugin_env() else 1
+    # V4 硬约束：至少保留 1 个算子（plugin 也不例外，与 run_reduction 内 min_ops 一致）
+    min_ops = 1
     if len(enabled_ops) <= min_ops:
         print(f"⚠ V3 仅 {len(enabled_ops)} 个算子，已满足保底约束（min={min_ops}），无需精简")
-        print(f"[REDUCTION_RESULT]{json.dumps({'success': True, 'reduced_ops': [], 'kept_ops': enabled_ops, 'final_enabled_count': len(enabled_ops), 'reduction_rounds': 0, 'skipped': True}, ensure_ascii=False)}[/REDUCTION_RESULT]")
+        skip_res = {'success': True, 'reduced_ops': [], 'kept_ops': enabled_ops, 'final_enabled_count': len(enabled_ops), 'reduction_rounds': 0, 'skipped': True}
+        print(f"[REDUCTION_RESULT]{json.dumps(skip_res, ensure_ascii=False)}[/REDUCTION_RESULT]")
+        _write_done(0, skip_res)
         sys.exit(0)
 
     v1_out, v1_total = extract_throughput(args.v1_perf)
@@ -664,7 +772,9 @@ def main():
 
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
-    sys.exit(0 if result.get("success") else 1)
+    exit_code = 0 if result.get("success") else 1
+    _write_done(exit_code, result)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

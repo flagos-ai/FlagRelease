@@ -195,6 +195,44 @@ def extract_ops_from_text(text: str, known_ops: set) -> List[str]:
     return sorted(found)
 
 
+# 合法算子名：纯小写字母/数字/下划线的短标识符（FlagGems 算子命名约定）
+_VALID_OP_NAME = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
+# flag_gems DEBUG 行提取：[DEBUG] flag_gems.ops.add.add: GEMS ADD → add
+_DEBUG_LINE_OP = re.compile(r"flag_gems\.ops\.(\w+)")
+
+
+def sanitize_ops_list(raw_ops: List[str]) -> Dict[str, Any]:
+    """净化算子列表：剔除 DEBUG 日志行等污染项，只保留合法算子名。
+
+    ops_list.json 可能被上游污染（如整行 DEBUG 日志被当作算子名），
+    此函数逐项净化：
+      1. 若项含 flag_gems.ops.<name> 结构（DEBUG 行）→ 提取真实算子名
+      2. 否则要求项为合法短标识符（纯小写/数字/下划线，长度 2-40）
+      3. 其余（含空格、超长、大写混杂的日志片段）判为污染并剔除
+
+    返回 {"clean": [...], "dropped": [...]}。
+    """
+    clean, dropped = [], []
+    seen = set()
+    for item in raw_ops:
+        if not isinstance(item, str):
+            dropped.append(str(item))
+            continue
+        candidate = item.strip()
+        # DEBUG 行 → 提取算子名
+        m = _DEBUG_LINE_OP.search(candidate)
+        if m:
+            candidate = m.group(1)
+        candidate = candidate.lower().strip("_")
+        if _VALID_OP_NAME.match(candidate) and candidate not in _FLAGGEMS_NON_OPS:
+            if candidate not in seen:
+                seen.add(candidate)
+                clean.append(candidate)
+        else:
+            dropped.append(item)
+    return {"clean": clean, "dropped": dropped}
+
+
 def analyze_crash_log(log_path: str, ops_file: Optional[str] = None) -> Dict[str, Any]:
     """分析崩溃日志，提取问题算子"""
     # 加载已知算子列表
@@ -381,17 +419,28 @@ def generate_accuracy_groups(
     算子控制方式：与性能调优(operator_search.py)一致，写白名单控制文件
     """
     # 加载算子列表
-    all_ops = []
+    raw_ops = []
     if os.path.isfile(ops_file):
         with open(ops_file, "r") as f:
             data = json.load(f)
             if isinstance(data, list):
-                all_ops = data
+                raw_ops = data
             elif isinstance(data, dict) and "ops" in data:
-                all_ops = data["ops"]
+                raw_ops = data["ops"]
 
-    if not all_ops:
+    if not raw_ops:
         return {"error": "算子列表为空", "groups": []}
+
+    # 净化：剔除 DEBUG 日志行等污染项，避免污染项全掉进 other 组后整组关闭触发崩溃
+    sanitized = sanitize_ops_list(raw_ops)
+    all_ops = sanitized["clean"]
+    dropped = sanitized["dropped"]
+    if dropped:
+        print(f"[净化] ops_list 剔除 {len(dropped)} 个非法项（DEBUG行/污染）: "
+              f"{dropped[:5]}{'...' if len(dropped) > 5 else ''}")
+    if not all_ops:
+        return {"error": f"算子列表净化后为空（原始 {len(raw_ops)} 项全为污染，疑似 ops_list.json 未正确解析）",
+                "groups": [], "dropped_count": len(dropped)}
 
     all_ops_set = set(all_ops)
 
@@ -436,18 +485,43 @@ def generate_accuracy_groups(
 
     # 未分组算子
     unclassified = sorted(all_ops_set - classified_ops)
+    other_warning = None
     if unclassified:
-        raw_groups.append({
-            "name": "other",
-            "description": "未分类算子",
-            "ops": unclassified,
-            "ops_count": len(unclassified),
-            "test_env": _build_group_env(
-                disable_group=unclassified,
-                all_ops=all_ops,
-                plugin_mode=plugin_mode,
-            ),
-        })
+        # 熔断：other 组占比异常高（>50%）时，说明分组模板与实际算子集严重不匹配，
+        # 若整组关闭极可能等价于"全关 FlagGems"→ 触发环境崩溃（如 v1.3 场景）。
+        # 此时拆成单算子逐个测试，避免一次性整组关闭。
+        other_ratio = len(unclassified) / len(all_ops_set) if all_ops_set else 0
+        if other_ratio > 0.5:
+            other_warning = (
+                f"other 组占比 {other_ratio*100:.0f}%（{len(unclassified)}/{len(all_ops_set)}），"
+                f"分组模板与算子集严重不匹配。为避免整组关闭等价全关 FlagGems 触发崩溃，"
+                f"other 组已拆分为逐算子单测。"
+            )
+            print(f"[熔断] {other_warning}")
+            for op in unclassified:
+                raw_groups.append({
+                    "name": f"other_{op}",
+                    "description": f"未分类算子（单测，熔断拆分）: {op}",
+                    "ops": [op],
+                    "ops_count": 1,
+                    "test_env": _build_group_env(
+                        disable_group=[op],
+                        all_ops=all_ops,
+                        plugin_mode=plugin_mode,
+                    ),
+                })
+        else:
+            raw_groups.append({
+                "name": "other",
+                "description": "未分类算子",
+                "ops": unclassified,
+                "ops_count": len(unclassified),
+                "test_env": _build_group_env(
+                    disable_group=unclassified,
+                    all_ops=all_ops,
+                    plugin_mode=plugin_mode,
+                ),
+            })
 
     # 生成累积禁用配置（每轮在上一轮基础上追加禁用）
     cumulative_disabled = []
@@ -487,6 +561,8 @@ def generate_accuracy_groups(
         "total_ops": len(all_ops),
         "groups_count": len(groups),
         "groups": groups,
+        "dropped_count": len(dropped),
+        "other_fuse_warning": other_warning,
         "baseline_env": baseline_env,
         "baseline_env_inline": "USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true",
         "test_procedure": (
@@ -496,9 +572,11 @@ def generate_accuracy_groups(
             "4. 问题组内逐个算子排查（可选，缩小禁用范围）"
         ),
         "apply_method": (
-            f"每轮使用 cumulative_test_env.control_file 写入 {OPS_CONTROL_FILE}，"
-            "设置 FLAGGEMS_CONTROL_MODE=only_enable，通过 start_service.sh 启动服务"
-            "（与性能调优 operator_search.py 一致的白名单控制路径）"
+            "plugin 场景（本工具 plugin_mode=True）：每轮使用 cumulative_test_env.env_inline "
+            "（含 VLLM_FL_FLAGOS_BLACKLIST/VLLM_FL_OOT_BLACKLIST）作为启动命令内联前缀重启服务，"
+            "与性能调优 operator_search.py 走相同的 env_inline 路径。"
+            "**禁止写控制文件**：plugin 下 VLLM_FL_PREFER_ENABLED=true 使控制文件完全无效，写它会导致调优空转。"
+            f"非 plugin 场景才使用 cumulative_test_env.control_file 写入 {OPS_CONTROL_FILE} + FLAGGEMS_CONTROL_MODE=only_enable。"
         ),
         "control_file_path": OPS_CONTROL_FILE,
     }
