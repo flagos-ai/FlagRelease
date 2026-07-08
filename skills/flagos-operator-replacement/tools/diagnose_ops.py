@@ -602,24 +602,22 @@ def _build_group_env(
 
     注意：此函数生成单组独立配置（test_env），累积禁用配置由
     accuracy_groups() 的 cumulative_test_env 字段提供。
+    env 构建走统一共享模块 flagos_op_config（唯一权威实现）。
     """
     blacklist = sorted(disable_group)
 
     if plugin_mode:
+        from flagos_op_config import build_op_env, env_to_inline
         # 分 OOT 和 flagos 两层
         oot_blacklist = [op for op in blacklist if op in set(OOT_OPERATORS)]
         flagos_blacklist = [op for op in blacklist if op not in set(OOT_OPERATORS)]
 
-        env = {
-            "USE_FLAGGEMS": "1",
-            "VLLM_FL_PREFER_ENABLED": "true",
-        }
-        if oot_blacklist:
-            env["VLLM_FL_OOT_BLACKLIST"] = ",".join(oot_blacklist)
-        if flagos_blacklist:
-            env["VLLM_FL_FLAGOS_BLACKLIST"] = ",".join(flagos_blacklist)
-
-        env["env_inline"] = " ".join(f"{k}={v}" for k, v in env.items() if k != "env_inline")
+        env = build_op_env(
+            mode="custom",
+            disabled_ops=flagos_blacklist or None,
+            oot_blacklist=oot_blacklist or None,
+        )
+        env["env_inline"] = env_to_inline(env)
         return env
 
     # 非 plugin：返回 blacklist 列表（供 Layer 1-4 使用）

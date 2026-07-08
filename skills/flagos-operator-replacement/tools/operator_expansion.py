@@ -30,6 +30,14 @@ import yaml
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+# 算子配置应用走统一共享模块（唯一权威实现，见 flagos_op_config.py）
+from flagos_op_config import (
+    is_plugin_env as _is_plugin_env,
+    persist_env as _persist_env,
+    write_op_config as write_control_file,
+    DEFAULT_CONTROL_FILE,
+)
+
 
 # =============================================================================
 # 常量
@@ -39,7 +47,7 @@ DEFAULT_WAIT_SCRIPT = "/flagos-workspace/scripts/wait_for_service.sh"
 DEFAULT_BENCHMARK_SCRIPT = "/flagos-workspace/scripts/benchmark_runner.py"
 DEFAULT_FAST_GPQA_SCRIPT = "/flagos-workspace/scripts/fast_gpqa.py"
 DEFAULT_GPQA_CONFIG = "/flagos-workspace/scripts/fast_gpqa_config.yaml"
-DEFAULT_CONTROL_FILE = "/root/flaggems_ops_control.json"
+# DEFAULT_CONTROL_FILE 由 flagos_op_config 提供（统一共享模块）
 
 
 # =============================================================================
@@ -110,89 +118,39 @@ def get_v1_score(v1_result_path: str) -> Optional[float]:
 
 # =============================================================================
 # 核心逻辑
+# 算子配置应用（_is_plugin_env / write_control_file / _persist_env）已收敛到
+# 统一共享模块 flagos_op_config（见文件头 import），此处不再保留本地副本。
 # =============================================================================
-
-def _is_plugin_env() -> bool:
-    """判断当前是否为 plugin 控制环境"""
-    return os.environ.get("VLLM_FL_PREFER_ENABLED") == "true" or _env_has("VLLM_FL_PREFER_ENABLED")
-
-
-def _env_has(key: str) -> bool:
-    """Check if key exists in /etc/environment"""
-    etc_env = "/etc/environment"
-    if not os.path.exists(etc_env):
-        return False
-    with open(etc_env) as f:
-        return any(l.startswith(f"{key}=") for l in f)
-
-
-def _clear_env(key: str):
-    """从 /etc/environment 中移除某个变量"""
-    etc_env = "/etc/environment"
-    if not os.path.exists(etc_env):
-        return
-    with open(etc_env, 'r') as f:
-        lines = [l for l in f.readlines() if not l.startswith(f"{key}=")]
-    with open(etc_env, 'w') as f:
-        f.writelines(lines)
-    os.environ.pop(key, None)
-
-
-def write_control_file(enabled_ops: List[str], control_file: str = DEFAULT_CONTROL_FILE):
-    """根据环境类型选择算子控制方式：plugin 环境用 WHITELIST env，非 plugin 用控制文件。
-
-    ⚠ plugin 场景（VLLM_FL_PREFER_ENABLED=true）下控制文件完全失效（注入代码 pass），
-    必须走 VLLM_FL_FLAGOS_WHITELIST env。此前本函数缺 plugin 分支 → V5 在 plugin 下扩算子
-    静默不生效（见 v5-operator-expansion-whitelist-bug）。现与 operator_reduction.write_control_file 对齐。
-    """
-    if _is_plugin_env():
-        # plugin 模式：通过环境变量控制，清除可能冲突的 BLACKLIST
-        _clear_env("VLLM_FL_FLAGOS_BLACKLIST")
-        if enabled_ops:
-            _persist_env("USE_FLAGGEMS", "1")
-            whitelist = ",".join(sorted(enabled_ops))
-            _persist_env("VLLM_FL_FLAGOS_WHITELIST", whitelist)
-        else:
-            _persist_env("USE_FLAGGEMS", "0")
-            _persist_env("VLLM_FL_FLAGOS_WHITELIST", "")
-        _persist_env("VLLM_FL_PREFER_ENABLED", "true")
-    else:
-        # 非 plugin：通过控制文件
-        os.makedirs(os.path.dirname(control_file), exist_ok=True)
-        control = {"include": sorted(enabled_ops)}
-        with open(control_file, 'w') as f:
-            json.dump(control, f, indent=2, ensure_ascii=False)
-        _persist_env("FLAGGEMS_CONTROL_MODE", "only_enable")
-        _persist_env("USE_FLAGGEMS", "1")
-
-
-def _persist_env(key: str, value: str):
-    """将环境变量写入 /etc/environment（持久化）"""
-    etc_env = "/etc/environment"
-    lines = []
-    if os.path.exists(etc_env):
-        with open(etc_env, 'r') as f:
-            lines = [l for l in f.readlines() if not l.startswith(f"{key}=")]
-    lines.append(f"{key}={value}\n")
-    with open(etc_env, 'w') as f:
-        f.writelines(lines)
-    os.environ[key] = value
-
 
 def restart_and_wait(service_cmd: str, wait_script: str, port: int = 8000,
                      model_name: str = "", timeout: int = 300,
                      max_timeout: int = 1800) -> bool:
-    """重启容器并等待服务就绪，返回是否成功"""
+    """重启容器并等待服务就绪，返回是否成功。
+
+    杀进程/等端口逻辑与 operator_reduction.restart_and_wait 对齐：
+    pkill -9 强杀（含 worker 的 multiprocessing.spawn）+ 显式等端口释放，
+    避免旧进程未死透/端口未释放导致新服务启动失败。
+    """
+    # 用 pkill -9 强杀所有 vllm/sglang 及其 worker 进程
+    subprocess.run(
+        "pkill -9 -f 'vllm|sglang|multiprocessing.spawn' 2>/dev/null; sleep 3",
+        shell=True, capture_output=True
+    )
+    # 等待端口释放
+    for _ in range(15):
+        rc = subprocess.run(
+            f"ss -tlnp 2>/dev/null | grep -q ':{port}\\b'",
+            shell=True, capture_output=True
+        )
+        if rc.returncode != 0:
+            break
+        time.sleep(1)
+    time.sleep(2)
+
     # 清理 triton/flaggems 缓存
     for cache_dir in ["/root/.triton/cache/", "/tmp/triton_cache/", "/root/.flaggems/code_cache/"]:
         if os.path.exists(cache_dir):
             subprocess.run(f"rm -rf {cache_dir}", shell=True, capture_output=True)
-
-    # 杀死残留进程
-    subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null; sleep 3", shell=True, capture_output=True)
-
-    # 释放 GPU（等待显存释放）
-    time.sleep(5)
 
     # 启动服务（后台）
     subprocess.Popen(

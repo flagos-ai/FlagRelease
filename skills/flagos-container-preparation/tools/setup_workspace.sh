@@ -225,6 +225,8 @@ SCRIPT_MAP=(
     "skills/flagos-performance-testing/tools/performance_compare.py:scripts/performance_compare.py"
     # 算子优化
     "skills/flagos-operator-replacement/tools/operator_optimizer.py:scripts/operator_optimizer.py"
+    # 算子配置统一共享模块（env构建/双路应用，供 reduction/expansion/diagnose 等 import）
+    "skills/flagos-operator-replacement/tools/flagos_op_config.py:scripts/flagos_op_config.py"
     # 算子搜索编排
     "skills/flagos-operator-replacement/tools/operator_search.py:scripts/operator_search.py"
     # 算子配置生成（Plugin 场景）
@@ -235,6 +237,8 @@ SCRIPT_MAP=(
     "skills/flagos-operator-replacement/tools/persist_op_config.py:scripts/persist_op_config.py"
     # V5 算子扩展
     "skills/flagos-operator-replacement/tools/operator_expansion.py:scripts/operator_expansion.py"
+    # V4 减算子（两阶段：性能搜索+精度回溯）
+    "skills/flagos-operator-replacement/tools/operator_reduction.py:scripts/operator_reduction.py"
     # 组件安装（统一入口）
     "skills/flagos-component-install/tools/install_component.py:scripts/install_component.py"
     # FlagTree 安装脚本
