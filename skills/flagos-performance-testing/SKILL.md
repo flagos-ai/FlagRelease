@@ -165,6 +165,17 @@ docker exec $CONTAINER cp /flagos-workspace/scripts/config/perf_config.yaml /fla
 
 **前置条件**：关闭 FlagGems，以 native 模式启动服务。
 
+**无 V1 场景（V1 性能基线完全缺失）**：分支 B 三选=none（强依赖 flaggems）或 V1 服务无法启动时，跳过本步骤，改用合成基线（编排层在步骤4之前生成，全芯片统一标准）：
+
+```bash
+# 1. V2 使能 flaggems 后首次可正常启动状态（未被精度调优削减）quick 测一轮
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/benchmark_runner.py --mode quick --output-name v2_initial_performance"
+# 2. ×1.5 合成基线（吞吐×1.5、延迟÷1.5），按 native_performance.json 标准格式落盘
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/synthesize_perf_baseline.py --v2-initial /flagos-workspace/results/v2_initial_performance.json --output /flagos-workspace/results/native_performance.json"
+```
+
+合成文件带 `_meta.synthetic=true` 标记：下游 `performance_compare.py` / `operator_optimizer.py init` / `operator_search.py` 照常当 V1 基线消费（零特殊处理），`generate_report.py` 识别标记并在报告注明"合成基线，非实测 V1"。脚本拒绝覆盖已存在的实测 V1 基线（防误用）。80% 判据下等价于要求调优后性能 ≥ V2 初始的 1.2 倍。
+
 ```bash
 # 关闭 FlagGems
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable"

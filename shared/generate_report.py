@@ -928,6 +928,14 @@ def generate_text_report(data: ReportData) -> str:
     lines.append("")
     lines.append("## 性能评测")
 
+    # 合成基线标注：无 V1 场景下 native_performance.json 由 synthesize_perf_baseline.py 生成
+    _np_meta = (data.native_perf or {}).get("_meta", {})
+    if _np_meta.get("synthetic"):
+        lines.append("")
+        lines.append(f"> ⚠️ **性能基线为合成值，非实测 V1**：V2 初始性能 ×{_np_meta.get('factor', 1.5)}"
+                     f"（baseline_source: {_np_meta.get('baseline_source', 'v2_initial_x1.5')}）。"
+                     f"本报告所有以 V1 为基准的性能比均基于该合成基线。")
+
     model_name = model.get("name", "-")
     vendor = gpu.get("vendor", "-")
 

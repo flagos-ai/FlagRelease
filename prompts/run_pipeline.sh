@@ -1070,10 +1070,10 @@ if [ "${SKIP_SEG2}" = "false" ]; then
 # 双 pipeline 分支指令：据段1路由结果注入，指引下游会话按对应 pipeline 定义执行
 case "${PIPELINE_BRANCH}" in
     A)
-        BRANCH_DIRECTIVE="**PIPELINE 分支 A（gems_tree 简单路径）**：本次准入镜像为 flaggems+tree 无 plugin。按 CLAUDE.md 分支 A 工作流执行：V1(裸启动基线) → V2(代码注入全量算子) → V3(切 plugin 白名单) → V4(减算子提性能) → V5(应开尽开)。精度基线优先本地 V1，缺失时用 nv_baseline.yaml 兜底。"
+        BRANCH_DIRECTIVE="**PIPELINE 分支 A（gems_tree 简单路径）**：本次准入镜像为 flaggems+tree 无 plugin。按 CLAUDE.md 分支 A 工作流执行：V1(裸启动基线) → V2(代码注入全量算子) → V3(切 plugin 白名单) → V4(减算子提性能) → V5(应开尽开)。精度基线优先本地 V1，缺失时用 nv_baseline.yaml 兜底；性能基线在 V1 完全不可用时按 CLAUDE.md 合成基线规则（V2 初始性能 ×1.5，synthesize_perf_baseline.py）兜底。"
         ;;
     B)
-        BRANCH_DIRECTIVE="**PIPELINE 分支 B（gems_tree_plugin 复杂路径）**：本次准入镜像为 flaggems+tree+plugin。按 CLAUDE.md 分支 B 工作流执行：V1(三选：baseline_selector.py 确定 v1.1/v1.2/v1.3/none) → V2(2.1 代码注入 或 2.2=V3 同镜像) → V3(3.1 切 plugin 白名单 或 3.2=V2) → V4(减算子) → V5(应开尽开)。若 V1=none（强依赖 flaggems），精度基线用 nv_baseline.yaml。"
+        BRANCH_DIRECTIVE="**PIPELINE 分支 B（gems_tree_plugin 复杂路径）**：本次准入镜像为 flaggems+tree+plugin。按 CLAUDE.md 分支 B 工作流执行：V1(三选：baseline_selector.py 确定 v1.1/v1.2/v1.3/none) → V2(2.1 代码注入 或 2.2=V3 同镜像) → V3(3.1 切 plugin 白名单 或 3.2=V2) → V4(减算子) → V5(应开尽开)。若 V1=none（强依赖 flaggems），精度基线用 nv_baseline.yaml，性能基线按 CLAUDE.md 合成基线规则（V2 初始性能 ×1.5，synthesize_perf_baseline.py）兜底。"
         ;;
     native)
         BRANCH_DIRECTIVE="**PIPELINE native 简化路径**：本次准入镜像无 flaggems，仅执行精度/性能评测，不做算子调优与多版本发布。"
@@ -1116,6 +1116,16 @@ ${SEG2_CTX_SUMMARY}
 2. 读取 skills/flagos-eval-comprehensive/SKILL.md 了解精度评测工具用法
 3. 读取 skills/flagos-performance-testing/SKILL.md 了解性能评测工具用法
 4. 读取 skills/flagos-operator-replacement/SKILL.md 了解算子调优工具用法（仅在步骤5/7需要时读取）
+
+**无 V1 场景性能基线合成（条件触发，在步骤4之前执行）**：
+- 触发条件：context 的 baseline.v1_available=false（分支 B 三选=none），或分支 A 的 V1 服务无法启动（步骤3已确认）——即 V1 性能基线完全不可测
+- 执行（此时算子集为步骤3幸存的初始状态，尚未被步骤5削减，正是合成基线要求的\"使能 flaggems 后首次可正常启动\"口径）：
+  1. 以 flagos 模式启动 V2 服务（当前算子集，不做任何调优改动）
+  2. quick 模式测一轮：PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/benchmark_runner.py --mode quick --output-name v2_initial_performance
+  3. 合成基线：PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/synthesize_perf_baseline.py --v2-initial /flagos-workspace/results/v2_initial_performance.json --output /flagos-workspace/results/native_performance.json（全芯片统一 ×1.5：吞吐×1.5、延迟÷1.5；脚本拒绝覆盖已存在的实测 V1 基线）
+  4. 更新 context：update_context.py --set 'baseline.perf_baseline_source=v2_initial_x1.5'，并停止服务释放 GPU，再进入步骤4
+- 合成基线落盘为 native_performance.json 标准格式（_meta.synthetic=true 标记），步骤6/7 及 operator_optimizer init 照常把它当 V1 基线消费，**无需任何特殊处理**；步骤6 **跳过 V1 性能测试**（无 V1 可测），只测 V2 与合成基线对比
+- V1 可用时**严禁**执行本节任何操作
 
 **算子调优**：
 - 步骤4完成后如 accuracy_ok=false → 立即执行步骤5（5完成后再进入6）
@@ -1644,6 +1654,27 @@ print(f'''- 模型路径(容器内): {mdl.get('container_path','')}
 " 2>/dev/null || echo "  (context 摘要提取失败)")
 
 # ===== 段3: 8 (打包发布) =====
+# V1=v1.3 场景（分支 B 2.2/3.2）：V2 经 plugin 方式使能，V2 镜像=V3 镜像，
+# 段3 一次 commit 双 tag 发布(--also-tag v3)，段4 整段跳过（不重复 plugin 验证）
+V1_VARIANT=$(python3 -c "
+import yaml
+try:
+    with open('${CTX_FILE}') as f:
+        ctx = yaml.safe_load(f)
+    print(ctx.get('baseline', {}).get('v1_variant', ''))
+except: print('')
+" 2>/dev/null) || V1_VARIANT=""
+
+if [ "${V1_VARIANT}" = "v1.3" ]; then
+    SEG3_RELEASE_ARGS="--version-tag v2 --also-tag v3"
+    SEG3_V13_NOTE="
+**V1=v1.3 特殊场景（2.2/3.2 同镜像双 tag）**：本次 V1 三选结果为 v1.3（依赖 fl plugin），V2 经 plugin 方式使能，V2 镜像与 V3 镜像本质相同。发布命令已含 --also-tag v3（一次 commit，-v2/-v3 双 tag 上传）。这**不算**进入步骤13：ledger 仍只更新 08_release，步骤 9-13 的 ledger 由编排层置 skipped，禁止触碰。"
+    echo "[段3] V1=v1.3 检测：启用 2.2/3.2 同镜像双 tag 发布 (--also-tag v3)，段4 将跳过"
+else
+    SEG3_RELEASE_ARGS="--version-tag v2"
+    SEG3_V13_NOTE=""
+fi
+
 PROMPT_SEG3="容器名: ${SEG_CTR}，模型名: ${MODEL}
 
 **变量定义（后续命令中直接使用）**：CONTAINER=${SEG_CTR}
@@ -1674,7 +1705,7 @@ ${SEG3_CTX_SUMMARY}
 **发布前同步 context 到宿主机**（发布工具从宿主机路径读取）：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
 （如果 mount_mode=mounted，也可：cp /data/flagos-workspace/${MODEL}/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml）
-发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --version-tag v2
+发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml ${SEG3_RELEASE_ARGS}${SEG3_V13_NOTE}
 完成后通过 docker cp 回传最终 context：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
 
@@ -1823,6 +1854,33 @@ SEG4_ELAPSED=0
 SEG4_MIN=0
 SEG4_SEC=0
 
+# 重读 v1_variant（防断点续跑时段3块未执行导致变量为空）
+V1_VARIANT=$(python3 -c "
+import yaml
+try:
+    with open('${CTX_FILE}') as f:
+        ctx = yaml.safe_load(f)
+    print(ctx.get('baseline', {}).get('v1_variant', ''))
+except: print('')
+" 2>/dev/null) || V1_VARIANT=""
+
+# V1=v1.3（2.2/3.2 同镜像）：V3 已由段3 --also-tag v3 双 tag 发布，段4 整段跳过
+if [ "${QUALIFIED}" = "True" ] && [ "${V1_VARIANT}" = "v1.3" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] V1=v1.3（V2=V3 同镜像，3.2 场景）：V3 已随段3 双 tag 发布，跳过段4 Plugin 验证（步骤 9-13）"
+    if [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+        for STEP_KEY in 09_plugin_install 10_plugin_service_startup 11_plugin_accuracy 12_plugin_performance 13_plugin_release; do
+            docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
+                --ledger-update ${STEP_KEY} --ledger-status skipped --ledger-notes 'V1=v1.3: V2=V3 同镜像，段3已双tag发布(2.2/3.2)' \
+                --json" >/dev/null 2>&1 || true
+        done
+        docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+        echo "  ✓ 步骤 9-13 ledger 已置 skipped，context 已同步"
+    fi
+    QUALIFIED_SEG4="False"
+else
+    QUALIFIED_SEG4="${QUALIFIED}"
+fi
+
 # 保存步骤8已推送的 Harbor 镜像地址（段4 plugin 流程可能污染容器，兜底发布需要回退到此镜像）
 SEG3_HARBOR_IMAGE=$(python3 -c "
 import yaml
@@ -1831,7 +1889,7 @@ with open('${CTX_FILE}') as f:
 print(ctx.get('image', {}).get('registry_url', ''))
 " 2>/dev/null) || SEG3_HARBOR_IMAGE=""
 
-if [ "${QUALIFIED}" = "True" ]; then
+if [ "${QUALIFIED_SEG4}" = "True" ]; then
     # 提取段4所需参数
     SEG4_CTX_SUMMARY=$(python3 -c "
 import yaml
@@ -1926,6 +1984,7 @@ ${SEG4_CTX_SUMMARY}
 发布前同步 context 到宿主机：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
 发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --version-tag v3
+（3.1 特殊情况：若本段验证确认厂商 platform plugin 与 fl plugin 均不适配本模型——即 plugin 模式无论怎么调优都无法启动/达标且已按三级递进判定为框架问题——发布时追加 --incompatible-tag '<模型名>-flagos-<厂商>-incompatible' 打不适配标记）
 完成后通过 docker cp 回传最终 context：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
 
@@ -1982,7 +2041,11 @@ print('no')
     fi
 else
     echo ""
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] qualified=${QUALIFIED}，跳过 Plugin 流程（步骤 9-13）"
+    if [ "${QUALIFIED}" = "True" ] && [ "${V1_VARIANT}" = "v1.3" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] V1=v1.3 同镜像场景，段4 已跳过（V3 已随段3 双 tag 发布）"
+    else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] qualified=${QUALIFIED}，跳过 Plugin 流程（步骤 9-13）"
+    fi
 fi
 
 # ===== 段4.5: V4 减算子 + 发布 (步骤 13.5) =====
@@ -2244,7 +2307,7 @@ ${COMMON_TOKENS}
 **前段状态**：容器 ${SEG_CTR} 已就绪，步骤1-13已全部完成（含 Plugin 流程）。
 
 **步骤14 V5算子扩展（通过脚本自动执行）**：
-operator_expansion.py 是自包含脚本，内部完成全部逐算子探测循环。一条命令执行：
+operator_expansion.py 是自包含脚本，内部完成全部扩展流程（先试顶失败降级：Tier0 全开→Tier1 排除精度算子批量开→逐个探测兜底）。一条命令执行：
   docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/operator_expansion.py \\
     --context-yaml /flagos-workspace/shared/context.yaml \\
     --v1-result /flagos-workspace/results/gpqa_native.json \\
