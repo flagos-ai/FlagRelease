@@ -423,7 +423,9 @@ class PublishStage(BaseStage):
                 tree=chip_config.tree,
                 gems_version=chip_config.gems_version,
                 cx=chip_config.cx,
-                date_tag=chip_config.date_tag
+                date_tag=chip_config.date_tag,
+                container_name=self.config.container_name,
+                vendor_name=vendor.value if vendor else "",
             )
 
             self.steps.append(StepResult(
