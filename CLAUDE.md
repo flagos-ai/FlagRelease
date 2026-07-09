@@ -83,7 +83,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 --- V4 减算子流程（qualified=true 时触发，紧接 V3）---
 13.5 V4减算子(Flag-express) → operator_reduction.py 两阶段（阶段1性能搜索不测精度、阶段2精度回溯）在 V3 达标算子集上减算子提性能，追求性能绝对值最大化、达标基准是超越 V3（不与 V1 比），保底≥1算子，精度相对退化≤5% 为成立前提 → tag 后缀 -v4，plugin 镜像模式发布
 --- V5 扩展流程（有禁用算子时触发）---
-14 V5算子扩展       → operator_expansion.py 逐个重新开启被禁算子（仅需启动+精度）
+14 V5算子扩展       → operator_expansion.py 先试顶失败降级（Tier0全开→Tier1排除精度算子批量开→逐个探测兜底，仅需启动+精度）
 15 V5发布(Royal)    → tag 后缀 -v5，打包发布（无达标门槛）
 ```
 
@@ -104,7 +104,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 
 - 触发条件：步骤 13 完成后，且存在被禁用的算子（`optimization.disabled_ops` 非空）
 - 目标：从 V3 基础上最大化开启算子，仅需服务可启动 + 精度相对退化 ≤5%（**无性能要求**）
-- 执行方式：通过 `operator_expansion.py` 脚本全自动完成逐算子探测循环，Claude 仅负责调用脚本和发布
+- 执行方式：通过 `operator_expansion.py` 脚本全自动完成，Claude 仅负责调用脚本和发布。策略为**先试顶、失败降级**：Tier0 一次性开启全部被禁算子（达标即 1 轮完成）→ Tier1 排除已知精度问题算子（`eval.excluded_ops_accuracy`）批量开启其余 → Tier2 逐个增量探测兜底（正确性与纯逐个一致）
 - 镜像 tag：原 date_tag 追加 `-v5`（如 `202603301143-v5`）
 - V5 不设达标门槛：只要扩展脚本执行完成即发布，无论最终开启了多少算子
 
@@ -119,7 +119,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 | **V4** (精简版/Flag-express) | V3 基础上减算子以提升性能，追求性能绝对值最大化、**达标基准是超越 V3（不与 V1 比较）**，**精度相对退化≤5%（版本成立前提）**，保底≥1算子 | `-v4` | operator_reduction.py 自动发布 |
 | **V5** (Royal版) | V3 基础上最大化开启算子，仅需启动+精度相对退化≤5% | `-v5` | 步骤15自动发布 |
 
-- **V1 基线**：不开启 flaggems 算子替换的版本（仅 FlagTree 生效），作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务，则标记"无 V1"，跳过 V1 基线测试，精度基线回退 NV 基线（`nv_baseline.yaml`）
+- **V1 基线**：不开启 flaggems 算子替换的版本（仅 FlagTree 生效），作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务，则标记"无 V1"，跳过 V1 基线测试，精度基线回退 NV 基线（`nv_baseline.yaml`），**性能基线合成**：V2 使能 flaggems 后首次可正常启动时（步骤4之前、精度调优削减算子之前），quick 测一轮初始性能（`v2_initial_performance`），经 `synthesize_perf_baseline.py` ×1.5 合成基线（全芯片统一标准；吞吐×1.5、延迟÷1.5），按 `native_performance.json` 标准格式落盘（`_meta.synthetic=true` 标记），下游对比/调优/报告照常消费。80% 判据下等价于要求调优后性能 ≥ V2 初始的 1.2 倍
 - **V0**：进入自动化时 flaggems 全量开启状态。服务启动后以 `flaggems_enable_oplist.txt` 或 `gems.txt` 记录的算子为准
 - **V2 Pro**：经过算子调优（步骤5/7）后达标的版本。精度相对退化≤5%，性能≥80% of V1
 - **V3 Max**：在 V2 基础上安装 Plugin 并调优达标的版本。允许 Plugin 模式下继续关闭算子
@@ -190,6 +190,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 | 精度评测 | 始终执行 V1 和 V2 | 不询问是否跳过 |
 | FlagGems 仓库地址 | `https://github.com/FlagOpen/FlagGems.git` | 无需用户提供 |
 | 性能目标 | quick: 4k_input_1k_output 并发 64 ratio ≥ 80%；comprehensive: 每个用例每个并发级别均 ≥ 80%。**判定粒度：每个数据点的 min ratio** | 不询问 |
+| V1 性能基线缺失 | 步骤4前 V2 初始性能 quick 一轮 → `synthesize_perf_baseline.py` ×1.5 合成 `native_performance.json`（全芯片统一，`_meta.synthetic=true`） | 报告注明合成基线 |
 | pip install 模式 | `pip install .`（非 editable） | 避免 `-e .` 在容器中的问题 |
 | pip 国内镜像 | `-i https://mirrors.aliyun.com/pypi/simple/` | pip 失败时自动加镜像重试 |
 | 服务端口 | 默认 8000，被占用则自动递增（+1 到 +10） | 不询问端口号 |
@@ -399,7 +400,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 18. **流程不可中途终止**。精度/性能不达标不是终止理由，标记 `ok=false` 继续下一步，最终走到步骤8（私有发布）。唯一允许终止：Claude API 本身不可用。**例外**：步骤3 FlagGems 崩溃且算子诊断重试连续 2 轮确认无任何可归因算子的新错误（工具 + 人工日志分析均无结果），设 `workflow.service_ok=false` → 提交 issue 后跳过步骤4-7，直接到步骤8（私有发布）。崩溃诊断不限轮次——每轮能定位到新问题算子就继续禁用并重试。`diagnose_ops.py` 返回空不等于"无新算子"，必须自行从日志中分析
 18a. **启动崩溃第一原则：禁用算子是最高优先解**。步骤3 遇到任何形式的崩溃（AICore 异常、Triton 编译错误、graph capture 失败、RuntimeError 等），必须首先定位并禁用具体算子。在穷尽所有算子定位手段（diagnose_ops.py + 人工日志分析 + traceback 中 flag_gems 路径 + 崩溃前编译的 kernel 名）之前，**严禁**尝试 enforce-eager、切 native、或判定不可恢复。enforce-eager 仅作为"已禁用所有可疑算子后仍崩溃"时的最后辅助手段，不是替代算子排查的捷径
-19. **精度评测和性能测试严禁同时进行**，必须等一个完全结束后再启动另一个。整体串行：4 → 5 → 6 → 7
+19. **精度评测和性能测试严禁同时进行**，必须等一个完全结束后再启动另一个。整体串行：4 → 5 → 6 → 7。**唯一例外**：无 V1 场景（`baseline.v1_available=false` 或 V1 无法启动）在步骤4之前插入一次 V2 初始性能测量（quick 一轮）用于合成基线——仍是串行执行（先性能后精度），不违反互斥本意
 20. **禁止添加 SKILL.md 未记录的 vLLM/sglang 启动参数**，遇到启动问题应分析日志找根因
 21. **V1 和 V2 精度评测必须使用完全相同的参数**。包括 max_tokens、题目数量、评测脚本版本，禁止任何一方使用不同配置
 22. **性能测试 output-name 标准命名**：V1=`native_performance`，V2=`flagos_performance`，V3=`flagos_optimized`
