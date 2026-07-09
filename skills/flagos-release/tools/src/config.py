@@ -470,15 +470,23 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
         ) if vendor_name and vendor_name != "unknown" else None
 
         if chip_info:
-            config.publish.image_target_tag = _generate_tag(
-                info=chip_info,
-                model_name=model_name or "unknown",
-                harbor_registry=config.chip.harbor_registry,
-                tree=config.chip.tree,
-                gems_version=config.chip.gems_version,
-                cx=config.chip.cx,
-                date_tag=config.chip.date_tag,
-            )
+            # 委托 get_image_name.sh 采集容器实际版本生成镜像名。
+            # 采集失败不应中断整个 auto_fill（后续还有 harbor_path/仓库ID/命令等填充），
+            # 留空 tag 交由 validate_config 报缺失，行为不比旧字符串拼接脆弱。
+            try:
+                config.publish.image_target_tag = _generate_tag(
+                    info=chip_info,
+                    model_name=model_name or "unknown",
+                    harbor_registry=config.chip.harbor_registry,
+                    tree=config.chip.tree,
+                    gems_version=config.chip.gems_version,
+                    cx=config.chip.cx,
+                    date_tag=config.chip.date_tag,
+                    container_name=config.container_name,
+                    vendor_name=vendor_name,
+                )
+            except Exception as e:
+                print(f"  ⚠ 自动生成镜像 tag 失败，留空待手动指定: {e}")
 
     if not config.publish.harbor_path and config.publish.image_target_tag:
         config.publish.harbor_path = config.publish.image_target_tag
