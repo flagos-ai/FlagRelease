@@ -565,29 +565,40 @@ except:
                 echo "[${ELAPSED}s] 服务已响应，但模型名不匹配: 期望=${MODEL_NAME}, 实际=${MODEL_ID}"
             fi
 
-            # 残留服务检测：日志未确认 service_ready 时，端口响应视为可疑
-            if [ "$LOG_CONFIRMED_READY" = false ] && [ "$DYNAMIC_MODE" = true ]; then
+            # 残留服务检测：端口响应但本次启动无任何证据时才视为可疑。
+            # 关键修正：区分"真残留"与"服务已起但日志无 service_ready 短语"。
+            #   - 真残留 = 旧进程占端口、本次根本没有新服务启动 → PHASES_OBSERVED 为空（无任何进度信号）
+            #   - 国产厂商 vLLM 分支（vllm-ascend/寒武纪/海光等）或 vLLM+plugin 的 V1.3 常见情况 =
+            #     服务确实起来了（端口能响应、观测到 loading_weights/gpu_initialized/port_bound 等进度），
+            #     只是就绪日志短语与原生 vLLM 的 "Application startup complete" 不同，抓不到 service_ready。
+            # 因此：只要本次观测到任何 PROGRESS 信号（PHASES_OBSERVED 非空），端口响应即视为新服务就绪，放行。
+            if [ "$LOG_CONFIRMED_READY" = false ] && [ "$DYNAMIC_MODE" = true ] && [ -z "$PHASES_OBSERVED" ]; then
                 STALE_COUNT=$((STALE_COUNT + 1))
                 if [ "$STALE_COUNT" -ge 3 ]; then
                     echo ""
                     echo "=========================================="
-                    echo "✗ 检测到残留服务（端口 ${PORT} 响应但启动日志无 service_ready）"
+                    echo "✗ 检测到残留服务（端口 ${PORT} 响应但本次启动无任何进度信号）"
                     echo "=========================================="
-                    echo "  原因: 旧 vLLM 进程仍占用端口，新服务未能启动"
+                    echo "  原因: 旧 vLLM 进程仍占用端口，新服务未能启动（日志无 loading_weights/gpu_initialized 等进度）"
                     echo "  修复: 先执行 docker restart \$CONTAINER && sleep 5，再重新启动服务"
                     echo "  推荐: 使用 safe_restart_service.sh 一体化重启"
                     echo "=========================================="
                     echo ""
                     echo "JSON_RESULT:"
-                    echo '{"success":false,"error":"stale_service","error_detail":"端口被残留服务占用，需要 docker restart 清理"}'
+                    echo '{"success":false,"error":"stale_service","error_detail":"端口被残留服务占用（本次无启动进度信号），需要 docker restart 清理"}'
                     exit 2
                 fi
-                echo "[${ELAPSED}s] ⚠ 端口 ${PORT} 已响应但启动日志未确认 service_ready，疑似残留服务 (${STALE_COUNT}/3)"
+                echo "[${ELAPSED}s] ⚠ 端口 ${PORT} 已响应但本次启动无进度信号，疑似残留服务 (${STALE_COUNT}/3)"
                 echo "  响应模型: ${MODEL_ID}"
-                echo "  等待日志确认或致命信号..."
+                echo "  等待启动进度或致命信号..."
                 sleep "$INTERVAL"
                 ELAPSED=$((ELAPSED + INTERVAL))
                 continue
+            fi
+            # 端口响应 + 本次观测到进度信号但无 service_ready 短语（国产厂商常见）→ 判为就绪
+            if [ "$LOG_CONFIRMED_READY" = false ] && [ -n "$PHASES_OBSERVED" ]; then
+                echo "[${ELAPSED}s] 端口 ${PORT} 已响应，本次启动已观测到进度信号（${PHASES_OBSERVED}）"
+                echo "  日志无标准 service_ready 短语（厂商定制启动器常见），按端口响应判定就绪"
             fi
 
             # 非动态模式下的瞬时响应警告：端口在首次轮询即响应，可能是残留服务

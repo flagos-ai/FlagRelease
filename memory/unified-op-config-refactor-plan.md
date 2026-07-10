@@ -1,35 +1,31 @@
 ---
 name: unified-op-config-refactor-plan
-description: ⑤统一入口重构第二批实施清单——flagos_op_config.py 收敛 env构建/双路应用/重启，6个调用点改造，需窗口+真机回归
+description: ⑤统一入口重构——半程收敛已完成（flagos_op_config.py 落地），全量方案被否决（动 operator_search 是负收益）
 metadata:
   type: project
 ---
 
-⑤"抽统一入口"重构的第二批实施清单（第一批止血已完成：operator_expansion.py plugin 分支 bug 已修）。方案已获用户批准，等非跑批窗口执行。
+⑤"抽统一入口"重构。**半程收敛已实施完成（2026-07），全量方案经风险评估后被有意缩减**。
 
-## 现状（扫描确认，2026-07）
-"应用算子配置+重启"散在 8 个 .py 的 12+ 处：
-- **env_to_inline 4-5 份重复**：apply_op_config.py:29 / operator_search.py:344 / operator_optimizer.py / diagnose_ops.py:622 / toggle_flaggems.py:27
-- **双路应用 3 份**：operator_search.py:313 apply_operator_config（最完整，含 Layer1-4 能力探测）/ operator_reduction.py:181 write_control_file（/etc/environment 持久化）/ operator_expansion.py:141（第一批刚补 plugin 分支）
-- **restart 3 份且行为不同**：search:628（优雅停止→超时才-9，socket探测30次等端口）/ reduction:235（直接 pkill -9 含 multiprocessing.spawn，ss 探测15次）/ expansion:182（**pkill 无-9、不等端口直接 sleep 5——潜在隐患：旧进程未死透/端口未释放**，日志硬编码 startup_v5.log）
-- 部署机制：setup_workspace.sh 的 SCRIPT_MAP 显式清单逐个 docker cp 到容器扁平 /flagos-workspace/scripts/，同级可 import。
+## 风险评估结论（用户认可）
+全量方案两个高危点收益极小：①统一三份 restart 会动 operator_search 的调用约定（stop_cmd 语义），而它是唯一真机验证过的 V2/V3 调优主链路，本来就是对的；②Layer 1-4 能力探测与 operator_search 的 action 结构深耦合，搬迁=重写+全链路回归。**"已经对的东西不动"**。toggle_flaggems 遗留 modify-enable 路径经验证：非 plugin 正确；plugin 下空转但 fail-safe（重试2轮失败→issue→service_ok=false 私有发布，不产出假成功），不污染结果——因此半程收敛顺手修它而非废弃。
 
-## 实施步骤
-1. 新建 skills/flagos-operator-replacement/tools/flagos_op_config.py，三个权威函数：
-   - build_op_env(enabled/disabled_ops, plugin_mode, mode) → env dict + env_to_inline（唯一）
-   - apply_op_config(...) → 双路分派（plugin→whitelist env / 非plugin→控制文件+FLAGGEMS_CONTROL_MODE），融合 search 的 Layer 探测 + reduction 的 /etc/environment 持久化
-   - restart_service(service_cmd, wait_script, env_inline, ...) → 唯一重启：优雅停止→pkill -9 兜底（含 multiprocessing.spawn）→等端口释放→清 Triton/FlagGems 缓存→启动→wait_for_service
-2. setup_workspace.sh SCRIPT_MAP 加一行部署该模块。
-3. 逐个改 6 个调用点为 import 共享模块（每个单独 py_compile+自测）：operator_search / operator_reduction / operator_expansion / apply_op_config（保留薄 CLI 包装）/ diagnose_ops / persist_op_config（仅共享 env 构建，持久化场景不重启）。
-4. 废弃 toggle_flaggems.py 的 modify_enable_call/_write_ops_control_file（SKILL/pipeline 已声明不使用）。
-5. 指令层：eval-comprehensive/SKILL.md:581-592 精度调优手工应用段落改为"调用统一入口脚本"。
+## 半程收敛已完成内容
+1. **新建 skills/flagos-operator-replacement/tools/flagos_op_config.py**（唯一权威）：
+   env_to_inline / build_op_env(native|full|custom,白名单优先) / is_plugin_env / persist_env / clear_env / env_has / load_etc_environment / **write_op_config**(双路：plugin→WHITELIST env+清BLACKLIST+空算子USE_FLAGGEMS=0；非plugin→控制文件+only_enable，返回所走路径)。
+2. setup_workspace.sh SCRIPT_MAP 加部署行；**顺带发现并修复 operator_reduction.py 根本不在部署清单**（V4 段调 /flagos-workspace/scripts/operator_reduction.py 会文件不存在——海光 V4 问题的隐藏因素）。
+3. operator_reduction.py / operator_expansion.py：删本地 _is_plugin_env/write_control_file/_persist_env 等副本，改 `from flagos_op_config import ...`（别名保留原函数名，内部调用点零改动）。
+4. expansion 的 restart_and_wait 对齐 reduction 的稳健版（pkill -9 含 multiprocessing.spawn + ss 等端口释放；原版 pkill 无-9、不等端口）。**未统一三份 restart，只修有隐患的这份**。
+5. apply_op_config.py generate() 内部改调 build_op_env（CLI 行为回归通过，输出算子改为排序——语义等价）。
+6. diagnose_ops.py _build_group_env plugin 分支改调 build_op_env+env_to_inline（OOT/flagos 双层拆分保留在本地）。
+7. toggle_flaggems.modify_enable_call 加 **plugin 守卫**：detect_plugin_mode()（vllm_fl 可导入，比 VLLM_FL_PREFER_ENABLED 更适合步骤3时点）+ disabled_ops → 走 blacklist env 持久化（合并已有 blacklist、清冲突 whitelist），返回结构兼容 results[] 信封；ImportError 降级回控制文件路径（宿主机/旧容器）。修复步骤3崩溃恢复在 plugin 下空转。
 
-## 回归验证（必做）
-- 每工具 py_compile + 单元自测
-- 真机（plugin + 非plugin 各一台）对拍 /proc/<vllm-pid>/environ 的 VLLM_FL_FLAGOS_* + /tmp/flaggems_enable_oplist.txt，确认两条路算子真实生效
-- 在非跑批窗口执行
+## 刻意不做（边界）
+- operator_search.py **零改动**（已验证）。
+- 不统一三份 restart。
+- SKILL 指令层"改调脚本"缓行（①修复文字已正确）。
 
-## 效果
-单一事实源（plugin/非plugin 判断从 3+ 处→1 处）；消灭 expansion restart 无-9/不等端口的隐患；精度调优不再靠 Claude 手工拼配置；4-5 份 env_to_inline + 3 份 restart + 3 份双路 → 各 1 份。
+## 验证状态
+6 文件编译+setup_workspace 语法通过；共享模块/双路/CLI回归/diagnose/toggle守卫 全部单元自测通过。**未真机验证**——需在 plugin+非plugin 各一台对拍 /proc/<vllm-pid>/environ 与 /tmp/flaggems_enable_oplist.txt。
 
-相关：[[tuning-logic-fixes-plan]] ⑤、[[v5-operator-expansion-whitelist-bug]]（第一批已修）、[[plugin-accuracy-tuning-control-file-bug]]、[[hygon-pipeline-bug-fixes]]。
+相关：[[tuning-logic-fixes-plan]]、[[v5-operator-expansion-whitelist-bug]]（已由共享模块彻底收敛）、[[plugin-accuracy-tuning-control-file-bug]]、[[hygon-pipeline-bug-fixes]]。
