@@ -1269,6 +1269,55 @@ CTX_INFO=$(read_context "${MODEL}" 2>/dev/null) || {
 SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
 echo "  容器名: ${SEG_CTR}"
 
+# ===== 分支 B V1 三选强制闸门：确保 baseline_selector.py 真实执行过，不信任 Claude 臆断的 v1_variant =====
+# 动机：baseline_selector.py 全程无 shell 强制调用点，Claude 可能自起服务测一下就把
+# baseline.v1_variant/v1_available 写成臆断值，导致下游 V2 分支(2.1/2.2)、合成基线触发、
+# 精度基线回退 NV 全部建立在未经三选验证的判据上。v1_gate.py 只认 v1_baseline_selection.json
+# 里 baseline_selector 产出的 attempts[] 真实痕迹(每变体 service_ok/smoke_passed)，
+# needed=缺真实三选产物 → shell 兜底直调 baseline_selector.py。仅分支 B 需要三选。
+if [ "${PIPELINE_BRANCH:-}" = "B" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+    RES_DIR_V1="/data/flagos-workspace/${MODEL}/results"
+    V1_SELECTION="${RES_DIR_V1}/v1_baseline_selection.json"
+    V1_GATE=$(python3 "${SCRIPT_DIR}/v1_gate.py" --selection "${V1_SELECTION}" 2>/dev/null) || V1_GATE="needed"
+    if [ "$V1_GATE" = "ok" ]; then
+        echo "  ✓ V1 三选闸门：baseline_selector.py 已真实执行过（v1_baseline_selection.json 含完整 attempts 痕迹）"
+    else
+        echo "  ⚠ V1 三选闸门：缺 baseline_selector 真实产物（Claude 疑似臆断 v1_variant）→ shell 兜底直调三选状态机..."
+        # 取端口与模型名供三选启动服务/冒烟使用（一次 docker exec 读全，read_context 不含 port）
+        V1_META=$(docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 -c \"
+import yaml
+try:
+    with open('/flagos-workspace/shared/context.yaml') as f:
+        c = yaml.safe_load(f)
+    print(str(c.get('service',{}).get('port',8000)) + '|' + c.get('model',{}).get('name',''))
+except: print('8000|')
+\"" 2>/dev/null) || V1_META="8000|"
+        V1_PORT=$(echo "$V1_META" | cut -d'|' -f1); V1_PORT="${V1_PORT:-8000}"
+        V1_MODEL_NAME=$(echo "$V1_META" | cut -d'|' -f2-)
+        docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/baseline_selector.py \
+            --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh' \
+            --vendor-plugin auto \
+            --port ${V1_PORT} \
+            --model-name '${V1_MODEL_NAME}' \
+            --output /flagos-workspace/results/v1_baseline_selection.json \
+            --json" 2>&1 | tee -a "${LOG_FILE}" || true
+        # 同步三选产出的 context 与结果回宿主机
+        if [ -f "${SHARED_CTX}" ]; then
+            cp "${SHARED_CTX}" "${CTX_FILE}" 2>/dev/null || true
+        else
+            docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+        fi
+        docker cp "${SEG_CTR}:/flagos-workspace/results/v1_baseline_selection.json" "${V1_SELECTION}" 2>/dev/null || true
+        # 复检
+        V1_GATE_RECHECK=$(python3 "${SCRIPT_DIR}/v1_gate.py" --selection "${V1_SELECTION}" 2>/dev/null) || V1_GATE_RECHECK="needed"
+        if [ "$V1_GATE_RECHECK" = "ok" ]; then
+            echo "  ✓ shell 兜底 baseline_selector.py 执行完毕，V1 三选已确定"
+        else
+            echo "  ✗ shell 兜底后仍无有效三选产物（容器/脚本异常），下游将按 v1_available 现状继续"
+        fi
+    fi
+fi
+
 # ===== 段2 结束后：直接执行精度评测（默认流程，不依赖 Claude 是否正确调用） =====
 run_eval_if_missing() {
     local OUTPUT_FILE="$1"
@@ -1359,9 +1408,64 @@ except:
 # 获取 seg2 启动时间戳
 SEG2_START_ISO=$(date -d "@$(cat "${LOG_DIR}/seg2_start_ts" 2>/dev/null || echo 0)" --iso-8601=seconds 2>/dev/null || echo "2000-01-01T00:00:00")
 
+# 检测当前服务是否 FlagGems 模式（V2 精度兜底前置判据）
+# 判据（agent 无法用嘴伪造）：startup_default.log 软链指向 startup_flagos*.log，
+# 或 /etc/environment 中 USE_FLAGGEMS=1。二者任一命中即视为 FlagGems 服务。
+is_flaggems_service() {
+    docker exec "${SEG_CTR}" bash -c '
+        LINK=$(readlink /flagos-workspace/logs/startup_default.log 2>/dev/null || echo "")
+        case "$LINK" in
+            *startup_flagos*) echo "yes"; exit 0 ;;
+        esac
+        if grep -q "^USE_FLAGGEMS=1" /etc/environment 2>/dev/null; then
+            echo "yes"; exit 0
+        fi
+        echo "no"
+    ' 2>/dev/null || echo "no"
+}
+
 # 尝试直接执行精度评测（如果 Claude 未正确产出结果）
 if docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+    # V1 (native) 精度兜底：当前服务能测即测
     run_eval_if_missing "gpqa_native.json" "${SEG2_START_ISO}" || true
+
+    # V2 (FlagGems) 精度兜底：仅当当前服务确为 FlagGems 模式且存活时直接测；
+    # 否则不硬测（避免拿 native/错误配置服务测出污染的 V2 分数），交由后续段2 retry
+    # 让 Claude 用 skill 正确切换 FlagGems 服务后重测。
+    # native 场景无 FlagGems、无 V2，跳过整个 V2 兜底（否则打印误导性"V2 缺失"日志）。
+    if [ "${SEG_ENV}" = "native" ]; then
+        V2_EVAL_STATE="SKIP_NATIVE"
+    else
+        V2_EVAL_STATE=$(docker exec "${SEG_CTR}" bash -c "
+        PATH=/opt/conda/bin:\$PATH python3 -c \"
+import json
+from datetime import datetime
+try:
+    with open('/flagos-workspace/results/gpqa_flagos.json') as f:
+        d = json.load(f)
+    if d.get('_producer') != 'fast_gpqa.py' or d.get('score') is None:
+        print('INVALID')
+    elif datetime.fromisoformat(d['timestamp']) > datetime.fromisoformat('${SEG2_START_ISO}'):
+        print('OK')
+    else:
+        print('STALE')
+except FileNotFoundError:
+    print('MISSING')
+except Exception:
+    print('INVALID')
+\"" 2>/dev/null) || V2_EVAL_STATE="ERROR"
+    fi
+
+    if [ "${V2_EVAL_STATE}" = "SKIP_NATIVE" ]; then
+        :  # native 场景无 V2，静默跳过
+    elif [ "${V2_EVAL_STATE}" = "OK" ]; then
+        echo "  ✓ gpqa_flagos.json (V2) 评测结果有效"
+    elif [ "$(is_flaggems_service)" = "yes" ]; then
+        echo "  ⚠ gpqa_flagos.json (V2) 结果无效 (${V2_EVAL_STATE})，当前为 FlagGems 服务，直接兜底评测..."
+        run_eval_if_missing "gpqa_flagos.json" "${SEG2_START_ISO}" || true
+    else
+        echo "  ⚠ gpqa_flagos.json (V2) 结果无效 (${V2_EVAL_STATE})，但当前非 FlagGems 服务，不硬测（防污染），交由段2 retry 由 Claude 正确切换服务后重测"
+    fi
 fi
 
 # 段2 完成性校验：步骤4（精度评测）必须有明确结果
@@ -1481,35 +1585,30 @@ if v1_score is not None:
     fi
 fi
 
-# ===== 段2 步骤7 补充检查：performance_ok=false 且步骤7未执行时，补一次重试 =====
+# ===== 段2 步骤7 强制闸门：编排层自算达标率 + 产物痕迹判定，不信任 agent 写的 performance_ok/ledger =====
+# 动机：agent 可用无数据支撑的臆断跳过 operator_search 并把 performance_ok/ledger 步骤7
+# 写成任意值绕过补跑。step7_gate.py 只看两类 agent 无法伪造的事实：
+#   (1) 达标率——编排层读实测吞吐 JSON ÷ 基线 JSON 自算 min-ratio
+#   (2) 是否真跑过 operator_search——看 operator_config.json 的 search_log/痕迹
+# 返回 needed=必须补跑 / done=真跑过仍未达标(尊重实测) / ok=已达标 / no_data=缺数据
 if [ "${IS_NATIVE:-false}" != "true" ]; then
-    SEG2_NEED_STEP7=$(python3 -c "
-import yaml
-try:
-    with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
-        ctx = yaml.safe_load(f)
-    wf = ctx.get('workflow', {})
-    # performance_ok=false 说明需要步骤7
-    if wf.get('performance_ok') == False or str(wf.get('performance_ok','')).lower() == 'false':
-        ledger = ctx.get('workflow_ledger', {}).get('steps', {})
-        step7_done = False
-        items = ledger.items() if isinstance(ledger, dict) else [(i, s) for i, s in enumerate(ledger)] if isinstance(ledger, list) else []
-        for key, s in items:
-            if not isinstance(s, dict): continue
-            step = str(s.get('step', key)).lower()
-            status = s.get('status', '')
-            if ('07' in step or 'performance_tun' in step or 'perf_tun' in step) and status in ('success', 'skipped'):
-                step7_done = True
-                break
-        if not step7_done:
-            print('needed')
-        else:
-            print('done')
-    else:
-        print('not_needed')
-except Exception as e:
-    print('not_needed')
-" 2>/dev/null) || SEG2_NEED_STEP7="not_needed"
+    RES_DIR="/data/flagos-workspace/${MODEL}/results"
+    # V2 实测结果命名：普通场景 flagos_performance.json，合成基线场景 v2_initial_performance.json
+    FLAGOS_PERF_ARG="${RES_DIR}/flagos_performance.json"
+    [ ! -f "${FLAGOS_PERF_ARG}" ] && [ -f "${RES_DIR}/v2_initial_performance.json" ] && FLAGOS_PERF_ARG="${RES_DIR}/v2_initial_performance.json"
+    SEG2_NEED_STEP7=$(python3 "${SCRIPT_DIR}/step7_gate.py" \
+        --baseline "${RES_DIR}/native_performance.json" \
+        --flagos "${FLAGOS_PERF_ARG}" \
+        --optimized "${RES_DIR}/flagos_optimized.json" \
+        --state "${RES_DIR}/operator_config.json" \
+        --target 0.8 2>/dev/null) || SEG2_NEED_STEP7="no_data"
+
+    case "$SEG2_NEED_STEP7" in
+        ok)      echo "  ✓ 步骤7 闸门：性能已达标（编排层自算 min-ratio≥0.8），无需调优" ;;
+        done)    echo "  ✓ 步骤7 闸门：operator_search 已真实执行过（有搜索痕迹），未达标但尊重实测结果" ;;
+        no_data) echo "  ⚠ 步骤7 闸门：缺基线或实测结果，无法判定达标率，跳过强制补跑（交由后续兜底）" ;;
+        needed)  echo "  ⚠ 步骤7 闸门：未达标 且 无 operator_search 真实运行痕迹 → 强制补跑（agent 疑似臆断跳过）" ;;
+    esac
 
     if [ "$SEG2_NEED_STEP7" = "needed" ]; then
         echo ""
@@ -1542,6 +1641,34 @@ except Exception as e:
         print_ledger_summary "${CTX_FILE}"
         CTX_INFO=$(read_context "${MODEL}" 2>/dev/null) || true
         [ -n "$(echo "$CTX_INFO" | cut -d'|' -f1)" ] && SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
+
+        # ===== 补跑后复检：agent 若在补跑会话里仍臆断跳过（无真实搜索痕迹），shell 直接兜底调 operator_search =====
+        # 这是最后一道闸门——绕开 agent 的"想"，由编排层直接执行确定性搜索脚本。
+        SEG2_RECHECK=$(python3 "${SCRIPT_DIR}/step7_gate.py" \
+            --baseline "${RES_DIR}/native_performance.json" \
+            --flagos "${FLAGOS_PERF_ARG}" \
+            --optimized "${RES_DIR}/flagos_optimized.json" \
+            --state "${RES_DIR}/operator_config.json" \
+            --target 0.8 2>/dev/null) || SEG2_RECHECK="no_data"
+        if [ "$SEG2_RECHECK" = "needed" ]; then
+            echo "  ⚠ 补跑会话仍未执行 operator_search（无搜索痕迹），shell 兜底直接调用脚本..."
+            if [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+                docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_search.py run \
+                    --state-path /flagos-workspace/results/operator_config.json \
+                    --perf-config /flagos-workspace/scripts/config/perf_config.yaml \
+                    --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh' \
+                    --max-rounds 50" 2>&1 | tee -a "${LOG_FILE}" || true
+                # 同步搜索产出回宿主机
+                if [ -f "${SHARED_CTX}" ]; then
+                    cp "${SHARED_CTX}" "${CTX_FILE}" 2>/dev/null || true
+                else
+                    docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+                fi
+                echo "  ✓ shell 兜底 operator_search 执行完毕"
+            else
+                echo "  ✗ 容器 ${SEG_CTR} 不存在，无法 shell 兜底调 operator_search"
+            fi
+        fi
     fi
 fi
 

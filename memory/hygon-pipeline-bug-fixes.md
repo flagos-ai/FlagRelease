@@ -27,3 +27,13 @@ metadata:
 
 ## 验证状态
 三处编译/语法均通过；问题2/3 有单元自测通过。均未在海光真机验证。相关：[[tuning-logic-fixes-plan]]
+
+## 追加：镜像模式复用旧容器事故（真机排查，已修 2026-07）
+- 现象：tasks.txt 换新镜像跑批，agent 发现同名旧容器（如 gemma-3-1b-it_flagos，旧镜像建的）直接复用，且镜像不在本地时从未 docker pull → 新任务全程跑在旧镜像上，结果错误归属。
+- 三个缺陷：①流程无 docker pull 步骤（隐含假设镜像已在本地）；②容器名冲突"追加时间戳"只是 prompt 文字，agent 靠自觉；③docker run 失败的降级路径（"借鉴已有容器"）被滑坡成复用旧容器。
+- 修复（确定性归 shell，agent 只消费）：
+  1. run_pipeline.sh 镜像模式 pre-flight 新增：docker image inspect 存在性检查 → 不在本地 docker pull（直连失败按 PROXY_LIST 逐个重试）→ 全失败明确 exit 1（拒绝降级，注明"复用旧容器=旧镜像跑新任务比失败更糟"）。
+  2. shell 预生成容器名 CONTAINER_NAME_PRE（冲突必然追加 _MMDD_HHMM，同分钟再冲突加秒），注入 STEP1 prompt，agent 禁止自行生成/判断/修改。
+  3. STEP1 prompt：禁止 docker pull（编排层已做）、降级策略改为"仅抄挂载参数拼新命令，容器名不变"、绝对禁止复用已存在容器。
+  4. container-preparation SKILL.md 入口2 同步（镜像就绪保证归编排层、容器名注入制、禁止行为写明事故教训）。
+- mock docker 四场景模拟验证通过：本地有镜像/需拉取/拉取全失败exit1/同名容器强制时间戳。未真机验证。
