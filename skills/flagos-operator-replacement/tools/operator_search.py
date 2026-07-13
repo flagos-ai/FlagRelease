@@ -37,6 +37,7 @@ else:
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import time
 import traceback
@@ -680,12 +681,17 @@ def restart_service(stop_cmd: str, startup_cmd: str,
     # 清除旧启动日志，避免 wait_for_service.sh 误判残留服务
     run_cmd("rm -f /flagos-workspace/logs/startup_flagos.log /flagos-workspace/logs/startup_search.log 2>/dev/null", check=False)
     nohup_log = "/flagos-workspace/logs/startup_search.log"
+    # startup_cmd 可能是 shell 复合命令（如 DTK 平台的 "source /opt/dtk-*/env.sh && bash start_service.sh"）。
+    # nohup 只能执行可执行文件，直接 `nohup source ...` 会因 source 是 shell 内建而报 "无法运行命令 'source'"
+    # 导致服务静默启动失败。故用 bash -c 包一层，让 source/&& 在子 shell 内合法执行。
+    # 外层 nohup 后台化、nohup_log、env_inline 在前的原设计保持不变。
+    wrapped_cmd = f"bash -c {shlex.quote(startup_cmd)}"
     if env_inline:
         # env_inline 必须在 nohup 前面，否则 nohup 会把 VAR=val 当命令名
-        bg_cmd = f"{env_inline} nohup {startup_cmd} > {nohup_log} 2>&1 &"
+        bg_cmd = f"{env_inline} nohup {wrapped_cmd} > {nohup_log} 2>&1 &"
         print(f"  启动服务（内联 env vars，后台）...")
     else:
-        bg_cmd = f"nohup {startup_cmd} > {nohup_log} 2>&1 &"
+        bg_cmd = f"nohup {wrapped_cmd} > {nohup_log} 2>&1 &"
         print("  启动服务（后台）...")
     # 清空约定文件，确保读到的是本次启动写入的路径
     SERVICE_LOG_PATH_FILE = "/flagos-workspace/logs/service_log_path"
