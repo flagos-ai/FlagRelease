@@ -66,7 +66,7 @@ DEFAULT_OPTIMIZER_SCRIPT = "/flagos-workspace/scripts/operator_optimizer.py"
 DEFAULT_WAIT_SCRIPT = "/flagos-workspace/scripts/wait_for_service.sh"
 DEFAULT_APPLY_CONFIG_SCRIPT = "/flagos-workspace/scripts/apply_op_config.py"
 
-SERVICE_STOP_CMD = "pkill -9 -f 'vllm.entrypoints|sglang.launch_server|vllm serve|vllm.serve'"
+SERVICE_STOP_CMD = "pkill -9 -f 'vllm.entrypoints|vllm serve|vllm.serve'"
 SERVICE_WAIT_TIMEOUT = 300  # 秒
 GPU_MEM_FREE_THRESHOLD = 0.95  # GPU 显存空闲比例阈值（>95% 视为已释放）
 GPU_RELEASE_TIMEOUT = 60       # GPU 显存释放等待超时（秒）
@@ -662,7 +662,7 @@ def restart_service(stop_cmd: str, startup_cmd: str,
             break
     else:
         print(f"  WARNING: 端口 {svc_port} 仍被占用，强制 kill...")
-        run_cmd("pkill -9 -f 'vllm|sglang' 2>/dev/null", check=False)
+        run_cmd("pkill -9 -f 'vllm' 2>/dev/null", check=False)
         time.sleep(5)
     port_wait_elapsed = time.time() - port_wait_start
     if port_wait_elapsed > 5:
@@ -672,7 +672,7 @@ def restart_service(stop_cmd: str, startup_cmd: str,
     required_gpus = _read_gpu_count()
     if not wait_gpu_memory_release(required_free=required_gpus):
         print("  WARNING: GPU 显存未完全释放，尝试强制清理...")
-        run_cmd("pkill -9 -f 'vllm|sglang' 2>/dev/null", check=False)
+        run_cmd("pkill -9 -f 'vllm' 2>/dev/null", check=False)
         time.sleep(5)
         if not wait_gpu_memory_release(timeout=15, required_free=required_gpus):
             print("  WARNING: 强制清理后 GPU 显存仍未释放，继续启动（可能使用其他空闲 GPU）")
@@ -1163,7 +1163,7 @@ def run_full_search(state_path: str, perf_config: str,
             if not gpu_check["available"]:
                 # 尝试清理残留进程
                 print("  尝试清理残留推理进程...")
-                run_cmd("pkill -9 -f 'vllm|sglang' 2>/dev/null", check=False)
+                run_cmd("pkill -9 -f 'vllm' 2>/dev/null", check=False)
                 time.sleep(10)
                 gpu_check = check_gpu_availability(required_gpus=required_gpus)
                 if not gpu_check["available"]:
@@ -1240,7 +1240,7 @@ def run_full_search(state_path: str, perf_config: str,
                     search_log[-1]["decision"] = "essential_keep"
                     search_log[-1]["op_name"] = crashed_op
                     # Kill any leftover processes before next round
-                    run_cmd("pkill -9 -f 'vllm\\|sglang\\|vllm serve' 2>/dev/null", check=False)
+                    run_cmd("pkill -9 -f 'vllm\\|vllm serve' 2>/dev/null", check=False)
                     time.sleep(5)
                     continue
             break

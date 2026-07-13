@@ -85,13 +85,6 @@ def find_model_runner_files():
         search_dirs.append(str(vllm_path.parent))
     except ImportError:
         pass
-    try:
-        import sglang
-        sgl_path = Path(sglang.__path__[0])
-        search_dirs.append(str(sgl_path.parent))
-    except ImportError:
-        pass
-
     for search_dir in search_dirs:
         search_path = Path(search_dir)
         if not search_path.exists():

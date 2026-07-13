@@ -116,7 +116,6 @@ inspection:
   core_packages:            # 核心组件版本
     torch: ""
     vllm: ""
-    sglang: ""
   flag_packages:            # flag 生态组件版本
     flaggems: ""
     flagscale: ""
@@ -197,7 +196,7 @@ flaggems_control:
 # 运行时信息 (由 service-startup 写入)
 # ============================================================================
 runtime:
-  framework: ""           # 框架: vllm|sglang
+  framework: "vllm"       # 框架: 仅支持 vllm（固定值，勿改；下游 start_service.sh 直接消费）
   flaggems_enabled: false # 是否启用 FlagGems
   tp_size: 0              # tensor-parallel-size（由 calc_tp_size.py 推算）
   tp_reason: ""           # TP 推算原因

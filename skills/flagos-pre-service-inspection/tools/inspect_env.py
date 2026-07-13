@@ -74,7 +74,7 @@ def check_execution_mode():
 def check_core_packages():
     """检查核心组件版本"""
     packages = {}
-    for pkg_name, import_name in [("torch", "torch"), ("vllm", "vllm"), ("sglang", "sglang")]:
+    for pkg_name, import_name in [("torch", "torch"), ("vllm", "vllm")]:
         try:
             mod = importlib.import_module(import_name)
             packages[pkg_name] = getattr(mod, "__version__", "installed")
@@ -257,8 +257,8 @@ def scan_flaggems_integration():
         if val is not None:
             integration["env_vars"][var] = val
 
-    # 维度2：vllm/sglang 及其平台适配层代码扫描
-    for framework in ["vllm", "sglang", "vllm_ascend"]:
+    # 维度2：vllm 及其平台适配层代码扫描
+    for framework in ["vllm", "vllm_ascend"]:
         try:
             mod = importlib.import_module(framework)
             fw_path = mod.__path__[0]

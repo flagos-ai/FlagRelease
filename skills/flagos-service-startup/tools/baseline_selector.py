@@ -58,7 +58,7 @@ def run_cmd(cmd: str, timeout: int = 300) -> tuple:
 
 def stop_service():
     """停止残留服务，释放 GPU"""
-    subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null", shell=True, capture_output=True)
+    subprocess.run("pkill -f 'vllm' 2>/dev/null", shell=True, capture_output=True)
     time.sleep(5)
 
 

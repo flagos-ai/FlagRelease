@@ -35,12 +35,12 @@ FATAL_LOG_PATTERNS = [
     (re.compile(r"(?:CUDA\s+)?out\s+of\s+memory|torch\.cuda\.OutOfMemoryError|\bOOM\b", re.I), "oom"),
     (re.compile(r"CUDA\s*(?:error|Error|ERROR)\s*:|CUDAError|no kernel image", re.I), "cuda_error"),
     (re.compile(r"Segmentation fault|SIGSEGV|SIGKILL", re.I), "segfault"),
-    (re.compile(r"Killed\s+.*(?:vllm|sglang)|killed by signal", re.I), "process_killed"),
+    (re.compile(r"Killed\s+.*(?:vllm)|killed by signal", re.I), "process_killed"),
     (re.compile(r"Address already in use", re.I), "port_conflict"),
     (re.compile(r"Connection refused", re.I), "connection_refused"),
 ]
 
-SERVICE_PROCESS_PATTERNS = ("vllm", "sglang", "flagscale")
+SERVICE_PROCESS_PATTERNS = ("vllm", "flagscale")
 
 
 def check_service_alive() -> bool:

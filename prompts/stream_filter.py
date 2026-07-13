@@ -100,7 +100,7 @@ SHOW_COMMANDS = [
     # 外部服务
     'modelscope', 'huggingface-cli',
     # GPU / 服务
-    'nvidia-smi', 'vllm serve', 'sglang',
+    'nvidia-smi', 'vllm serve',
 ]
 
 # docker exec 中应隐藏的探测/写入命令（精简模式下，优先于 SHOW_COMMANDS）
@@ -458,7 +458,6 @@ def should_show_command(cmd: str) -> bool:
 
 _PHASE_BANNERS = [
     ('vllm serve',           '🚀 服务启动中...'),
-    ('-m sglang',            '🚀 服务启动中（SGLang）...'),
     ('wait_for_service',     '⏳ 等待服务就绪...'),
     ('fast_gpqa',            '📊 精度评测运行中（GPQA Diamond）...'),
     ('benchmark_runner',     '📊 性能评测运行中（Benchmark）...'),

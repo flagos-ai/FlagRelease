@@ -153,7 +153,7 @@ FATAL = [
     (re.compile(r'(?:CUDA\s+)?out\s+of\s+memory|torch\.cuda\.OutOfMemoryError|\bOOM\b', re.I), 'oom'),
     (re.compile(r'CUDA\s*(?:error|Error|ERROR)\s*:|CUDAError|no kernel image is available', re.I), 'cuda_error'),
     (re.compile(r'Segmentation fault|SIGSEGV|SIGKILL', re.I), 'segfault'),
-    (re.compile(r'Killed\s+.*(?:vllm|sglang)|killed by signal', re.I), 'killed'),
+    (re.compile(r'Killed\s+.*(?:vllm)|killed by signal', re.I), 'killed'),
     (re.compile(r'Address already in use', re.I), 'port_conflict'),
     (re.compile(r'ModuleNotFoundError|ImportError:\s', re.I), 'import_error'),
     (re.compile(r'OSError.*(?:model|tokenizer).*not found|Cannot load model', re.I), 'model_not_found'),
@@ -267,7 +267,7 @@ check_process_activity() {
         fi
     fi
     if [ -z "$PID" ]; then
-        PID=$(ps -ef | grep -E "vllm.entrypoints|sglang.srt|multiproc_worker" | grep -v grep | awk '{print $2}' | head -1)
+        PID=$(ps -ef | grep -E "vllm.entrypoints|multiproc_worker" | grep -v grep | awk '{print $2}' | head -1)
     fi
     if [ -z "$PID" ]; then
         echo "dead"
@@ -402,7 +402,7 @@ print_failure_diagnostics() {
     # 检查进程
     echo ""
     echo "进程状态:"
-    ps -ef | grep -E "vllm|sglang|flagscale" | grep -v grep || echo "  无相关进程"
+    ps -ef | grep -E "vllm|flagscale" | grep -v grep || echo "  无相关进程"
 
     # 检查端口
     echo ""
@@ -635,7 +635,7 @@ except:
 
     # === CHECK 3: 进程存活检测（仅动态模式，启动 10s 后） ===
     if [ "$DYNAMIC_MODE" = true ] && [ "$ELAPSED" -gt 10 ]; then
-        PROCESS_COUNT=$(ps -ef | grep -E "vllm|sglang|flagscale" | grep -v grep | wc -l)
+        PROCESS_COUNT=$(ps -ef | grep -E "vllm|flagscale" | grep -v grep | wc -l)
         if [ "$PROCESS_COUNT" -eq 0 ]; then
             echo ""
             echo "=========================================="
