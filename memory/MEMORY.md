@@ -12,3 +12,5 @@
 - [步骤7防臆断闸门](step7-gate-anti-hallucination.md) — 已实施：step7_gate.py 用产物事实(达标率shell自算+搜索痕迹)判定，防agent臆断跳过operator_search，补跑后shell兜底直调脚本，待真机
 - [V1.3残留服务误判](v1-3-stale-service-false-negative.md) — 已实施：国产厂商V1.3端口能响应但缺service_ready短语被误判残留失败，残留检测加"本次无进度信号(PHASES_OBSERVED空)"判据，待真机
 - [防自由发挥闸门V1V2](anti-freewheel-gates-v1-v2.md) — 已实施：V1三选强制闸门(v1_gate.py+shell兜底调baseline_selector)+V2精度条件兜底(is_flaggems_service判模式,非FlagGems不硬测防污染)，待真机
+- [V2-V5全链去阻断](no-block-full-chain-v2-v5.md) — 方案设计中：性能不卡流程(尽力后放行)、精度≤5%仍硬闸门、V3使能分支区分(B用VLLM_PLUGINS=fl不装/A照常装)、V2/V3不达标也发布打qualified标签
+- [回滚误删产出修复](rollback-overflow-fix.md) — 已修复：段1越界回滚因rollback_overflow.py从未实现+fallback无差别rm+断点续跑误判→误删产出；新建脚本+时间戳判据(finished_at>seg1_start才算越界)+去掉危险rm
