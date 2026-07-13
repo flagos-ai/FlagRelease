@@ -4,3 +4,8 @@ __pycache__/
 output/
 *.log
 nohup.out
+
+# 流程开发中间产物（方案文档、提交总结、临时对比数据），不入库
+防自由发挥加固方案.md
+commits_summary_*.txt
+performance_compare.csv
