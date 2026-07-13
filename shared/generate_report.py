@@ -932,8 +932,8 @@ def generate_text_report(data: ReportData) -> str:
     _np_meta = (data.native_perf or {}).get("_meta", {})
     if _np_meta.get("synthetic"):
         lines.append("")
-        lines.append(f"> ⚠️ **性能基线为合成值，非实测 V1**：V2 初始性能 ×{_np_meta.get('factor', 1.5)}"
-                     f"（baseline_source: {_np_meta.get('baseline_source', 'v2_initial_x1.5')}）。"
+        lines.append(f"> ⚠️ **性能基线为合成值，非实测 V1**：V2 初始性能 ×{_np_meta.get('factor', 1.2)}"
+                     f"（baseline_source: {_np_meta.get('baseline_source', 'v2_initial_x1.2')}）。"
                      f"本报告所有以 V1 为基准的性能比均基于该合成基线。")
 
     model_name = model.get("name", "-")
