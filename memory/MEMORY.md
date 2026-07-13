@@ -15,3 +15,4 @@
 - [V2-V5全链去阻断](no-block-full-chain-v2-v5.md) — 方案设计中：性能不卡流程(尽力后放行)、精度≤5%仍硬闸门、V3使能分支区分(B用VLLM_PLUGINS=fl不装/A照常装)、V2/V3不达标也发布打qualified标签
 - [回滚误删产出修复](rollback-overflow-fix.md) — 已修复：段1越界回滚因rollback_overflow.py从未实现+fallback无差别rm+断点续跑误判→误删产出；新建脚本+时间戳判据(finished_at>seg1_start才算越界)+去掉危险rm
 - [显存清理统一restart](gpu-cleanup-restart-unify.md) — cleanup_gpu_services改docker restart优先+注入.container_name；容器内无docker.sock无法restart的硬约束+分层清理点全貌
+- [调优服务启动nohup source修复](operator-search-nohup-source-fix.md) — 已修复：operator_search.py性能调优重启服务因nohup直接套source复合命令(DTK平台)退出127静默失败；用bash -c包裹startup_cmd，原nohup后台化设计不变
