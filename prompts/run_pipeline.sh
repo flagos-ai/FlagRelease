@@ -714,12 +714,21 @@ except: pass
         fi
     fi
     # 执行清理
+    # 优先 docker restart（宿主机层直接可用 docker）——比 pkill 更彻底：
+    # privileged 容器里 vllm/sglang 的 multiprocessing worker 常残留僵尸进程占着显存，
+    # 单纯 pkill 未必清干净；docker restart 强制回收容器全部进程与显存。
+    # 仅当 docker restart 失败（如 daemon 异常）时，降级回 pkill 兜底。
     if [ -n "${ctr}" ] && docker inspect --type=container "${ctr}" &>/dev/null; then
         echo ""
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 清理 GPU 资源：停止容器 ${ctr} 内的推理服务..."
-        docker exec "${ctr}" bash -c "pkill -f 'vllm\|sglang\|flagscale' 2>/dev/null; sleep 2" 2>/dev/null && \
-            echo "  ✓ 推理服务已停止，GPU 显存已释放" || \
-            echo "  ⚠ 未发现运行中的推理服务（可能已停止）"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 清理 GPU 资源：重启容器 ${ctr} 以彻底释放显存..."
+        if docker restart "${ctr}" >/dev/null 2>&1; then
+            echo "  ✓ 容器已重启，GPU 显存已完全释放"
+        else
+            echo "  ⚠ docker restart 失败，降级为 pkill 清理推理进程..."
+            docker exec "${ctr}" bash -c "pkill -9 -f 'vllm\|sglang\|flagscale' 2>/dev/null; sleep 2" 2>/dev/null && \
+                echo "  ✓ 推理服务已停止（pkill 兜底）" || \
+                echo "  ⚠ 未发现运行中的推理服务（可能已停止）"
+        fi
     else
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 未找到有效容器，跳过 GPU 服务清理"
     fi

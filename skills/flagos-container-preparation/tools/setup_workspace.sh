@@ -388,6 +388,10 @@ if [ -n "${HOST_WORKSPACE}" ]; then
 fi
 # 写入标记文件供后续脚本读取
 docker exec "${CONTAINER}" bash -c "echo '${MOUNT_MODE}' > /flagos-workspace/.mount_mode"
+# 写入容器名供容器内脚本读取：operator_search.py 等在 pkill 无法释放 GPU 显存时，
+# 需据此触发宿主机 docker restart 兜底（容器内无 docker CLI，只能把容器名传出去用）。
+# 此前该文件从未被写入，导致容器内已有的 docker restart fallback 始终拿不到容器名而失效。
+docker exec "${CONTAINER}" bash -c "echo '${CONTAINER}' > /flagos-workspace/.container_name"
 
 # 7. 写入基础 context 字段（确保段间传递不依赖 Claude 后续写入）
 # 即使 Claude 会话中途断连，容器名等关键信息也已持久化到 context.yaml
