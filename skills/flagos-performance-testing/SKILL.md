@@ -170,7 +170,7 @@ docker exec $CONTAINER cp /flagos-workspace/scripts/config/perf_config.yaml /fla
 ```bash
 # 1. V2 使能 flaggems 后首次可正常启动状态（未被精度调优削减）quick 测一轮
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/benchmark_runner.py --mode quick --output-name v2_initial_performance"
-# 2. ×1.5 合成基线（吞吐×1.5、延迟÷1.5），按 native_performance.json 标准格式落盘
+# 2. ×1.2 合成基线（吞吐×1.2、延迟÷1.2），按 native_performance.json 标准格式落盘
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/synthesize_perf_baseline.py --v2-initial /flagos-workspace/results/v2_initial_performance.json --output /flagos-workspace/results/native_performance.json"
 ```
 

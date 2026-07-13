@@ -5,7 +5,9 @@ metadata:
   type: project
 ---
 
-2026-07(test分支)用户提出的核心流程哲学变更,尚在方案设计阶段,未实施。
+2026-07(test分支)用户提出的核心流程哲学变更。**已实施**(见 [[perf-non-blocking-policy]]):段4/4.5/5 门控**统一**改用 QUALIFIED_CORE=service_ok AND accuracy_ok(性能不阻断);段4 plugin 步骤12性能不达标照常继续步骤13;合成基线 FACTOR 1.5→1.2;operator_search/V4 reduction 调优设 20 轮上限(难调即停)。汇总表段4/段5显示均改用 QUALIFIED_CORE。
+
+**V5 门控修复(2026-07 关键)**:段5 原用 `HAS_DISABLED_OPS=yes` 作门控 → 两个 bug:①V3跑通但全开就达标/从没禁用过算子时 HAS_DISABLED_OPS=no → **漏产 V5**(违反"一定得到V5");②精度崩/服务挂时 HAS_DISABLED_OPS 可能=yes → **误触发 V5**。已改为 QUALIFIED_CORE 门控(run_pipeline.sh 段5 if + else 提示 + 汇总表行)。无禁用算子时 operator_expansion.py:552 走"无需扩展→success"分支,V5=当前最优版本仍照常发 -v5。HAS_DISABLED_OPS 变量保留但降级为参考/日志,不再门控。风险评估:选此方案(改门控复用已测脚本路径)而非"重打tag"方案,因后者涉及 docker tag+Harbor重推等外部不可逆操作、失败面更大。
 
 **核心思路:V2→V5 每一步都不被阻断,竭尽全力跑完整链,各自产出"当前条件下最优镜像"。**
 

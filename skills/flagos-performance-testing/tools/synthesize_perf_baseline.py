@@ -3,19 +3,19 @@
 synthesize_perf_baseline.py — 无 V1 场景的性能基线合成
 
 当 V1 基线性能完全缺失时（分支 B 三选=none 强依赖 flaggems、或 V1 启动/测试失败），
-以 V2 使能 flaggems 后首次可正常启动状态的性能测试结果 ×1.5 合成性能基线。
+以 V2 使能 flaggems 后首次可正常启动状态的性能测试结果 ×1.2 合成性能基线。
 
 设计要点：
 - 输出文件与 benchmark_runner.py 的扁平格式完全一致
   （{tc_name: {concurrency: {metric: value}}, "_meta": {...}}），
   按 native_performance.json 命名落盘 → performance_compare.py /
   operator_optimizer.py init / operator_search.py 全链路零改动即可消费
-- 吞吐类指标（tok/s / throughput）×1.5；延迟类指标（ms：TTFT/TPOT/ITL/latency）÷1.5；
+- 吞吐类指标（tok/s / throughput）×1.2；延迟类指标（ms：TTFT/TPOT/ITL/latency）÷1.2；
   其余字段原样保留
 - _meta 写入 baseline_source / synthetic 标记，generate_report.py 据此在报告中
-  注明"性能基线为合成值（V2 初始 ×1.5），非实测 V1"
-- ×1.5 为全芯片统一标准（用户 2026-07-09 确定），语义=经验推定的 V1/V2全开 性能比，
-  80% 判据下等价于要求调优后性能 ≥ V2 初始的 1.2 倍
+  注明"性能基线为合成值（V2 初始 ×1.2），非实测 V1"
+- ×1.2 为全芯片统一标准（用户 2026-07 从 1.5 下调，降低性能门槛），语义=经验推定的 V1/V2全开 性能比，
+  80% 判据下等价于要求调优后性能 ≥ V2 初始的 0.96 倍
 
 Usage:
     python synthesize_perf_baseline.py \
@@ -29,7 +29,7 @@ import os
 import sys
 from datetime import datetime
 
-FACTOR = 1.5  # 全芯片统一标准
+FACTOR = 1.2  # 全芯片统一标准（用户 2026-07 从 1.5 下调至 1.2，降低性能门槛）
 
 # 指标方向判定（键名子串，大小写不敏感）
 _THROUGHPUT_HINTS = ("throughput", "tok/s")
@@ -79,15 +79,16 @@ def synthesize(v2_initial_path: str, output_path: str) -> dict:
         print("ERROR: V2 初始结果中没有任何有效数据点，无法合成基线", file=sys.stderr)
         sys.exit(1)
 
+    _fs = f"{FACTOR:g}"  # 倍数字符串（1.2 → "1.2"），随 FACTOR 派生，改倍数时无需多处同步
     out["_meta"] = {
-        "说明": "合成性能基线（非实测 V1）：V2 初始性能 ×1.5",
+        "说明": f"合成性能基线（非实测 V1）：V2 初始性能 ×{_fs}",
         "格式": "{test_case: {concurrency: {metric: value}}}",
         "关键指标": "Output token throughput (tok/s) 和 Total token throughput (tok/s)",
-        "baseline_source": "v2_initial_x1.5",
+        "baseline_source": f"v2_initial_x{_fs}",
         "synthetic": True,
         "factor": FACTOR,
         "source_file": os.path.abspath(v2_initial_path),
-        "scaling": "吞吐类 ×1.5，延迟类 ÷1.5，其余原样",
+        "scaling": f"吞吐类 ×{_fs}，延迟类 ÷{_fs}，其余原样",
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -100,12 +101,12 @@ def synthesize(v2_initial_path: str, output_path: str) -> dict:
         "output": output_path,
         "scaled_points": scaled_points,
         "factor": FACTOR,
-        "baseline_source": "v2_initial_x1.5",
+        "baseline_source": f"v2_initial_x{FACTOR:g}",
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="无 V1 场景：以 V2 初始性能 ×1.5 合成性能基线")
+    parser = argparse.ArgumentParser(description="无 V1 场景：以 V2 初始性能 ×1.2 合成性能基线")
     parser.add_argument("--v2-initial", required=True,
                         help="V2 初始性能测试结果 JSON（benchmark_runner 输出）")
     parser.add_argument("--output", required=True,
