@@ -101,7 +101,7 @@ service:
   initial_operator_list: [...]
   max_model_len: <服务实际的 max_model_len>
 runtime:
-  framework: <vllm|sglang>
+  framework: vllm  # 固定值，仅支持 vllm
   gpu_count: <GPU 数量>
   tp_size: <tensor-parallel-size>
   tp_reason: <TP 推算原因>
@@ -123,7 +123,7 @@ sleep 5
 
 备选方式（仅当不能重启容器时）：
 ```bash
-docker exec $CONTAINER bash -c "pkill -f 'vllm\|sglang\|flagscale' 2>/dev/null; sleep 3"
+docker exec $CONTAINER bash -c "pkill -f 'vllm\|flagscale' 2>/dev/null; sleep 3"
 ```
 
 ## 步骤 2 — 切换 FlagGems 状态（按 env_type 分路径）

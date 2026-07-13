@@ -167,9 +167,9 @@ def restart_and_wait(service_cmd: str, wait_script: str, port: int = 8000,
                      model_name: str = "", timeout: int = 300,
                      max_timeout: int = 1800) -> bool:
     """重启服务并等待就绪，返回是否成功"""
-    # 用 pkill -9 强杀所有 vllm/sglang 及其 worker 进程
+    # 用 pkill -9 强杀所有 vllm 及其 worker 进程
     subprocess.run(
-        "pkill -9 -f 'vllm|sglang|multiprocessing.spawn' 2>/dev/null; sleep 3",
+        "pkill -9 -f 'vllm|multiprocessing.spawn' 2>/dev/null; sleep 3",
         shell=True, capture_output=True
     )
     # 等待端口释放
@@ -293,7 +293,9 @@ def run_reduction(
     阶段2（精度回溯）：用性能最优组合测精度，达标即产出 V4；不达标则回退次优组合，
       依次进行；最坏回退到 V3 基线（improvements[0]），V4 等价 V3 仍成立。
 
-    注：gain_threshold/max_rounds 入参保留兼容 CLI，已不用于提前终止。
+    注：gain_threshold 入参保留兼容 CLI，不用于提前终止。
+    max_rounds：阶段1性能探测的轮次上限（0=不限，最多算子数-1）。达上限即停止探测，
+      用已收集的 improvements 进入阶段2选相对最优组合作 V4（性能不看重、难调即停的体现）。
 
     硬约束：至少保留 1 个算子（plugin 也不例外）。
     """
@@ -371,6 +373,12 @@ def run_reduction(
     base_enabled = [o for o in probe_order if o not in committed_removed]
 
     while probe_idx < len(probe_order) and len(base_enabled) > min_ops:
+        # 探测轮次上限（max_rounds>0）：达上限即停止探测，用已收集的 improvements
+        # 进阶段2选相对最优组合作 V4。round_num 含历史累计（断点续跑安全）。
+        if max_rounds > 0 and round_num >= max_rounds:
+            print(f"\n[阶段1] 已达探测轮次上限 max_rounds={max_rounds}（已探 {round_num} 轮），"
+                  f"停止探测，用当前 {len(improvements)} 个组合进入阶段2选最优")
+            break
         op = probe_order[probe_idx]
         probe_idx += 1
         if op in committed_removed or op in essential_ops:
@@ -421,7 +429,7 @@ def run_reduction(
         state.setdefault("probed_rounds", []).append(probe_rec)
         save_json(state, state_path)
 
-    subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null", shell=True, capture_output=True)
+    subprocess.run("pkill -f 'vllm' 2>/dev/null", shell=True, capture_output=True)
     time.sleep(5)
 
     # ==================== 阶段2：精度回溯（按性能从高到低）====================
@@ -452,7 +460,7 @@ def run_reduction(
             os.path.join(output_dir, f"gpqa_v4_guard_{len(cand['removed'])}ops.json"),
             accuracy_baseline, accuracy_guard
         )
-        subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null", shell=True, capture_output=True)
+        subprocess.run("pkill -f 'vllm' 2>/dev/null", shell=True, capture_output=True)
         time.sleep(5)
         if guard_ok:
             print(f"    ✓ 精度达标 (score={gscore:.1f}%) → 选定该组合为 V4")
@@ -473,7 +481,7 @@ def run_reduction(
     print(f"\n  ✓ 最终选定：减 {len(reduced_ops)} 个算子，剩 {len(current_ops)} 个，综合吞吐 {best_composite:.1f} tok/s")
 
     # 停止服务
-    subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null", shell=True, capture_output=True)
+    subprocess.run("pkill -f 'vllm' 2>/dev/null", shell=True, capture_output=True)
     time.sleep(5)
 
     # 最终配置固化 + 收尾评测
@@ -516,7 +524,7 @@ def run_reduction(
         else:
             print("  ⚠ 缺精度基线（accuracy_baseline<=0），无法进行 V4 精度终检 "
                   "→ 精度状态标记为未验证，编排层需以 V1/NV 基线兜底后重判")
-    subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null", shell=True, capture_output=True)
+    subprocess.run("pkill -f 'vllm' 2>/dev/null", shell=True, capture_output=True)
 
     # V4 追求性能绝对值最大化，达标基准是"超越 V3"，不与 V1 比较（V1 仅作报告参考）
     beats_v3 = final_composite >= v3_composite
@@ -624,7 +632,7 @@ def main():
                              "应始终传入；0=无基线，精度状态标记为未验证（accuracy_verified=false），"
                              "编排层须以 V1/NV 基线兜底后重判，不得直接判 V4 达标")
     parser.add_argument("--max-rounds", type=int, default=0,
-                        help="最大精简轮数 (0=不限，最多算子数-1)")
+                        help="阶段1性能探测轮次上限 (0=不限，最多算子数-1)；达上限即停，用已收集组合选最优作 V4")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--model-name", default="")
     parser.add_argument("--max-timeout", type=int, default=1800)

@@ -59,7 +59,6 @@ inspection:
   core_packages:
     torch: "<version>"
     vllm: "<version>"
-    sglang: "<version>"
   flag_packages:
     flaggems: "<version>"
     flagscale: "<version>"
@@ -93,7 +92,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 此命令一次性完成：
 - 执行模式检测（host / container）
-- 核心组件版本检查（torch, vllm, sglang）
+- 核心组件版本检查（torch, vllm）
 - flag 生态组件版本（flaggems, flagscale, flagcx, vllm_plugin）
 - FlagGems 运行时能力探测（capabilities, enable_signature 等）
 - FlagGems 多维度集成方式探测（环境变量/代码扫描/入口点/启动脚本）
@@ -179,7 +178,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 # 完成条件
 
 - 执行模式已检测（host / container）
-- 核心组件（torch、vllm/sglang）已确认安装
+- 核心组件（torch、vllm）已确认安装
 - flag 组件版本已记录
 - FlagGems 集成方式已探测（integration_type）
 - FlagGems 启用/关闭方法已推导（enable_method / disable_method）
@@ -195,7 +194,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 | 问题 | 解决方案 |
 |------|----------|
 | torch 未安装 | 镜像可能有问题，建议更换镜像或手动安装 |
-| vllm/sglang 都未安装 | 确认镜像是否为推理镜像 |
+| vllm 未安装 | 确认镜像是否为推理镜像 |
 | FlagGems 未安装 | 确认镜像是否包含 FlagGems，或手动安装 |
 | inspect_env.py 不存在 | 运行 `setup_workspace.sh` 重新部署 |
 | capabilities 为空列表 | FlagGems 版本过旧，算子替换降级到源码修改模式 |

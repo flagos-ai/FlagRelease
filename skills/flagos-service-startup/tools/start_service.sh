@@ -1,5 +1,5 @@
 #!/bin/bash
-# start_service.sh — 从 context.yaml 读取配置并启动 vllm/sglang 服务
+# start_service.sh — 从 context.yaml 读取配置并启动 vllm 服务
 #
 # 供 operator_search.py 的 --service-startup-cmd 调用。
 # 在容器内执行，读取 /flagos-workspace/shared/context.yaml 获取启动参数。
@@ -64,7 +64,7 @@ port = ctx.get('service', {}).get('port', 8000)
 tp_size = ctx.get('runtime', {}).get('tp_size', 0)
 gpu_count = ctx.get('runtime', {}).get('gpu_count', ctx.get('gpu', {}).get('count', 0))
 max_model_len = ctx.get('service', {}).get('max_model_len', 32768)
-framework = ctx.get('runtime', {}).get('framework', 'vllm')
+framework = ctx.get('runtime', {}).get('framework') or 'vllm'  # 仅支持 vllm；空值/缺失均兜底为 vllm
 cuda_visible = ctx.get('runtime', {}).get('cuda_visible_devices', '')
 visible_devices_env = ctx.get('gpu', {}).get('visible_devices_env', 'CUDA_VISIBLE_DEVICES')
 thinking = ctx.get('runtime', {}).get('thinking_model', False)
@@ -105,7 +105,7 @@ if [ -z "$MODEL_PATH" ]; then
 fi
 
 # 强制清理残留进程和编译缓存（每次启动前无条件执行）
-pkill -9 -f 'vllm.entrypoints|sglang.launch_server|vllm serve|vllm.serve' 2>/dev/null || true
+pkill -9 -f 'vllm.entrypoints|vllm serve|vllm.serve' 2>/dev/null || true
 for _i in $(seq 1 15); do
     if ! ss -tlnp 2>/dev/null | grep -qE ":${PORT}\b"; then break; fi
     sleep 1
@@ -222,35 +222,28 @@ if [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
     rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/ 2>/dev/null || true
 fi
 
-# 构建启动命令
-if [ "$FRAMEWORK" = "vllm" ]; then
-    CMD="vllm serve '${MODEL_PATH}' \
-        --host 0.0.0.0 \
-        --port ${PORT} \
-        --served-model-name '${MODEL_NAME}' \
-        --tensor-parallel-size ${TP_SIZE} \
-        --max-model-len ${MAX_MODEL_LEN} \
-        --trust-remote-code"
+# 构建启动命令（仅支持 vllm）
+if [ "$FRAMEWORK" != "vllm" ]; then
+    echo "ERROR: 仅支持 vllm 框架，但 runtime.framework='${FRAMEWORK}'。请检查 context.yaml。" >&2
+    exit 1
+fi
+CMD="vllm serve '${MODEL_PATH}' \
+    --host 0.0.0.0 \
+    --port ${PORT} \
+    --served-model-name '${MODEL_NAME}' \
+    --tensor-parallel-size ${TP_SIZE} \
+    --max-model-len ${MAX_MODEL_LEN} \
+    --trust-remote-code"
 
-    # Thinking model 添加 reasoning parser
-    if [ "$THINKING" = "true" ]; then
-        # 根据模型名推断 parser
-        MODEL_LOWER=$(echo "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')
-        if echo "$MODEL_LOWER" | grep -qE 'qwen3|qwq'; then
-            CMD="$CMD --reasoning-parser qwen3"
-        elif echo "$MODEL_LOWER" | grep -qE 'deepseek'; then
-            CMD="$CMD --reasoning-parser deepseek_r1"
-        fi
+# Thinking model 添加 reasoning parser
+if [ "$THINKING" = "true" ]; then
+    # 根据模型名推断 parser
+    MODEL_LOWER=$(echo "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')
+    if echo "$MODEL_LOWER" | grep -qE 'qwen3|qwq'; then
+        CMD="$CMD --reasoning-parser qwen3"
+    elif echo "$MODEL_LOWER" | grep -qE 'deepseek'; then
+        CMD="$CMD --reasoning-parser deepseek_r1"
     fi
-else
-    # sglang
-    CMD="python3 -m sglang.launch_server \
-        --model-path '${MODEL_PATH}' \
-        --host 0.0.0.0 \
-        --port ${PORT} \
-        --tp ${TP_SIZE} \
-        --context-length ${MAX_MODEL_LEN} \
-        --trust-remote-code"
 fi
 
 echo "[start_service.sh] mode=${MODE}, framework=${FRAMEWORK}, port=${PORT}, tp=${TP_SIZE}"

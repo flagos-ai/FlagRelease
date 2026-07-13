@@ -114,16 +114,13 @@ def read_context(workspace: str) -> Optional[dict]:
 
 def check_processes() -> Dict[str, Any]:
     """检查关键进程是否在运行。"""
-    result = {"vllm": False, "sglang": False, "eval": False, "benchmark": False, "details": []}
+    result = {"vllm": False, "eval": False, "benchmark": False, "details": []}
     try:
         ps = subprocess.run(["ps", "-eo", "pid,comm,args"], capture_output=True, text=True, timeout=5)
         for line in ps.stdout.splitlines():
             lower = line.lower()
             if "vllm" in lower and "serve" in lower:
                 result["vllm"] = True
-                result["details"].append(line.strip())
-            elif "sglang" in lower:
-                result["sglang"] = True
                 result["details"].append(line.strip())
             elif any(k in lower for k in ["fast_gpqa", "eval_monitor", "eval_aime", "eval_erqa"]):
                 result["eval"] = True
@@ -244,7 +241,7 @@ def infer_root_cause(
         action = checkpoint.get("action", "")
         if any(k in action for k in ["gpqa", "eval", "benchmark", "perf"]):
             service_expected = True
-    if service_expected and not service["running"] and not processes["vllm"] and not processes["sglang"]:
+    if service_expected and not service["running"] and not processes["vllm"]:
         causes.append("推理服务未运行（进程不存在，端口无监听）")
         suggestions.append("重启推理服务")
 
@@ -343,7 +340,7 @@ def format_human(diag: dict) -> str:
         lines.append(f"  服务: 未运行 (端口 {svc.get('port', '?')} 无监听)")
 
     procs = diag.get("process_status", {})
-    running = [k for k in ["vllm", "sglang", "eval", "benchmark"] if procs.get(k)]
+    running = [k for k in ["vllm", "eval", "benchmark"] if procs.get(k)]
     if running:
         lines.append(f"  活跃进程: {', '.join(running)}")
     lines.append("")

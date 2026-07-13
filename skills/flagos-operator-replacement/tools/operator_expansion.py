@@ -147,9 +147,9 @@ def restart_and_wait(service_cmd: str, wait_script: str, port: int = 8000,
     pkill -9 强杀（含 worker 的 multiprocessing.spawn）+ 显式等端口释放，
     避免旧进程未死透/端口未释放导致新服务启动失败。
     """
-    # 用 pkill -9 强杀所有 vllm/sglang 及其 worker 进程
+    # 用 pkill -9 强杀所有 vllm 及其 worker 进程
     subprocess.run(
-        "pkill -9 -f 'vllm|sglang|multiprocessing.spawn' 2>/dev/null; sleep 3",
+        "pkill -9 -f 'vllm|multiprocessing.spawn' 2>/dev/null; sleep 3",
         shell=True, capture_output=True
     )
     # 等待端口释放
@@ -409,7 +409,7 @@ def run_expansion(
         save_json(state, state_path)
 
     # 停止服务，释放 GPU
-    subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null", shell=True, capture_output=True)
+    subprocess.run("pkill -f 'vllm' 2>/dev/null", shell=True, capture_output=True)
     time.sleep(5)
 
     # 汇总结果
@@ -457,7 +457,7 @@ def run_expansion(
         print(f"  ⚠ 最终服务启动失败，跳过评测")
 
     # 停止服务
-    subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null", shell=True, capture_output=True)
+    subprocess.run("pkill -f 'vllm' 2>/dev/null", shell=True, capture_output=True)
 
     # 标记完成
     state["completed"] = True

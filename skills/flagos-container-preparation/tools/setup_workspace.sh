@@ -134,9 +134,8 @@ if [ "${HAS_HISTORY}" = "1" ]; then
         rm -f /workspace/gpqa_result.json
         rm -f /flagos-workspace/scripts/gpqa_result.json
 
-        # 停止可能残留的 vllm/sglang 服务进程
+        # 停止可能残留的 vllm 服务进程
         pkill -f 'vllm.entrypoints' 2>/dev/null || true
-        pkill -f 'sglang' 2>/dev/null || true
     "
     # 重置 context.yaml：从项目模板复制，确保与模板字段同步
     docker cp "${PROJECT_ROOT}/shared/context.template.yaml" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
@@ -225,7 +224,7 @@ SCRIPT_MAP=(
     "skills/flagos-performance-testing/tools/benchmark_runner.py:scripts/benchmark_runner.py"
     # 性能对比
     "skills/flagos-performance-testing/tools/performance_compare.py:scripts/performance_compare.py"
-    # 无 V1 场景性能基线合成（V2 初始 ×1.5）
+    # 无 V1 场景性能基线合成（V2 初始 ×1.2）
     "skills/flagos-performance-testing/tools/synthesize_perf_baseline.py:scripts/synthesize_perf_baseline.py"
     # 算子优化
     "skills/flagos-operator-replacement/tools/operator_optimizer.py:scripts/operator_optimizer.py"

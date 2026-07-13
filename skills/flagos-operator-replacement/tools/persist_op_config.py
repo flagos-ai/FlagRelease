@@ -502,7 +502,7 @@ def verify_config(expected_count):
 
     # 停止服务
     print("  停止服务...")
-    subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null",
+    subprocess.run("pkill -f 'vllm' 2>/dev/null",
                     shell=True, capture_output=True, timeout=10)
     time.sleep(5)
 
@@ -544,7 +544,7 @@ def verify_config(expected_count):
         verified, count = False, actual_count
 
     # 停止服务释放 GPU
-    subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null",
+    subprocess.run("pkill -f 'vllm' 2>/dev/null",
                     shell=True, capture_output=True, timeout=10)
     return verified, count
 

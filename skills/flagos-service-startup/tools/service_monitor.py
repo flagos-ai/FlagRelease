@@ -24,7 +24,7 @@ FATAL_PATTERNS = [
     (re.compile(r"(?:CUDA\s+)?out\s+of\s+memory|torch\.cuda\.OutOfMemoryError|\bOOM\b", re.I), "oom", "CUDA out of memory"),
     (re.compile(r"CUDA\s*(?:error|Error|ERROR)\s*:|CUDAError|no kernel image is available", re.I), "cuda_error", "CUDA 错误"),
     (re.compile(r"Segmentation fault|SIGSEGV|SIGKILL", re.I), "segfault", "段错误 (Segmentation fault)"),
-    (re.compile(r"Killed\s+.*(?:vllm|sglang)|killed by signal", re.I), "killed", "进程被杀"),
+    (re.compile(r"Killed\s+.*(?:vllm)|killed by signal", re.I), "killed", "进程被杀"),
     (re.compile(r"Address already in use", re.I), "port_conflict", "端口被占用"),
 ]
 
@@ -40,7 +40,7 @@ class ServiceMonitor:
         self,
         log_path: Optional[str] = None,
         check_interval: int = 10,
-        process_patterns: tuple = ("vllm", "sglang", "flagscale"),
+        process_patterns: tuple = ("vllm", "flagscale"),
         grace_period: int = 30,
     ):
         self._log_path = log_path

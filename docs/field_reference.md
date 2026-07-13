@@ -41,7 +41,7 @@ Skill 间共享状态，每步读写各自负责的字段。YAML 文件内已有
 | `performance` | `min_ratio` | V2/V1 最小吞吐比 (%)，达标判定依据 |
 | | `target_ratio` | 达标阈值 (%)，默认 80.0 |
 | | `pass` | 是否达标（min_ratio >= target_ratio） |
-| `runtime` | `framework` | 推理框架: vllm / sglang |
+| `runtime` | `framework` | 推理框架: vllm（固定，仅支持 vllm）|
 | | `tp_size` | 张量并行度 |
 | | `flaggems_enabled` | FlagGems 当前是否启用 |
 | | `thinking_model` | 是否为 thinking 模型 |
