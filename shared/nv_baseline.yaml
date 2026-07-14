@@ -170,3 +170,304 @@ models:
       gpqa_diamond: 7.0
     source: "NV 实测"
     updated_at: "2026-07-09"
+
+  # ---- 批次补充 2026-07-09（NV 实测，源数据为 0-1 小数，已 ×100 转百分比）----
+  Qwen3-4B-Instruct-2507:
+    aliases:
+      - Qwen/Qwen3-4B-Instruct-2507
+      - qwen3-4b-instruct-2507
+      - qwen3_4b_instruct_2507
+    metrics:
+      gpqa_diamond: 47.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Qwen3-4B-Thinking-2507:
+    aliases:
+      - Qwen/Qwen3-4B-Thinking-2507
+      - qwen3-4b-thinking-2507
+      - qwen3_4b_thinking_2507
+    metrics:
+      gpqa_diamond: 68.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Phi-3-vision-128k-instruct:
+    aliases:
+      - microsoft/Phi-3-vision-128k-instruct
+      - phi-3-vision-128k-instruct
+      - phi_3_vision_128k_instruct
+    metrics:
+      gpqa_diamond: 25.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  NuminaMath-7B-TIR:
+    aliases:
+      - AI-MO/NuminaMath-7B-TIR
+      - numinamath-7b-tir
+      - numinamath_7b_tir
+    metrics:
+      gpqa_diamond: 17.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Marco-o1:
+    aliases:
+      - AIDC-AI/Marco-o1
+      - marco-o1
+      - marco_o1
+    metrics:
+      gpqa_diamond: 32.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  BioMistral-7B:
+    aliases:
+      - BioMistral/BioMistral-7B
+      - biomistral-7b
+      - biomistral_7b
+    metrics:
+      gpqa_diamond: 11.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  DeepSeek-R1-Distill-Qwen-7B:
+    aliases:
+      - deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+      - deepseek-r1-distill-qwen-7b
+      - deepseek_r1_distill_qwen_7b
+    metrics:
+      gpqa_diamond: 30.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  codegemma-7b-it:
+    aliases:
+      - google/codegemma-7b-it
+      - codegemma-7b-it
+      - codegemma_7b_it
+    metrics:
+      gpqa_diamond: 9.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  gemma-1.1-7b-it:
+    aliases:
+      - google/gemma-1.1-7b-it
+      - gemma-1.1-7b-it
+      - gemma_1.1_7b_it
+    metrics:
+      gpqa_diamond: 37.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  gemma-7b-it:
+    aliases:
+      - google/gemma-7b-it
+      - gemma-7b-it
+      - gemma_7b_it
+    metrics:
+      gpqa_diamond: 18.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Nanbeige4.1-3B:
+    aliases:
+      - Nanbeige/Nanbeige4.1-3B
+      - nanbeige4.1-3b
+      - nanbeige4_1_3b
+    metrics:
+      gpqa_diamond: 81.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Phi-3-mini-128k-instruct:
+    aliases:
+      - microsoft/Phi-3-mini-128k-instruct
+      - phi-3-mini-128k-instruct
+      - phi_3_mini_128k_instruct
+    metrics:
+      gpqa_diamond: 33.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Phi-3-mini-4k-instruct:
+    aliases:
+      - microsoft/Phi-3-mini-4k-instruct
+      - phi-3-mini-4k-instruct
+      - phi_3_mini_4k_instruct
+    metrics:
+      gpqa_diamond: 30.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Phi-3.5-mini-instruct:
+    aliases:
+      - microsoft/Phi-3.5-mini-instruct
+      - phi-3.5-mini-instruct
+      - phi_3.5_mini_instruct
+    metrics:
+      gpqa_diamond: 26.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Phi-4-mini-instruct:
+    aliases:
+      - microsoft/Phi-4-mini-instruct
+      - phi-4-mini-instruct
+      - phi_4_mini_instruct
+    metrics:
+      gpqa_diamond: 38.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  NuExtract-1.5:
+    aliases:
+      - numind/NuExtract-1.5
+      - nuextract-1.5
+      - nuextract_1.5
+    metrics:
+      gpqa_diamond: 24.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  DASD-4B-Thinking:
+    aliases:
+      - Alibaba-Apsara/DASD-4B-Thinking
+      - dasd-4b-thinking
+      - dasd_4b_thinking
+    metrics:
+      gpqa_diamond: 44.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Jan-v1-4B:
+    aliases:
+      - janhq/Jan-v1-4B
+      - jan-v1-4b
+      - jan_v1_4b
+    metrics:
+      gpqa_diamond: 64.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  LocoOperator-4B:
+    aliases:
+      - LocoreMind/LocoOperator-4B
+      - locooperator-4b
+      - locooperator_4b
+    metrics:
+      gpqa_diamond: 52.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  MiniCPM3-4B:
+    aliases:
+      - openbmb/MiniCPM3-4B
+      - minicpm3-4b
+      - minicpm3_4b
+    metrics:
+      gpqa_diamond: 35.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  reader-lm-1.5b:
+    aliases:
+      - jinaai/reader-lm-1.5b
+      - reader-lm-1.5b
+      - reader_lm_1.5b
+    metrics:
+      gpqa_diamond: 8.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  ReaderLM-v2:
+    aliases:
+      - jinaai/ReaderLM-v2
+      - readerlm-v2
+      - readerlm_v2
+    metrics:
+      gpqa_diamond: 21.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Arch-Router-1.5B:
+    aliases:
+      - katanemo/Arch-Router-1.5B
+      - arch-router-1.5b
+      - arch_router_1.5b
+    metrics:
+      gpqa_diamond: 23.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  VibeThinker-1.5B:
+    aliases:
+      - WeiboAI/VibeThinker-1.5B
+      - vibethinker-1.5b
+      - vibethinker_1.5b
+    metrics:
+      gpqa_diamond: 47.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  SmolLM2-1.7B-Instruct:
+    aliases:
+      - HuggingFaceTB/SmolLM2-1.7B-Instruct
+      - smollm2-1.7b-instruct
+      - smollm2_1.7b_instruct
+    metrics:
+      gpqa_diamond: 24.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  MiniCPM-2B-sft-fp32:
+    aliases:
+      - openbmb/MiniCPM-2B-sft-fp32
+      - minicpm-2b-sft-fp32
+      - minicpm_2b_sft_fp32
+    metrics:
+      gpqa_diamond: 23.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  LFM2-2.6B-Exp:
+    aliases:
+      - LiquidAI/LFM2-2.6B-Exp
+      - lfm2-2.6b-exp
+      - lfm2_2.6b_exp
+    metrics:
+      gpqa_diamond: 44.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  SmolLM3-3B:
+    aliases:
+      - HuggingFaceTB/SmolLM3-3B
+      - smollm3-3b
+      - smollm3_3b
+    metrics:
+      gpqa_diamond: 6.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  granite-4.0-micro:
+    aliases:
+      - ibm-granite/granite-4.0-micro
+      - granite-4.0-micro
+      - granite_4.0_micro
+    metrics:
+      gpqa_diamond: 30.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Schematron-3B:
+    aliases:
+      - inference-net/Schematron-3B
+      - schematron-3b
+      - schematron_3b
+    metrics:
+      gpqa_diamond: 22.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
