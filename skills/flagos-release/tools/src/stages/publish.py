@@ -1259,7 +1259,7 @@ The model weights are derived from {source} and are open\\u2011sourced under the
         container_upload_dir = self._get_container_upload_dir()
         print(f"  容器内上传目录: {container_upload_dir}")
         print(f"  目标仓库: {model_id}")
-        print(f"  可见性: {'私有' if publish_config.private else '公开'}")
+        print(f"  可见性: 私有（强制）")
 
         if self._publish_to_modelscope_cli(readme_path):
             return True
@@ -1287,8 +1287,9 @@ The model weights are derived from {source} and are open\\u2011sourced under the
         self._docker_cp_readme_to_container(readme_path, container_upload_dir)
 
         token = publish_config.modelscope_token or ""
-        visibility = 1 if publish_config.private else 3
-        private_label = '私有' if publish_config.private else '公开'
+        # 强制私有发布，不留公开口子（ModelScope visibility=1 私有；恒私有，不再随 config 变）
+        visibility = 1
+        private_label = '私有'
 
         sdk_script = f"""
 import os, sys
@@ -1401,7 +1402,8 @@ print(f'已发布到 ModelScope: {{model_id}}')
         print(f"  目标仓库: {model_id}")
         print(f"  容器内上传目录: {container_upload_dir}")
 
-        visibility = "private" if publish_config.private else "public"
+        # 强制私有发布，不留公开口子
+        visibility = "private"
         create_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}modelscope create {model_id} --visibility {visibility}"
         print(f"  创建/确认仓库: {model_id} ({visibility})")
         result, stdout, stderr = self.run_command(
@@ -1450,7 +1452,7 @@ print(f'已发布到 ModelScope: {{model_id}}')
         container_upload_dir = self._get_container_upload_dir()
         print(f"  容器内上传目录: {container_upload_dir}")
         print(f"  目标仓库: {repo_id}")
-        print(f"  可见性: {'私有' if publish_config.private else '公开'}")
+        print(f"  可见性: 私有（强制）")
 
         # 如果用户已指定 endpoint，只用该 endpoint
         user_endpoint = os.environ.get("HF_ENDPOINT", "")
@@ -1492,7 +1494,8 @@ print(f'已发布到 ModelScope: {{model_id}}')
         self._docker_cp_readme_to_container(readme_path, container_upload_dir)
 
         token = publish_config.huggingface_token or ""
-        private_flag = "True" if publish_config.private else "False"
+        # 强制私有发布，不留公开口子
+        private_flag = "True"
         hf_endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
 
         sdk_script = f"""
@@ -1566,7 +1569,8 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
             if not success:
                 return False
 
-        private_flag = "--private " if publish_config.private else ""
+        # 强制私有发布，不留公开口子
+        private_flag = "--private "
         upload_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}{endpoint_env}huggingface-cli upload {private_flag}{repo_id} {container_upload_dir}".strip()
 
         success = False

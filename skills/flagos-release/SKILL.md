@@ -153,8 +153,8 @@ qualified 状态记录到报告中:
 | B1 | 镜像打 tag（自动生成标准命名） | 可配置跳过 |
 | B2 | 推送到 Harbor（流式输出进度） | 可配置跳过 |
 | B3 | 生成 README（含发布可见性标记 + 评测结果） | 可配置跳过 |
-| B4 | 发布到 ModelScope（SDK + CLI 降级，`private` 由步骤 0 决定） | 可配置跳过 |
-| B5 | 发布到 HuggingFace（SDK + CLI 降级，`private` 由步骤 0 决定） | 可配置跳过 |
+| B4 | 发布到 ModelScope（SDK + CLI 降级，强制私有，不留公开口子） | 可配置跳过 |
+| B5 | 发布到 HuggingFace（SDK + CLI 降级，强制私有，不留公开口子） | 可配置跳过 |
 
 ---
 

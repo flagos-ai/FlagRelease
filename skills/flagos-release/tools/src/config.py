@@ -54,7 +54,8 @@ class PublishConfig:
     weights_dir: str = ""
     # 自动读取评测结果目录（步骤4/5产出），填入 README
     results_dir: str = ""
-    # 仓库可见性
+    # 仓库可见性：恒为私有。发布点(publish.py)已硬编码私有，不再读此字段决定可见性，
+    # 保留仅为向后兼容。禁止改 False 或据此恢复公开发布分支。
     private: bool = True
     # 已有的 Harbor 镜像地址（跳过 commit/tag/push）
     existing_harbor_image: str = ""
@@ -220,7 +221,7 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     # ---- publish ----
     config.publish.tag_image = True
     config.publish.push_harbor = True
-    # 统一私有发布，达标与否在总结报告中注明
+    # 统一私有发布（发布点已硬编码私有，不留公开口子），达标与否在总结报告中注明
     workflow = ctx.get('workflow', {})
     config.publish.private = True
     config.config_persisted = workflow.get('config_persisted', False)
