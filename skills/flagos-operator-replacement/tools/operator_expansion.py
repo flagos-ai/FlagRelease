@@ -140,7 +140,7 @@ def get_v1_score(v1_result_path: str) -> Optional[float]:
 
 def restart_and_wait(service_cmd: str, wait_script: str, port: int = 8000,
                      model_name: str = "", timeout: int = 300,
-                     max_timeout: int = 1800) -> bool:
+                     max_timeout: int = 5760) -> bool:
     """重启容器并等待服务就绪，返回是否成功。
 
     杀进程/等端口逻辑与 operator_reduction.restart_and_wait 对齐：
