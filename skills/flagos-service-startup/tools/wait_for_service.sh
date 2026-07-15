@@ -24,7 +24,7 @@ PORT=8000
 HOST="127.0.0.1"
 MODEL_NAME=""
 TIMEOUT=120          # 无活动超时（秒），不传 --log-path 时作为绝对超时
-MAX_TIMEOUT=1800     # 绝对上限（秒）
+MAX_TIMEOUT=5760     # 绝对上限（秒，1.6h；部分模型服务启动需 1.5h+）
 LOG_PATH=""
 MODE="default"       # default / native / flagos
 

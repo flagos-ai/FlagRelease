@@ -165,7 +165,7 @@ def composite_throughput(out_tp: float, total_tp: float) -> float:
 
 def restart_and_wait(service_cmd: str, wait_script: str, port: int = 8000,
                      model_name: str = "", timeout: int = 300,
-                     max_timeout: int = 1800) -> bool:
+                     max_timeout: int = 5760) -> bool:
     """重启服务并等待就绪，返回是否成功"""
     # 用 pkill -9 强杀所有 vllm 及其 worker 进程
     subprocess.run(
