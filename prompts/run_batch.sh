@@ -271,7 +271,7 @@ fi
 
 # ========== 自动汇总报告 ==========
 SUMMARIZE_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tools/batch_summarize/summarize.sh"
-REPORT_FILE="/data/flagos-workspace/batch_report_${BATCH_TIMESTAMP}.md"
+REPORT_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/batch_report_${BATCH_TIMESTAMP}.md"
 
 echo ""
 echo "════════════════════════════════════════"
