@@ -17,3 +17,4 @@
 - [显存清理统一restart](gpu-cleanup-restart-unify.md) — cleanup_gpu_services改docker restart优先+注入.container_name；容器内无docker.sock无法restart的硬约束+分层清理点全貌
 - [调优服务启动nohup source修复](operator-search-nohup-source-fix.md) — 已修复：operator_search.py性能调优重启服务因nohup直接套source复合命令(DTK平台)退出127静默失败；用bash -c包裹startup_cmd，原nohup后台化设计不变
 - [只支持vllm移除sglang](vllm-only-no-sglang.md) — 已实施：runtime.framework空串致V1三选落sglang分支(循环依赖)；固定framework=vllm+全仓移除sglang逻辑(进程清理/日志正则/检测/启动分支)
+- [V1三选监控错文件](v1-baseline-selector-monitors-wrong-log.md) — 已修+真机验证：①监控错文件(--log-file/--from-start) ②wait_for_service:196内层双引号致python NameError走兜底。两bug叠加致V1恒判none
