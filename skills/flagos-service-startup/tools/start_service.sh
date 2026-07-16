@@ -20,6 +20,9 @@ MODE=""
 # 取值: "" (禁用所有 plugin) | "fl" | 厂商插件名(如 metax) | 逗号分隔多值
 VLLM_PLUGINS_OVERRIDE_SET=0
 VLLM_PLUGINS_OVERRIDE=""
+# 显式指定日志文件（调用方需要监控与写入落到同一文件时使用，如 baseline_selector 三选各 variant 独立日志）
+# 不传时回退到默认 startup_${MODE}.log，保持所有现存调用行为不变。
+LOG_FILE_OVERRIDE=""
 
 # 解析参数（支持 --mode flagos / --mode=flagos / 裸值）
 while [[ $# -gt 0 ]]; do
@@ -28,6 +31,8 @@ while [[ $# -gt 0 ]]; do
         --mode)   MODE="${2:-}"; shift; shift 2>/dev/null || true ;;
         --vllm-plugins=*) VLLM_PLUGINS_OVERRIDE="${1#--vllm-plugins=}"; VLLM_PLUGINS_OVERRIDE_SET=1; shift ;;
         --vllm-plugins)   VLLM_PLUGINS_OVERRIDE="${2:-}"; VLLM_PLUGINS_OVERRIDE_SET=1; shift; shift 2>/dev/null || true ;;
+        --log-file=*) LOG_FILE_OVERRIDE="${1#--log-file=}"; shift ;;
+        --log-file)   LOG_FILE_OVERRIDE="${2:-}"; shift; shift 2>/dev/null || true ;;
         *)        shift ;;
     esac
 done
@@ -209,12 +214,13 @@ print('yes' if importlib.util.find_spec('vllm_fl') else 'no')
     fi
 fi
 
-LOG_FILE="/flagos-workspace/logs/startup_${MODE}.log"
+# 日志文件：优先用 --log-file 显式指定，否则回退默认 startup_${MODE}.log（保持现存调用不变）
+LOG_FILE="${LOG_FILE_OVERRIDE:-/flagos-workspace/logs/startup_${MODE}.log}"
 
-# 创建 startup_default.log 符号链接指向当前 mode 的日志
-# 崩溃诊断脚本统一引用 startup_default.log，确保路径一致
+# 创建 startup_default.log 符号链接指向当前实际日志
+# 崩溃诊断脚本统一引用 startup_default.log，确保路径一致；软链须跟随 LOG_FILE（含 --log-file 覆盖）
 if [ "$MODE" != "default" ]; then
-    ln -sf "startup_${MODE}.log" /flagos-workspace/logs/startup_default.log
+    ln -sf "$(basename "$LOG_FILE")" /flagos-workspace/logs/startup_default.log
 fi
 
 # FlagGems 模式启动前清理 Triton/FlagGems 编译缓存（约束39：避免旧缓存隐藏问题算子）

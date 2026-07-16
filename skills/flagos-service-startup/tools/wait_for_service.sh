@@ -193,7 +193,10 @@ for line in lines:
     is_error_line = bool(re.match(r'^(?:\([^)]+\)\s+)?ERROR\s', s))
 
     # 已知无害警告跳过
-    if "vllm._C" in s or "Failed to import from vllm._C" in s:
+    # 注意：本段整体嵌在外层 python3 -c 的双引号内，此处务必用单引号；
+    # 用内层双引号会提前闭合外层引号，使 bash 传给 python 的代码损坏、
+    # NameError 非零退出，analyze_new_lines 走兜底分支导致进度信号恒丢失。
+    if 'vllm._C' in s or 'Failed to import from vllm._C' in s:
         continue
 
     # 致命信号

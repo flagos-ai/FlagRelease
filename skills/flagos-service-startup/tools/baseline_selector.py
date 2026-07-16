@@ -171,19 +171,29 @@ def start_variant(service_cmd: str, vllm_plugins: str, use_flaggems: bool,
 
     # 组装启动命令：显式传 --vllm-plugins（含空串），USE_FLAGGEMS 通过 mode 控制
     mode = "flagos" if use_flaggems else "native"
+    # --log-file 让 start_service.sh 把 vLLM 服务日志写入本 variant 的独立文件，
+    # 与下方 wait_for_service --log-path 监控同一文件（否则 start_service.sh 默认
+    # 写 startup_${mode}.log，三个 variant 互相覆盖且监控端抓不到真实日志 → 恒判失败）。
     # 用 shell 引号安全传递空串
-    cmd = f"{service_cmd} --mode {mode} --vllm-plugins '{vllm_plugins}'"
+    cmd = (f"{service_cmd} --mode {mode} --vllm-plugins '{vllm_plugins}'"
+           f" --log-file '{log_path}'")
     env_prefix = f"USE_FLAGGEMS={'1' if use_flaggems else '0'} "
 
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    # 服务日志由 start_service.sh 经 --log-file 写入 log_path；此处 start_service.sh
+    # 前台部分的少量 echo 无需保留，丢弃以免与其内部 nohup 重定向混淆。
     subprocess.Popen(
         env_prefix + cmd, shell=True,
-        stdout=open(log_path, "w"), stderr=subprocess.STDOUT
+        stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT
     )
 
+    # --from-start：本 variant 是全新启动，start_service.sh 的 nohup 以 truncate 方式
+    # 重写 log_path，wait 必须从 offset 0 读起，才能捕获本次启动的进度信号
+    # （loading_weights/service_ready 等）。否则沿用文件残留大小作 offset → 读不到
+    # 进度信号 → 端口虽已响应仍被误判为"残留服务"(stale_service) → start_variant 误返回失败。
     wait_cmd = (
         f"{wait_script} --port {port} --timeout 300 --max-timeout {max_timeout}"
-        f" --log-path {log_path} --mode {mode}"
+        f" --log-path {log_path} --mode {mode} --from-start"
     )
     if model_name:
         wait_cmd += f" --model-name '{model_name}'"
