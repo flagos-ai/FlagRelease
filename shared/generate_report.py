@@ -176,11 +176,10 @@ class ReportData:
         self.ops_control_initial: Optional[dict] = None
         self.workflow_complete = False
         # 多版本数据（新增）
-        self.gpqa_versions: Dict[str, Optional[dict]] = {}   # {v1: gpqa_json, v2: ..., v3: ..., v5: ...}
-        self.perf_versions: Dict[str, Optional[dict]] = {}   # {v1: perf_json, v2: ..., v3: ..., v5: ...}
+        self.gpqa_versions: Dict[str, Optional[dict]] = {}   # {v1: gpqa_json, v2: ..., v3: ..., v4: ...}
+        self.perf_versions: Dict[str, Optional[dict]] = {}   # {v1: perf_json, v2: ..., v3: ..., v4: ...}
         self.op_config_v3: Optional[dict] = None
         self.op_config_v4: Optional[dict] = None
-        self.op_config_v5: Optional[dict] = None
         self.nv_baseline: Optional[dict] = None
 
     def collect(self) -> bool:
@@ -212,7 +211,6 @@ class ReportData:
         )
         self.gpqa_versions["v3"] = read_json(os.path.join(r, "gpqa_v3.json")) or read_json(os.path.join(r, "gpqa_plugin.json"))
         self.gpqa_versions["v4"] = read_json(os.path.join(r, "gpqa_v4.json"))
-        self.gpqa_versions["v5"] = read_json(os.path.join(r, "gpqa_v5.json"))
 
         # 多版本性能结果
         self.perf_versions["v1"] = read_json(os.path.join(r, "v1_performance.json")) or self.native_perf
@@ -223,12 +221,10 @@ class ReportData:
         )
         self.perf_versions["v3"] = read_json(os.path.join(r, "v3_performance.json"))
         self.perf_versions["v4"] = read_json(os.path.join(r, "v4_performance.json"))
-        self.perf_versions["v5"] = read_json(os.path.join(r, "v5_performance.json"))
 
-        # V3/V4/V5 算子配置
+        # V3/V4 算子配置
         self.op_config_v3 = read_json(os.path.join(r, "operator_config_v3.json"))
         self.op_config_v4 = read_json(os.path.join(r, "operator_config_v4.json"))
-        self.op_config_v5 = read_json(os.path.join(r, "operator_config_v5.json"))
 
         # NV 基线（无独立 V1 时精度基线回退来源）
         self.nv_baseline = (
@@ -261,7 +257,7 @@ class ReportData:
                     self.issue_files.append(parse_issue_md(content))
 
         # oplists
-        for name in ("initial_oplist", "accuracy_tuned_oplist", "final_oplist", "v4_oplist", "v5_oplist"):
+        for name in ("initial_oplist", "accuracy_tuned_oplist", "final_oplist", "v4_oplist"):
             lines = read_lines(os.path.join(r, f"{name}.txt"))
             if lines:
                 self.oplists[name] = lines
@@ -593,7 +589,6 @@ VERSION_LABELS = {
     "v2": ("V2", "Pro", "gems+tree达标版"),
     "v3": ("V3", "Max", "gems+tree+plugin达标版"),
     "v4": ("V4", "Flag-express", "减算子提性能版(≥V3,近/超V1)"),
-    "v5": ("V5", "Royal Megamaster", "最大化算子版"),
 }
 
 
@@ -645,7 +640,6 @@ def generate_text_report(data: ReportData) -> str:
     lines.append("> - V2：tree+gems=Pro版：开启flaggems且性能达到V1的80%，与V1的精度误差在5%以内")
     lines.append("> - V3：tree+gems+plugin=Max版：在V2的基础上安装使用plugin，且性能达到V1的80%，与V1的精度误差在5%以内")
     lines.append("> - V4：tree+gems+plugin=Flag-express版：在V3的基础上，性能表现超过V1版本")
-    lines.append("> - V5：tree+gems(应开尽开)+plugin=Royal Megamaster交付版本：携带了所有的FlagOS组件，所有算子能开尽开，只要服务能够顺利启动就ok")
     lines.append("")
 
     # ── 上下文数据 ──
@@ -661,7 +655,6 @@ def generate_text_report(data: ReportData) -> str:
     release = ctx.get("release", {}) or {}
     optimization = ctx.get("optimization", {}) or {}
     plugin_wf = ctx.get("plugin_workflow", {}) or {}
-    v5_exp = ctx.get("v5_expansion", {}) or {}
     container = ctx.get("container", {}) or {}
     core_pkgs = insp.get("core_packages", {}) or {}
     flag_pkgs = insp.get("flag_packages", {}) or {}
@@ -677,7 +670,6 @@ def generate_text_report(data: ReportData) -> str:
     # ── 算子列表 ──
     initial_oplist = data.oplists.get("initial_oplist", [])
     final_oplist = data.oplists.get("final_oplist", [])
-    v5_oplist = data.oplists.get("v5_oplist", [])
     disabled_ops = optimization.get("disabled_ops", [])
     if isinstance(disabled_ops, str):
         disabled_ops = [op.strip() for op in disabled_ops.split(",") if op.strip()]
@@ -739,7 +731,6 @@ def generate_text_report(data: ReportData) -> str:
     # V1: 不开启 FlagGems → 无算子白名单
     # V2: 调优后的最终算子集 (final_oplist / operator_config)
     # V3: Plugin 调优后 (operator_config_v3)
-    # V5: 扩展后 (v5_oplist / operator_config_v5)
     version_ops_data = {}
 
     # V1 — 无 FlagGems
@@ -790,22 +781,9 @@ def generate_text_report(data: ReportData) -> str:
     v4_txt_ops = _parse_oplist_to_func_names(v4_oplist) if v4_oplist else v4_whitelist
     version_ops_data["v4"] = {"whitelist": v4_whitelist, "txt": v4_txt_ops}
 
-    # V5 — 扩展后
-    v5_whitelist = []
-    v5_txt_ops = []
-    if data.op_config_v5 and isinstance(data.op_config_v5, dict):
-        v5_whitelist = data.op_config_v5.get("current_enabled_ops", [])
-    elif v5_oplist:
-        v5_whitelist = _parse_oplist_to_func_names(v5_oplist)
-    if not v5_whitelist:
-        v5_whitelist = _ops_from_context(data.context, "v5")
-    if not v5_whitelist:
-        v5_whitelist = v3_whitelist  # fallback
-    v5_txt_ops = _parse_oplist_to_func_names(v5_oplist) if v5_oplist else v5_whitelist
-    version_ops_data["v5"] = {"whitelist": v5_whitelist, "txt": v5_txt_ops}
 
     # 输出各版本
-    for ver_key in ["v1", "v2", "v3", "v4", "v5"]:
+    for ver_key in ["v1", "v2", "v3", "v4"]:
         ver_label = VERSION_LABELS[ver_key][0]
         ops_data = version_ops_data[ver_key]
         lines.append("")
@@ -853,8 +831,8 @@ def generate_text_report(data: ReportData) -> str:
     lines.append("")
     lines.append("## 精度评测")
 
-    # V1-V5 版本的精度表
-    for ver_key in ["v1", "v2", "v3", "v4", "v5"]:
+    # V1-V4 版本的精度表
+    for ver_key in ["v1", "v2", "v3", "v4"]:
         ver_label, config_label, _ = VERSION_LABELS.get(ver_key, (ver_key.upper(), "-", ""))
         gpqa = data.gpqa_versions.get(ver_key)
         lines.append("")
@@ -865,7 +843,7 @@ def generate_text_report(data: ReportData) -> str:
         if gpqa:
             score = gpqa.get("score", "-")
             total = gpqa.get("total_questions", "-")
-            # 算子数：V1 无 FlagGems，V2 从 final_oplist，V3 从 v3 config，V4 减算子后，V5 从 v5_expansion
+            # 算子数：V1 无 FlagGems，V2 从 final_oplist，V3 从 v3 config，V4 减算子后
             op_count = "-"
             if ver_key == "v1":
                 op_count = "-"
@@ -885,11 +863,6 @@ def generate_text_report(data: ReportData) -> str:
                         or []
                     )
                     op_count = str(len(v4_ops)) if v4_ops else "-"
-            elif ver_key == "v5":
-                if v5_exp.get("final_enabled_count"):
-                    op_count = str(v5_exp["final_enabled_count"])
-                elif v5_oplist:
-                    op_count = str(_count_ops_from_oplist(v5_oplist))
             lines.append(f"| GPQA_Diamond | {total} | {score} | {op_count} | {config_label} |")
         else:
             lines.append(f"| GPQA_Diamond | - | - | - | - |")
@@ -901,7 +874,7 @@ def generate_text_report(data: ReportData) -> str:
     lines.append("|--------|------|")
     v1_gpqa = data.gpqa_versions.get("v1")
     v1_score = v1_gpqa.get("score", 0) if v1_gpqa else (eval_sec.get("v1_score") or 0)
-    for cmp_ver in ["v2", "v3", "v4", "v5"]:
+    for cmp_ver in ["v2", "v3", "v4"]:
         cmp_gpqa = data.gpqa_versions.get(cmp_ver)
         ver_label = VERSION_LABELS[cmp_ver][0]
         if not cmp_gpqa:
@@ -939,7 +912,7 @@ def generate_text_report(data: ReportData) -> str:
     model_name = model.get("name", "-")
     vendor = gpu.get("vendor", "-")
 
-    for ver_key in ["v1", "v2", "v3", "v4", "v5"]:
+    for ver_key in ["v1", "v2", "v3", "v4"]:
         ver_label, config_label, _ = VERSION_LABELS.get(ver_key, (ver_key.upper(), "-", ""))
         perf = data.perf_versions.get(ver_key)
         metrics = _extract_perf_metrics(perf) if perf else {}
@@ -977,9 +950,6 @@ def generate_text_report(data: ReportData) -> str:
                         or []
                     )
                     op_count = str(len(v4_ops)) if v4_ops else "-"
-            elif ver_key == "v5":
-                if v5_exp.get("final_enabled_count"):
-                    op_count = str(v5_exp["final_enabled_count"])
 
             # 单算力吞吐
             throughput_per_tflops = "-"
@@ -999,7 +969,7 @@ def generate_text_report(data: ReportData) -> str:
     v1_perf = data.perf_versions.get("v1")
     v1_metrics = _extract_perf_metrics(v1_perf) if v1_perf else {}
     v1_total = v1_metrics.get("Total token throughput (tok/s)", 0) if v1_metrics else 0
-    for cmp_ver in ["v2", "v3", "v4", "v5"]:
+    for cmp_ver in ["v2", "v3", "v4"]:
         ver_label = VERSION_LABELS[cmp_ver][0]
         cmp_perf = data.perf_versions.get(cmp_ver)
         cmp_metrics = _extract_perf_metrics(cmp_perf) if cmp_perf else {}
@@ -1060,7 +1030,7 @@ def generate_text_report(data: ReportData) -> str:
     image_reg = ctx.get("image", {}).get("registry_url", "")
     if not v2_harbor and image_reg and "-v2" in image_reg:
         v2_harbor = image_reg
-    elif not v2_harbor and image_reg and "-v3" not in image_reg and "-v5" not in image_reg and "-plugin" not in image_reg:
+    elif not v2_harbor and image_reg and "-v3" not in image_reg and "-plugin" not in image_reg:
         v2_harbor = image_reg  # 旧格式无后缀 = V2
     lines.append(f"  - V2：{v2_harbor or '-'}")
 
@@ -1076,13 +1046,6 @@ def generate_text_report(data: ReportData) -> str:
     )
     lines.append(f"  - V4：{v4_harbor or '-'}")
 
-    # V5
-    v5_harbor = (
-        release.get("v5_harbor_image", "")
-        or v5_exp.get("image_url", "")
-        or (versions_ctx.get("v5", {}) or {}).get("harbor_image", "")
-    )
-    lines.append(f"  - V5：{v5_harbor or '-'}")
 
     lines.append("")
     ms_url = release.get("modelscope_url", "")

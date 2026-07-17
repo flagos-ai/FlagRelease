@@ -936,8 +936,8 @@ def generate_image_tag(
     新格式（镜像名主体由 get_image_name.sh 生成）:
       {registry}/{model}-{gpu}-gems{g}-tree{t}-cx{c}-plugin{p}-{vllm}{v}-cp{py}-pt{pt}-{sdk}{s}-{arch}-{driver}:{date_tag}
 
-    date_tag 由调用方（config.py）传入且已含版本后缀（-v1..-v5），
-    脚本自带的时间戳被丢弃，改用传入的 date_tag，从而保留 V1-V5 tag 区分。
+    date_tag 由调用方（config.py）传入且已含版本后缀（-v1..-v4），
+    脚本自带的时间戳被丢弃，改用传入的 date_tag，从而保留 V1-V4 tag 区分。
 
     Args:
         info: 芯片版本信息（vendor 来源兜底）
