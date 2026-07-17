@@ -102,7 +102,7 @@ class PipelineConfig:
     config_persisted: bool = False
     plugin_image_mode: bool = False  # plugin 模式：镜像 tag 追加 -plugin，仓库名追加 -plugin
     plugin_qualified: bool = False   # plugin 精度+性能均达标时为 True，否则跳过 README 更新
-    version_tag: str = "v2"          # 发布版本标签：v1/v2/v3/v4/v5
+    version_tag: str = "v2"          # 发布版本标签：v1/v2/v3/v4
     also_tag: str = ""               # 额外镜像 tag 版本（V2=V3 同镜像双 tag 场景）
     incompatible_tag: str = ""       # 不适配标记名（设置后只打标记不发布版本镜像）
 
@@ -436,8 +436,8 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
             config.model_info.flagrelease_name_pre = model_name.split('-')[0]
 
     # ==================== 镜像 tag ====================
-    # V5 (Royal Megamaster) 发布到 flagrelease-project 仓库（交付 SVT 验收），其余版本走 public
-    if getattr(config, 'version_tag', None) == "v5":
+    # V3 (Max) 发布到 flagrelease-project 仓库（交付 SVT 验收），其余版本（V1/V2/V4）走 public
+    if getattr(config, 'version_tag', None) == "v3":
         if config.chip.harbor_registry == "harbor.baai.ac.cn/flagrelease-public":
             config.chip.harbor_registry = "harbor.baai.ac.cn/flagrelease-project"
 
@@ -446,7 +446,7 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
         # 根据 version_tag 决定后缀
         version_tag = getattr(config, 'version_tag', None)
         if version_tag:
-            version_suffix_map = {"v1": "-v1", "v2": "-v2", "v3": "-v3", "v4": "-v4", "v5": "-v5"}
+            version_suffix_map = {"v1": "-v1", "v2": "-v2", "v3": "-v3", "v4": "-v4"}
             suffix = version_suffix_map.get(version_tag, "")
         elif config.plugin_image_mode:
             suffix = "-plugin"  # 向后兼容：未设置 version_tag 但设置了 plugin_image_mode

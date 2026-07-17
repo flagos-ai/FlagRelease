@@ -82,12 +82,9 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 13 V3发布(Max)       → tag 后缀 -v3，[不达标]issue + 镜像上传(私有) / [达标]镜像上传 + 更新 README
 --- V4 减算子流程（qualified_core=true 触发，紧接 V3；性能不阻断，精度硬闸门）---
 13.5 V4减算子(Flag-express) → operator_reduction.py 两阶段（阶段1性能搜索不测精度、阶段2精度回溯）在 V3 达标算子集上减算子提性能，追求性能绝对值最大化、达标基准是超越 V3（不与 V1 比），保底≥1算子，精度相对退化≤5% 为成立前提 → tag 后缀 -v4，plugin 镜像模式发布
---- V5 扩展流程（qualified_core=true 触发，即 service_ok AND accuracy_ok；性能不阻断；无禁用算子时 V5=当前最优版本仍发布）---
-14 V5算子扩展       → operator_expansion.py 先试顶失败降级（Tier0全开→Tier1排除精度算子批量开→逐个探测兜底，仅需启动+精度）
-15 V5发布(Royal)    → tag 后缀 -v5，打包发布（无达标门槛）
 ```
 
-执行顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → [qualified_core=true] → 9 → 10 → 11 → 12 → 13 → [qualified_core=true] → 13.5(V4) → [qualified_core=true] → 14 → 15
+执行顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → [qualified_core=true] → 9 → 10 → 11 → 12 → 13 → [qualified_core=true] → 13.5(V4)
 （qualified_core = service_ok AND accuracy_ok；性能不看重、不阻断，仅影响发布 tag 的 qualified 标签，精度是唯一硬闸门）
 
 **算子累计禁用规则**：5 禁用精度问题算子 → 6 在此基础上测性能 → 7 继续禁用性能问题算子。步骤 10-12 以步骤 5/7 的最终算子集为起点：**精度达标则不重新调优；精度不达标按精度三级递进（先 issue → plugin 模式关算子调优 → 全关仍不达标才判框架问题）在 plugin 模式下继续调优；性能不达标不强制重调，尽力即可、达上限即停**（见步骤 11/12 说明）。各步骤详细流程见对应 SKILL.md 的"编排层指令"章节。
@@ -101,13 +98,6 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 - 镜像 tag：原 date_tag 追加 `-v3`（如 `202603301143-v3`）
 - Plugin 不达标发布：调优后仍不达标时，先提交 issue，再打包镜像上传 Harbor（私有），不更新 ModelScope/HuggingFace README
 
-### V5 算子扩展流程（步骤 14-15）
-
-- 触发条件：步骤 13 完成后，且存在被禁用的算子（`optimization.disabled_ops` 非空）
-- 目标：从 V3 基础上最大化开启算子，仅需服务可启动 + 精度相对退化 ≤5%（**无性能要求**）
-- 执行方式：通过 `operator_expansion.py` 脚本全自动完成，Claude 仅负责调用脚本和发布。策略为**先试顶、失败降级**：Tier0 一次性开启全部被禁算子（达标即 1 轮完成）→ Tier1 排除已知精度问题算子（`eval.excluded_ops_accuracy`）批量开启其余 → Tier2 逐个增量探测兜底（正确性与纯逐个一致）
-- 镜像 tag：原 date_tag 追加 `-v5`（如 `202603301143-v5`）
-- V5 不设达标门槛：只要扩展脚本执行完成即发布，无论最终开启了多少算子
 
 ### 版本定义
 
@@ -118,14 +108,12 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 | **V2** (Pro版) | FlagGems + FlagTree，精度相对退化≤5%，性能≥80% of V1 | `-v2` | 步骤8自动发布 |
 | **V3** (Max版) | V2 + Plugin，精度相对退化≤5%，性能≥80% of V1 | `-v3` | 步骤13自动发布 |
 | **V4** (精简版/Flag-express) | V3 基础上减算子以提升性能，追求性能绝对值最大化、**达标基准是超越 V3（不与 V1 比较）**，**精度相对退化≤5%（版本成立前提）**，保底≥1算子 | `-v4` | operator_reduction.py 自动发布 |
-| **V5** (Royal版) | V3 基础上最大化开启算子，仅需启动+精度相对退化≤5% | `-v5` | 步骤15自动发布 |
 
 - **V1 基线**：不开启 flaggems 算子替换的版本（仅 FlagTree 生效），作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务，则标记"无 V1"，跳过 V1 基线测试，精度基线回退 NV 基线（`nv_baseline.yaml`），**性能基线合成**：V2 使能 flaggems 后首次可正常启动时（步骤4之前、精度调优削减算子之前），quick 测一轮初始性能（`v2_initial_performance`），经 `synthesize_perf_baseline.py` ×1.2 合成基线（全芯片统一标准；吞吐×1.2、延迟÷1.2），按 `native_performance.json` 标准格式落盘（`_meta.synthetic=true` 标记），下游对比/调优/报告照常消费。80% 判据下等价于要求调优后性能 ≥ V2 初始的 0.96 倍
 - **V0**：进入自动化时 flaggems 全量开启状态。服务启动后以 `flaggems_enable_oplist.txt` 或 `gems.txt` 记录的算子为准
 - **V2 Pro**：经过算子调优（步骤5/7）后达标的版本。精度相对退化≤5%，性能≥80% of V1
 - **V3 Max**：在 V2 基础上安装 Plugin 并调优达标的版本。允许 Plugin 模式下继续关闭算子
 - **V4 精简 (Flag-express)**：在 V3 基础上通过 `operator_reduction.py` 减算子提性能，**两阶段**：阶段1 性能搜索（从 V3 基线起逐个试禁用，仅当禁用后吞吐 > 当前基线才提交、基线动态推进，全程不测精度）；阶段2 精度回溯（按性能从高到低取组合测精度，达标即产出，不达标回退次优，最坏回退 V3 等价）。**追求性能绝对值最大化，达标基准是超越 V3（不与 V1 比较，V1 仅报告参考）**，硬约束至少保留 1 个算子（plugin 也不例外）。**精度相对退化≤5% 是 V4 成立前提**，收尾做最终精度终检，不达标则 V4 不成立（success=False）。V4 成立需同时满足：超越 V3 + 保留≥1算子 + 精度达标
-- **V5 Royal**：在 V3 基础上尝试重新开启被禁用算子，仅需服务启动+精度相对退化≤5%（无性能要求）
 - **精度判据口径**：所有版本的精度达标均以「相对退化」计算——`rel_drop = (基线 - 当前) / 基线 ≤ 5%`，基线为本地 V1 或 NV 参考（`nv_baseline.yaml`）。见 `accuracy_compare.py`
 
 ### 双 pipeline 分支（准入镜像分类驱动）
@@ -134,8 +122,8 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 
 | entry_image_type | 分支 | 准入镜像组成 | 版本路径 |
 |------------------|------|--------------|---------|
-| `gems_tree` | **A**（简单） | flaggems + flagtree，无 plugin | V1(裸启动) → V2(代码注入全量) → V3(切 plugin 白名单) → V4(减算子) → V5(应开尽开) |
-| `gems_tree_plugin` | **B**（复杂） | flaggems + flagtree + plugin | V1(三选) → V2(2.1/2.2) → V3(3.1/3.2) → V4 → V5 |
+| `gems_tree` | **A**（简单） | flaggems + flagtree，无 plugin | V1(裸启动) → V2(代码注入全量) → V3(切 plugin 白名单) → V4(减算子) |
+| `gems_tree_plugin` | **B**（复杂） | flaggems + flagtree + plugin | V1(三选) → V2(2.1/2.2) → V3(3.1/3.2) → V4 |
 | `native` | native | 无 flaggems | 仅精度/性能评测，不做算子调优与多版本发布 |
 
 **分支 A（gems_tree）工作流**：
@@ -143,7 +131,6 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 - V2：代码注入方式开启全量 flaggems 算子，经步骤5/7 调优达标
 - V3：切换到 plugin 白名单方式（与 V2 算子集一致），验证 plugin 路径
 - V4：`operator_reduction.py` 从 V3 减算子提性能
-- V5：`operator_expansion.py` 应开尽开最大化算子
 
 **分支 B（gems_tree_plugin）工作流**：
 - V1：**三选状态机**（`baseline_selector.py`）按优先级确定基础版依赖——
@@ -151,9 +138,9 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
   - 三者均失败 → `none`（强依赖 flaggems），精度基线回退 `nv_baseline.yaml`
 - V2：`2.1` 代码注入独立 V2 镜像；或 `2.2` V2=V3 同镜像（V1.3 场景，`--also-tag` 双 tag 发布）
 - V3：`3.1` 切厂商/fl plugin 白名单独立 V3；或 `3.2` V3=V2（同上双 tag）；厂商 plugin 不适配时用 `--incompatible-tag` 打不适配标记
-- V4 / V5：同分支 A
+- V4：`operator_reduction.py` 随机选1~3算子优化性能
 
-- **发布仓库**：V1-V4 发布到 `harbor.baai.ac.cn/flagrelease-public`；**V5 发布到 `harbor.baai.ac.cn/flagrelease-project`**（交付 SVT 验收）
+- **发布仓库**：V1/V2/V4 发布到 `harbor.baai.ac.cn/flagrelease-public`；**V3 发布到 `harbor.baai.ac.cn/flagrelease-project`**（交付 SVT 验收，V3=Max 为最终交付版）
 
 ### native 场景工作流简化
 
@@ -233,7 +220,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 ```
 
-部署的脚本清单：`inspect_env.py`、`toggle_flaggems.py`、`wait_for_service.sh`、`benchmark_runner.py`、`performance_compare.py`、`operator_optimizer.py`、`operator_search.py`、`operator_expansion.py`、`diagnose_ops.py`、`eval_monitor.py`、`install_component.py`、`install_flagtree.sh`、`issue_reporter.py`、`log_analyzer.py`、`install_plugin.py`。
+部署的脚本清单：`inspect_env.py`、`toggle_flaggems.py`、`wait_for_service.sh`、`benchmark_runner.py`、`performance_compare.py`、`operator_optimizer.py`、`operator_search.py`、`diagnose_ops.py`、`eval_monitor.py`、`install_component.py`、`install_flagtree.sh`、`issue_reporter.py`、`log_analyzer.py`、`install_plugin.py`。
 
 ---
 
