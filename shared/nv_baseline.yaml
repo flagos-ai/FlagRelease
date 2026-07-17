@@ -38,7 +38,7 @@ models:
       - Qwen3-8B-Instruct
       - qwen3_8b
     metrics:
-      gpqa_diamond: 0.0        # TODO: 填入 NV 实测 GPQA Diamond 分数
+      gpqa_diamond: 39.0        # TODO: 填入 NV 实测 GPQA Diamond 分数
     source: "TODO: 填入数据来源"
     updated_at: "2026-07-01"
 
@@ -48,7 +48,7 @@ models:
       - qwen2.5-7b
       - Qwen2.5-7B
     metrics:
-      gpqa_diamond: 0.0        # TODO
+      gpqa_diamond: 39.0        # TODO
     source: "TODO"
     updated_at: "2026-07-01"
 
@@ -471,3 +471,765 @@ models:
       gpqa_diamond: 22.0
     source: "NV 实测"
     updated_at: "2026-07-09"
+
+  # ---- 批次更新 2026-07-17 ----
+
+  Mistral-7B-OpenOrca:
+    aliases:
+      - Open-Orca/Mistral-7B-OpenOrca
+      - mistral-7b-openorca
+      - mistral_7b_openorca
+    metrics:
+      gpqa_diamond: 27
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen2.5-Coder-7B-Instruct:
+    aliases:
+      - Qwen/Qwen2.5-Coder-7B-Instruct
+      - qwen2.5-coder-7b-instruct
+      - qwen2_5_coder_7b_instruct
+    metrics:
+      gpqa_diamond: 27
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  aya-23-8B:
+    aliases:
+      - CohereLabs/aya-23-8B
+      - aya-23-8b
+      - aya_23_8b
+    metrics:
+      gpqa_diamond: 27
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-R1-0528-Qwen3-8B:
+    aliases:
+      - deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
+      - deepseek-r1-0528-qwen3-8b
+      - deepseek_r1_0528_qwen3_8b
+    metrics:
+      gpqa_diamond: 60
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-R1-Distill-Llama-8B:
+    aliases:
+      - deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+      - deepseek-r1-distill-llama-8b
+      - deepseek_r1_distill_llama_8b
+    metrics:
+      gpqa_diamond: 25
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Ministral-8B-Instruct-2410:
+    aliases:
+      - mistralai/Ministral-8B-Instruct-2410
+      - ministral-8b-instruct-2410
+      - ministral_8b_instruct_2410
+    metrics:
+      gpqa_diamond: 30
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  NeuralDaredevil-8B-abliterated:
+    aliases:
+      - mlabonne/NeuralDaredevil-8B-abliterated
+      - neuraldaredevil-8b-abliterated
+      - neuraldaredevil_8b_abliterated
+    metrics:
+      gpqa_diamond: 37
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  llama-3-Korean-Bllossom-8B:
+    aliases:
+      - MLP-KTLim/llama-3-Korean-Bllossom-8B
+      - llama-3-korean-bllossom-8b
+      - llama_3_korean_bllossom_8b
+    metrics:
+      gpqa_diamond: 33
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Hermes-2-Pro-Llama-3-8B:
+    aliases:
+      - NousResearch/Hermes-2-Pro-Llama-3-8B
+      - hermes-2-pro-llama-3-8b
+      - hermes_2_pro_llama_3_8b
+    metrics:
+      gpqa_diamond: 33
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  AgentCPM-Explore:
+    aliases:
+      - openbmb/AgentCPM-Explore
+      - agentcpm-explore
+      - agentcpm_explore
+    metrics:
+      gpqa_diamond: 36
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  AgentCPM-Report:
+    aliases:
+      - openbmb/AgentCPM-Report
+      - agentcpm-report
+      - agentcpm_report
+    metrics:
+      gpqa_diamond: 46
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  MiniCPM4-8B:
+    aliases:
+      - openbmb/MiniCPM4-8B
+      - minicpm4-8b
+      - minicpm4_8b
+    metrics:
+      gpqa_diamond: 36
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  MiniCPM4.1-8B:
+    aliases:
+      - openbmb/MiniCPM4.1-8B
+      - minicpm4.1-8b
+      - minicpm4_1_8b
+    metrics:
+      gpqa_diamond: 54
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Apertus-8B-Instruct-2509:
+    aliases:
+      - swiss-ai/Apertus-8B-Instruct-2509
+      - apertus-8b-instruct-2509
+      - apertus_8b_instruct_2509
+    metrics:
+      gpqa_diamond: 35
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  rnj-1-instruct:
+    aliases:
+      - EssentialAI/rnj-1-instruct
+      - rnj-1-instruct
+      - rnj_1_instruct
+    metrics:
+      gpqa_diamond: 37
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  SOLAR-10.7B-Instruct-v1.0:
+    aliases:
+      - upstage/SOLAR-10.7B-Instruct-v1.0
+      - solar-10.7b-instruct-v1.0
+      - solar_10_7b_instruct_v1_0
+    metrics:
+      gpqa_diamond: 34
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  MN-12B-Mag-Mell-R1:
+    aliases:
+      - inflatebot/MN-12B-Mag-Mell-R1
+      - mn-12b-mag-mell-r1
+      - mn_12b_mag_mell_r1
+    metrics:
+      gpqa_diamond: 32
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepCoder-14B-Preview:
+    aliases:
+      - agentica-org/DeepCoder-14B-Preview
+      - deepcoder-14b-preview
+      - deepcoder_14b_preview
+    metrics:
+      gpqa_diamond: 30
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  SuperNova-Medius:
+    aliases:
+      - arcee-ai/SuperNova-Medius
+      - supernova-medius
+      - supernova_medius
+    metrics:
+      gpqa_diamond: 44
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-R1-Distill-Qwen-14B:
+    aliases:
+      - deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
+      - deepseek-r1-distill-qwen-14b
+      - deepseek_r1_distill_qwen_14b
+    metrics:
+      gpqa_diamond: 45
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Fathom-R1-14B:
+    aliases:
+      - FractalAIResearch/Fathom-R1-14B
+      - fathom-r1-14b
+      - fathom_r1_14b
+    metrics:
+      gpqa_diamond: 60
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Phi-3-medium-128k-instruct:
+    aliases:
+      - microsoft/Phi-3-medium-128k-instruct
+      - phi-3-medium-128k-instruct
+      - phi_3_medium_128k_instruct
+    metrics:
+      gpqa_diamond: 37
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  phi-4:
+    aliases:
+      - microsoft/phi-4
+      - phi-4
+      - phi_4
+    metrics:
+      gpqa_diamond: 73
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Phi-4-reasoning-plus:
+    aliases:
+      - microsoft/Phi-4-reasoning-plus
+      - phi-4-reasoning-plus
+      - phi_4_reasoning_plus
+    metrics:
+      gpqa_diamond: 46
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Ministral-3-14B-Instruct-2512:
+    aliases:
+      - mistralai/Ministral-3-14B-Instruct-2512
+      - ministral-3-14b-instruct-2512
+      - ministral_3_14b_instruct_2512
+    metrics:
+      gpqa_diamond: 56
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Moonlight-16B-A3B-Instruct:
+    aliases:
+      - moonshotai/Moonlight-16B-A3B-Instruct
+      - moonlight-16b-a3b-instruct
+      - moonlight_16b_a3b_instruct
+    metrics:
+      gpqa_diamond: 33
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  reka-flash-3:
+    aliases:
+      - RekaAI/reka-flash-3
+      - reka-flash-3
+      - reka_flash_3
+    metrics:
+      gpqa_diamond: 59
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Codestral-22B-v0.1:
+    aliases:
+      - mistralai/Codestral-22B-v0.1
+      - codestral-22b-v0.1
+      - codestral_22b_v0_1
+    metrics:
+      gpqa_diamond: 26
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Magistral-Small-2506:
+    aliases:
+      - mistralai/Magistral-Small-2506
+      - magistral-small-2506
+      - magistral_small_2506
+    metrics:
+      gpqa_diamond: 62
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Mistral-Small-24B-Instruct-2501:
+    aliases:
+      - mistralai/Mistral-Small-24B-Instruct-2501
+      - mistral-small-24b-instruct-2501
+      - mistral_small_24b_instruct_2501
+    metrics:
+      gpqa_diamond: 54
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  sarvam-m:
+    aliases:
+      - sarvamai/sarvam-m
+      - sarvam-m
+      - sarvam_m
+    metrics:
+      gpqa_diamond: 48
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  gemma-2-27b-it:
+    aliases:
+      - google/gemma-2-27b-it
+      - gemma-2-27b-it
+      - gemma_2_27b_it
+    metrics:
+      gpqa_diamond: 48
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled:
+    aliases:
+      - Jackrong/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled
+      - qwen3.5-27b-claude-4.6-opus-reasoning-distilled
+      - qwen3_5_27b_claude_4_6_opus_reasoning_distilled
+    metrics:
+      gpqa_diamond: 75
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  MiroThinker-v1.5-30B:
+    aliases:
+      - miromind-ai/MiroThinker-v1.5-30B
+      - mirothinker-v1.5-30b
+      - mirothinker_v1_5_30b
+    metrics:
+      gpqa_diamond: 25
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3-30B-A3B-Instruct-2507:
+    aliases:
+      - Qwen/Qwen3-30B-A3B-Instruct-2507
+      - qwen3-30b-a3b-instruct-2507
+      - qwen3_30b_a3b_instruct_2507
+    metrics:
+      gpqa_diamond: 62
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3-30B-A3B-Thinking-2507:
+    aliases:
+      - Qwen/Qwen3-30B-A3B-Thinking-2507
+      - qwen3-30b-a3b-thinking-2507
+      - qwen3_30b_a3b_thinking_2507
+    metrics:
+      gpqa_diamond: 75
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3-Coder-30B-A3B-Instruct:
+    aliases:
+      - Qwen/Qwen3-Coder-30B-A3B-Instruct
+      - qwen3-coder-30b-a3b-instruct
+      - qwen3_coder_30b_a3b_instruct
+    metrics:
+      gpqa_diamond: 54
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Baichuan-M2-32B:
+    aliases:
+      - baichuan-inc/Baichuan-M2-32B
+      - baichuan-m2-32b
+      - baichuan_m2_32b
+    metrics:
+      gpqa_diamond: 64
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-R1-Distill-Qwen-32B:
+    aliases:
+      - deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
+      - deepseek-r1-distill-qwen-32b
+      - deepseek_r1_distill_qwen_32b
+    metrics:
+      gpqa_diamond: 37
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-R1-Distill-Qwen-32B-abliterated:
+    aliases:
+      - huihui-ai/DeepSeek-R1-Distill-Qwen-32B-abliterated
+      - deepseek-r1-distill-qwen-32b-abliterated
+      - deepseek_r1_distill_qwen_32b_abliterated
+    metrics:
+      gpqa_diamond: 28
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  granite-4.0-h-small:
+    aliases:
+      - ibm-granite/granite-4.0-h-small
+      - granite-4.0-h-small
+      - granite_4_0_h_small
+    metrics:
+      gpqa_diamond: 47
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  EXAONE-4.0-32B:
+    aliases:
+      - LGAI-EXAONE/EXAONE-4.0-32B
+      - exaone-4.0-32b
+      - exaone_4_0_32b
+    metrics:
+      gpqa_diamond: 62
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  HyperCLOVAX-SEED-Think-32B:
+    aliases:
+      - naver-hyperclovax/HyperCLOVAX-SEED-Think-32B
+      - hyperclovax-seed-think-32b
+      - hyperclovax_seed_think_32b
+    metrics:
+      gpqa_diamond: 48
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Sky-T1-32B-Preview:
+    aliases:
+      - NovaSky-AI/Sky-T1-32B-Preview
+      - sky-t1-32b-preview
+      - sky_t1_32b_preview
+    metrics:
+      gpqa_diamond: 60
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen2.5-Coder-32B-Instruct:
+    aliases:
+      - Qwen/Qwen2.5-Coder-32B-Instruct
+      - qwen2.5-coder-32b-instruct
+      - qwen2_5_coder_32b_instruct
+    metrics:
+      gpqa_diamond: 46
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  QwQ-32B:
+    aliases:
+      - Qwen/QwQ-32B
+      - qwq-32b
+      - qwq_32b
+    metrics:
+      gpqa_diamond: 63
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  QwQ-32B-Preview:
+    aliases:
+      - Qwen/QwQ-32B-Preview
+      - qwq-32b-preview
+      - qwq_32b_preview
+    metrics:
+      gpqa_diamond: 62
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  IQuest-Coder-V1-40B-Instruct:
+    aliases:
+      - IQuestLab/IQuest-Coder-V1-40B-Instruct
+      - iquest-coder-v1-40b-instruct
+      - iquest_coder_v1_40b_instruct
+    metrics:
+      gpqa_diamond: 37
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  IQuest-Coder-V1-40B-Loop-Instruct:
+    aliases:
+      - IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct
+      - iquest-coder-v1-40b-loop-instruct
+      - iquest_coder_v1_40b_loop_instruct
+    metrics:
+      gpqa_diamond: 39
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Phi-3.5-MoE-instruct:
+    aliases:
+      - microsoft/Phi-3.5-MoE-instruct
+      - phi-3.5-moe-instruct
+      - phi_3_5_moe_instruct
+    metrics:
+      gpqa_diamond: 36
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Kimi-Linear-48B-A3B-Instruct:
+    aliases:
+      - moonshotai/Kimi-Linear-48B-A3B-Instruct
+      - kimi-linear-48b-a3b-instruct
+      - kimi_linear_48b_a3b_instruct
+    metrics:
+      gpqa_diamond: 26
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Higgs-Llama-3-70B:
+    aliases:
+      - bosonai/Higgs-Llama-3-70B
+      - higgs-llama-3-70b
+      - higgs_llama_3_70b
+    metrics:
+      gpqa_diamond: 26
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-R1-Distill-Llama-70B:
+    aliases:
+      - deepseek-ai/DeepSeek-R1-Distill-Llama-70B
+      - deepseek-r1-distill-llama-70b
+      - deepseek_r1_distill_llama_70b
+    metrics:
+      gpqa_diamond: 63
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Kimi-Dev-72B:
+    aliases:
+      - moonshotai/Kimi-Dev-72B
+      - kimi-dev-72b
+      - kimi_dev_72b
+    metrics:
+      gpqa_diamond: 58
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Athene-V2-Chat:
+    aliases:
+      - Nexusflow/Athene-V2-Chat
+      - athene-v2-chat
+      - athene_v2_chat
+    metrics:
+      gpqa_diamond: 56
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen2-72B-Instruct:
+    aliases:
+      - Qwen/Qwen2-72B-Instruct
+      - qwen2-72b-instruct
+      - qwen2_72b_instruct
+    metrics:
+      gpqa_diamond: 40
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen2.5-72B-Instruct:
+    aliases:
+      - Qwen/Qwen2.5-72B-Instruct
+      - qwen2.5-72b-instruct
+      - qwen2_5_72b_instruct
+    metrics:
+      gpqa_diamond: 56
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3-Coder-Next:
+    aliases:
+      - Qwen/Qwen3-Coder-Next
+      - qwen3-coder-next
+      - qwen3_coder_next
+    metrics:
+      gpqa_diamond: 74
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3-Next-80B-A3B-Instruct:
+    aliases:
+      - Qwen/Qwen3-Next-80B-A3B-Instruct
+      - qwen3-next-80b-a3b-instruct
+      - qwen3_next_80b_a3b_instruct
+    metrics:
+      gpqa_diamond: 73
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3-Next-80B-A3B-Thinking:
+    aliases:
+      - Qwen/Qwen3-Next-80B-A3B-Thinking
+      - qwen3-next-80b-a3b-thinking
+      - qwen3_next_80b_a3b_thinking
+    metrics:
+      gpqa_diamond: 74
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  sarvam-105b:
+    aliases:
+      - sarvamai/sarvam-105b
+      - sarvam-105b
+      - sarvam_105b
+    metrics:
+      gpqa_diamond: 44
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  c4ai-command-a-03-2025:
+    aliases:
+      - CohereLabs/c4ai-command-a-03-2025
+      - c4ai-command-a-03-2025
+      - c4ai_command_a_03_2025
+    metrics:
+      gpqa_diamond: 61
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  zephyr-orpo-141b-A35b-v0.1:
+    aliases:
+      - HuggingFaceH4/zephyr-orpo-141b-A35b-v0.1
+      - zephyr-orpo-141b-a35b-v0.1
+      - zephyr_orpo_141b_a35b_v0_1
+    metrics:
+      gpqa_diamond: 26
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Mixtral-8x22B-Instruct-v0.1:
+    aliases:
+      - mistralai/Mixtral-8x22B-Instruct-v0.1
+      - mixtral-8x22b-instruct-v0.1
+      - mixtral_8x22b_instruct_v0_1
+    metrics:
+      gpqa_diamond: 40
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Step-3.5-Flash:
+    aliases:
+      - stepfun-ai/Step-3.5-Flash
+      - step-3.5-flash
+      - step_3_5_flash
+    metrics:
+      gpqa_diamond: 58
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  MiroThinker-v1.5-235B:
+    aliases:
+      - miromind-ai/MiroThinker-v1.5-235B
+      - mirothinker-v1.5-235b
+      - mirothinker_v1_5_235b
+    metrics:
+      gpqa_diamond: 47
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3-235B-A22B-Instruct-2507:
+    aliases:
+      - Qwen/Qwen3-235B-A22B-Instruct-2507
+      - qwen3-235b-a22b-instruct-2507
+      - qwen3_235b_a22b_instruct_2507
+    metrics:
+      gpqa_diamond: 67
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3-235B-A22B-Thinking-2507:
+    aliases:
+      - Qwen/Qwen3-235B-A22B-Thinking-2507
+      - qwen3-235b-a22b-thinking-2507
+      - qwen3_235b_a22b_thinking_2507
+    metrics:
+      gpqa_diamond: 82
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  K-EXAONE-236B-A23B:
+    aliases:
+      - LGAI-EXAONE/K-EXAONE-236B-A23B
+      - k-exaone-236b-a23b
+      - k_exaone_236b_a23b
+    metrics:
+      gpqa_diamond: 60
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  MiMo-V2-Flash:
+    aliases:
+      - XiaomiMiMo/MiMo-V2-Flash
+      - mimo-v2-flash
+      - mimo_v2_flash
+    metrics:
+      gpqa_diamond: 70
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-R1-0528:
+    aliases:
+      - deepseek-ai/DeepSeek-R1-0528
+      - deepseek-r1-0528
+      - deepseek_r1_0528
+    metrics:
+      gpqa_diamond: 80
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-V3-0324:
+    aliases:
+      - deepseek-ai/DeepSeek-V3-0324
+      - deepseek-v3-0324
+      - deepseek_v3_0324
+    metrics:
+      gpqa_diamond: 70
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-V3.1-Terminus:
+    aliases:
+      - deepseek-ai/DeepSeek-V3.1-Terminus
+      - deepseek-v3.1-terminus
+      - deepseek_v3_1_terminus
+    metrics:
+      gpqa_diamond: 76
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-V3.2:
+    aliases:
+      - deepseek-ai/DeepSeek-V3.2
+      - deepseek-v3.2
+      - deepseek_v3_2
+    metrics:
+      gpqa_diamond: 47.09
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-V3.2-Exp:
+    aliases:
+      - deepseek-ai/DeepSeek-V3.2-Exp
+      - deepseek-v3.2-exp
+      - deepseek_v3_2_exp
+    metrics:
+      gpqa_diamond: 46.5
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-V3.2-Speciale:
+    aliases:
+      - deepseek-ai/DeepSeek-V3.2-Speciale
+      - deepseek-v3.2-speciale
+      - deepseek_v3_2_speciale
+    metrics:
+      gpqa_diamond: 73
+    source: "NV 实测"
+    updated_at: "2026-07-17"
