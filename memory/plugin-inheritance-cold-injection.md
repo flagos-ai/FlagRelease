@@ -41,4 +41,10 @@ V1=metax+gems关 → V2=metax+冷注入gems(V2−V1=纯FlagGems开销) → V3=fl
 - 模拟验证:SEG3_ARGS 四场景(v1.3/v1.2/空/qualified=False)+ gating 三场景全过。未真机验证
 - 仍未接:V1 镜像 pipeline 不产出(需用户定 commit 时机,"五版本全上 Harbor"意图 vs 版本表"阶段一手动发布"的冲突待拍板)
 
+## 追加:分支 B 步骤9 禁止重装 plugin(2026-07,已实施)
+- 问题:分支 B(gems_tree_plugin)准入镜像**本就自带可用 plugin**(我们给的镜像至少在一个模型验证过),V3 阶段只需 VLLM_PLUGINS=fl 使能、**禁止重装**;但步骤9 编排指令(SKILL.md + 段4 prompt)未区分分支,Claude 无脑调 install_plugin.py --action install → clone+pip 重装,覆盖镜像厂商适配好的 plugin。用户质疑"只改 prompt/SKILL 真的有效吗"——对,纯文字软约束会失效(本 bug 即模型违背既有分支哲学),须加确定性硬闸门(参照 run_pipeline.sh:1300 "不信任 Claude 臆断"套路)。
+- 三层防护(已实施):**层1 硬闸门(核心)** install_plugin.py 新增 `_is_branch_b()`——读 /flagos-workspace/shared/context.yaml,双信号或判断 `workflow.entry_image_type==gems_tree_plugin` 或 `pipeline_branch==B`;install 动作前:命中分支 B **且** plugin 已装(get_current_version 非空)→ 拒绝重装返回 `skipped=true`,不 rm/clone/pip。新增 `--force` 逃生口 + `--context-path`。读不到分支字段(两者皆缺)→ `_is_branch_b` 返回 None → **保守放行**(保持工具原行为,不误伤分支 A)。**层2 软约束** SKILL.md 步骤9 加"分支分流"节 + run_pipeline.sh 段4 前 shell 重读分支(断点续跑变量可能空)生成 SEG4_PLUGIN_DIRECTIVE 注入 PROMPT_SEG4:分支 B 禁 install 仅 verify+VLLM_PLUGINS=fl,分支 A 照常 install。
+- **判据对齐原流程物理本质,不影响原流程判断**:分支 B ⟺ 准入镜像自带 plugin(inspect_env.classify_entry_image_type:has_plugin=True→gems_tree_plugin,段1 环境探测确定性结果)。闸门叠加"plugin 已装"保证:分支 A 首装(未装)不触发、分支 A 断点重入(已装但 entry=gems_tree)不触发、分支 B(自带且已装)才拦。
+- 验证:_is_branch_b 5场景(B-entry/B-branch/A/字段缺失/文件不存在)+ install_plugin 5场景(B已装拦截skipped/B未装放行/A已装重入放行/字段缺失保守放行/B已装+force绕过)全过;py_compile+bash -n 过;SEG4_BRANCH shell 逻辑 3场景过。未真机验证。相关:[[no-block-full-chain-v2-v5]]
+
 相关:[[new-v1-v5-workflow]] [[unified-op-config-refactor-plan]] [[hygon-pipeline-bug-fixes]] [[determinism-in-scripts]]

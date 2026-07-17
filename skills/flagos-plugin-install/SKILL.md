@@ -171,13 +171,24 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 - `qualified=true` → 进入步骤 9，设置 `plugin_workflow.triggered=true`
 - `qualified=false` → 跳过步骤 9-13，设置 `plugin_workflow.skip_reason="主流程不达标"`
 
+### ⚠ 分支分流（进入步骤 9 前必读）
+
+**先读 `workflow.entry_image_type`（或 `workflow.pipeline_branch`）判断分支，决定是否安装 plugin：**
+
+- **分支 B（`entry_image_type=gems_tree_plugin` / `pipeline_branch=B`）**：准入镜像**本就自带可用 plugin**（我们提供的镜像至少在一个模型上已验证可用）。
+  - **禁止 `--action install`（禁止重装）**：重装会 `rm -rf` + 重新 clone/pip，**覆盖镜像里厂商适配好的 plugin**，破坏 V3 对比语义。
+  - 步骤 9 只做 `--action verify` 确认 plugin 可用 + 记录状态；plugin 通过启动环境变量 `VLLM_PLUGINS=fl` 在步骤 10 使能。
+  - 即便误调 `--action install`，`install_plugin.py` 内置分支硬闸门会拒绝重装并返回 `skipped=true`（除非显式 `--force`）——但仍**不应主动调 install**。
+
+- **分支 A（`entry_image_type=gems_tree` / `pipeline_branch=A`）**：准入镜像**无 plugin** → 照常 `--action install` 安装。
+
 ### 调用方式
 
 ```bash
-# 安装 plugin
+# 【分支 A 才安装】安装 plugin（分支 B 禁止，内置闸门也会拦截重装）
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_plugin.py --action install --json"
 
-# 验证安装
+# 验证安装（分支 A/B 均执行）
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_plugin.py --action verify --json"
 ```
 
