@@ -1,3 +1,19 @@
+<!--
+ Copyright 2026 FlagOS Contributors
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ -->
+
 🌐 Language:
 [English](README.md) | [简体中文](README_cn.md)
 
@@ -101,4 +117,3 @@ FlagRelease 的产出物包括经过验证的大模型文件以及一体化的 F
 示例应用场景：
 - 在科研实验中，快速部署大模型进行推理，无需关注底层硬件差异。
 - 在生产环境中，直接使用不同芯片版本的模型进行服务部署，保证性能和稳定性。
-
