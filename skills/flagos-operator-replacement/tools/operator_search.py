@@ -38,6 +38,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import time
 import traceback
@@ -58,6 +59,11 @@ except ImportError:
 # 配置
 # =============================================================================
 
+# 子进程调用的 Python 解释器：优先复用当前解释器（sys.executable），
+# 避免硬编码 "python" 在只装了 "python3" 的镜像里报 "python: not found"，
+# 进而使 next/update 输出解析失败（"substring not found"）中断搜索。
+PYTHON_BIN = sys.executable or shutil.which("python3") or shutil.which("python") or "python3"
+
 DEFAULT_STATE_PATH = "/flagos-workspace/results/operator_config.json"
 DEFAULT_PERF_CONFIG = "/flagos-workspace/scripts/config/perf_config.yaml"
 DEFAULT_TOGGLE_SCRIPT = "/flagos-workspace/scripts/toggle_flaggems.py"
@@ -66,7 +72,11 @@ DEFAULT_OPTIMIZER_SCRIPT = "/flagos-workspace/scripts/operator_optimizer.py"
 DEFAULT_WAIT_SCRIPT = "/flagos-workspace/scripts/wait_for_service.sh"
 DEFAULT_APPLY_CONFIG_SCRIPT = "/flagos-workspace/scripts/apply_op_config.py"
 
-SERVICE_STOP_CMD = "pkill -9 -f 'vllm.entrypoints|vllm serve|vllm.serve'"
+# 必须同时匹配 EngineCore worker 子进程：vLLM v1 的 worker 进程名是 "VLLM::EngineCore"
+# （大写，且不含 "serve"/"entrypoints"），旧命令只 kill API server，遗漏的 EngineCore
+# 会作为孤儿进程继续独占 GPU 显存，导致后续每一轮重启都因显存不足而"崩溃"，
+# 被误判为算子必需。用 -i 大小写不敏感，并显式覆盖 EngineCore。
+SERVICE_STOP_CMD = "pkill -9 -i -f 'vllm.entrypoints|vllm serve|vllm.serve|VLLM::EngineCore|EngineCore'"
 SERVICE_WAIT_TIMEOUT = 300  # 秒
 GPU_MEM_FREE_THRESHOLD = 0.95  # GPU 显存空闲比例阈值（>95% 视为已释放）
 GPU_RELEASE_TIMEOUT = 60       # GPU 显存释放等待超时（秒）
@@ -296,7 +306,7 @@ def save_json(data: Any, path: str):
 def get_next_action(state_path: str, optimizer_script: str) -> Dict[str, Any]:
     """调用 operator_optimizer.py next 获取下一步操作"""
     result = run_cmd(
-        f"python {optimizer_script} next --state-path {state_path}",
+        f"{PYTHON_BIN} {optimizer_script} next --state-path {state_path}",
         check=False
     )
     try:
@@ -662,7 +672,7 @@ def restart_service(stop_cmd: str, startup_cmd: str,
             break
     else:
         print(f"  WARNING: 端口 {svc_port} 仍被占用，强制 kill...")
-        run_cmd("pkill -9 -f 'vllm' 2>/dev/null", check=False)
+        run_cmd("pkill -9 -i -f 'vllm|EngineCore' 2>/dev/null", check=False)
         time.sleep(5)
     port_wait_elapsed = time.time() - port_wait_start
     if port_wait_elapsed > 5:
@@ -672,7 +682,7 @@ def restart_service(stop_cmd: str, startup_cmd: str,
     required_gpus = _read_gpu_count()
     if not wait_gpu_memory_release(required_free=required_gpus):
         print("  WARNING: GPU 显存未完全释放，尝试强制清理...")
-        run_cmd("pkill -9 -f 'vllm' 2>/dev/null", check=False)
+        run_cmd("pkill -9 -i -f 'vllm|EngineCore' 2>/dev/null", check=False)
         time.sleep(5)
         if not wait_gpu_memory_release(timeout=15, required_free=required_gpus):
             print("  WARNING: 强制清理后 GPU 显存仍未释放，继续启动（可能使用其他空闲 GPU）")
@@ -773,7 +783,7 @@ def run_benchmark_quick(perf_config: str, benchmark_script: str,
 
     output_dir = "/flagos-workspace/results"
     result = run_cmd(
-        f"python {benchmark_script} "
+        f"{PYTHON_BIN} {benchmark_script} "
         f"--config {perf_config} "
         f"--quick "
         f"--output-name {output_name} "
@@ -820,7 +830,7 @@ def update_optimizer_result(state_path: str, optimizer_script: str,
     tp_json = json.dumps(throughputs)
     import shlex
     result = run_cmd(
-        f"python {optimizer_script} update "
+        f"{PYTHON_BIN} {optimizer_script} update "
         f"--op-name {shlex.quote(op_name)} "
         f"--throughputs '{tp_json}' "
         f"--native-throughput {native_throughput} "
@@ -941,11 +951,24 @@ def _read_service_port() -> Optional[int]:
 
 
 def _read_gpu_count() -> int:
-    """从 context.yaml 读取 GPU 数量，fallback 到 SMI 工具探测"""
+    """返回本次服务重启需要空闲的 GPU 数量。
+
+    语义是"工作负载需要几张卡"，即张量并行度（TP），而非机器物理卡数。
+    否则在 TP=1 的模型上会误等全部物理卡空闲（当前服务占着卡永远等不到），
+    进而触发无谓的重启兜底。优先级：
+      1. service.tensor_parallel_size / model.tensor_parallel_size（显式 TP）
+      2. gpu.count（旧行为兜底，仅当无 TP 信息时）
+      3. SMI 探测到的物理卡数
+      4. 1
+    """
     try:
         import yaml
         with open("/flagos-workspace/shared/context.yaml", "r") as f:
             ctx = yaml.safe_load(f) or {}
+        for section in ("service", "model"):
+            tp = (ctx.get(section) or {}).get("tensor_parallel_size")
+            if tp:
+                return int(tp)
         gpu_count = ctx.get("gpu", {}).get("count")
         if gpu_count:
             return int(gpu_count)
@@ -1163,7 +1186,7 @@ def run_full_search(state_path: str, perf_config: str,
             if not gpu_check["available"]:
                 # 尝试清理残留进程
                 print("  尝试清理残留推理进程...")
-                run_cmd("pkill -9 -f 'vllm' 2>/dev/null", check=False)
+                run_cmd("pkill -9 -i -f 'vllm|EngineCore' 2>/dev/null", check=False)
                 time.sleep(10)
                 gpu_check = check_gpu_availability(required_gpus=required_gpus)
                 if not gpu_check["available"]:
@@ -1240,7 +1263,7 @@ def run_full_search(state_path: str, perf_config: str,
                     search_log[-1]["decision"] = "essential_keep"
                     search_log[-1]["op_name"] = crashed_op
                     # Kill any leftover processes before next round
-                    run_cmd("pkill -9 -f 'vllm\\|vllm serve' 2>/dev/null", check=False)
+                    run_cmd("pkill -9 -i -f 'vllm|EngineCore' 2>/dev/null", check=False)
                     time.sleep(5)
                     continue
             break
