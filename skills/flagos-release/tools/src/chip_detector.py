@@ -986,7 +986,8 @@ def generate_image_tag(
     if not date_tag:
         date_tag = raw.rsplit(":", 1)[1] if ":" in raw else datetime.datetime.now().strftime("%Y%m%d%H%M")
 
-    image_body = sanitize_docker_tag(image_body)
+    # Docker 仓库名（: 之前的 repository 部分）必须全小写，模型名可能含大写
+    image_body = sanitize_docker_tag(image_body).lower()
     full_tag = f"{harbor_registry}/{image_body}:{date_tag}"
 
     return full_tag

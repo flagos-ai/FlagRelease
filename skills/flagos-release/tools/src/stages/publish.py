@@ -619,19 +619,28 @@ class PublishStage(BaseStage):
         marker 形如 'Qwen3-8B-flagos-metax不适配'，作为镜像 tag 名。
         """
         publish_config = self.config.publish
-        # 源镜像：优先 existing_harbor_image，其次 commit 当前容器
-        source = publish_config.existing_harbor_image or publish_config.harbor_path
+        # 源镜像解析（须为本地真实存在的镜像，否则 docker tag 报 No such image）：
+        #   1. 优先已有 Harbor 镜像（existing_harbor_image，如复用准入镜像）
+        #   2. 容器输入：commit 当前容器得到本地镜像（分支 B 场景 harbor_path 是尚未构建的
+        #      版本目标 tag，不能作为 docker tag 源，故必须先 commit）
+        #   3. 兜底：harbor_path（仅当已确为本地存在的镜像时）
+        source = publish_config.existing_harbor_image
         if not source and self.config.input_type == 'container':
             if not self._commit_container():
                 return False
+            source = publish_config.image_source or publish_config.harbor_path
+        if not source:
             source = publish_config.harbor_path
         if not source:
             print("  x 不适配标记失败：无源镜像")
             return False
 
-        registry = source.split("/")[0]
-        # 目标：<registry>/<project>/<marker>（复用源镜像的 registry+project 前缀）
-        project_prefix = "/".join(source.split(":")[0].split("/")[:-1])
+        # 目标 registry+project 前缀取自 Harbor 目标 tag（harbor_path），而非本地 commit 源镜像
+        # （本地 commit 镜像名无 registry/project，直接复用会生成非法 reference）
+        prefix_ref = publish_config.harbor_path or publish_config.existing_harbor_image or source
+        registry = prefix_ref.split("/")[0]
+        # 目标：<registry>/<project>/<marker>（复用 Harbor 目标的 registry+project 前缀）
+        project_prefix = "/".join(prefix_ref.split(":")[0].split("/")[:-1])
         marker_path = f"{project_prefix}/{marker}" if project_prefix else f"{registry}/{marker}"
 
         print(f"[{self.name}] 不适配标记: {source} → {marker_path}")
@@ -1561,7 +1570,7 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
         print(f"  容器内上传目录: {container_upload_dir}")
 
         if token:
-            login_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}{endpoint_env}huggingface-cli login --token {token}"
+            login_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}{endpoint_env}hf auth login --token {token}"
             success, _, _ = self.run_command(
                 cmd=login_cmd, step_name="HuggingFace 登录",
                 timeout=60, in_container=True
@@ -1571,7 +1580,7 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
 
         # 强制私有发布，不留公开口子
         private_flag = "--private "
-        upload_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}{endpoint_env}huggingface-cli upload {private_flag}{repo_id} {container_upload_dir}".strip()
+        upload_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}{endpoint_env}hf upload {private_flag}{repo_id} {container_upload_dir}".strip()
 
         success = False
         current_delay = UPLOAD_RETRY_DELAY
@@ -1646,20 +1655,37 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
             if not self._ensure_container_package("huggingface_hub"):
                 print(f"  x 容器内安装 huggingface_hub 失败")
                 return False
-            hf_endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
-            shell_cmd = f"PATH=/opt/conda/bin:$PATH huggingface-cli upload {repo_id} {container_tmp}/README.md README.md"
-            docker_cmd = ["docker", "exec",
-                          "-e", f"HF_TOKEN={token}",
-                          "-e", f"HF_ENDPOINT={hf_endpoint}",
-                          container, "bash", "-c", shell_cmd]
+            shell_cmd = f"PATH=/opt/conda/bin:$PATH hf upload {repo_id} {container_tmp}/README.md README.md"
+            # HuggingFace endpoint fallback：用户指定则只用该 endpoint，否则依次尝试
+            # 直连 huggingface.co 与国内镜像 hf-mirror.com（后者在受限网络中可达且支持上传）
+            user_endpoint = os.environ.get("HF_ENDPOINT", "")
+            hf_endpoints = [user_endpoint] if user_endpoint else self._HF_ENDPOINTS
+            # HuggingFace 需外网访问；从主进程环境注入代理到容器（ModelScope 走 .cn 无需代理）
+            proxy_flags: List[str] = []
+            for env_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+                val = os.environ.get(env_var)
+                if val:
+                    proxy_flags.extend(["-e", f"{env_var}={val}"])
+            docker_cmds = []
+            for ep in hf_endpoints:
+                docker_cmds.append(["docker", "exec",
+                                    "-e", f"HF_TOKEN={token}",
+                                    "-e", f"HF_ENDPOINT={ep}"]
+                                   + proxy_flags
+                                   + [container, "bash", "-c", shell_cmd])
         else:
             print(f"  x 未知平台: {platform}")
             return False
 
-        # 带重试的上传
+        # 带重试的上传（HuggingFace 会在每次尝试轮换 endpoint）
         current_delay = UPLOAD_RETRY_DELAY
         for attempt in range(UPLOAD_MAX_RETRIES):
-            print(f"[{self.name}] 执行: {step_name} (尝试 {attempt+1}/{UPLOAD_MAX_RETRIES})")
+            if platform == "huggingface":
+                ep_idx = attempt % len(docker_cmds)
+                docker_cmd = docker_cmds[ep_idx]
+                print(f"[{self.name}] 执行: {step_name} (尝试 {attempt+1}/{UPLOAD_MAX_RETRIES}, endpoint={hf_endpoints[ep_idx]})")
+            else:
+                print(f"[{self.name}] 执行: {step_name} (尝试 {attempt+1}/{UPLOAD_MAX_RETRIES})")
             try:
                 result = subprocess.run(
                     docker_cmd, capture_output=True, text=True, timeout=300

@@ -98,7 +98,9 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
                 if not config["model"].get("tokenizer_path"):
                     config["model"]["tokenizer_path"] = ctx.get("model", {}).get("container_path", "")
                 if not config["model"].get("name"):
-                    config["model"]["name"] = ctx.get("model", {}).get("name", "")
+                    # 优先 service.model_id（实际 served id，vLLM 只认这个）；
+                    # 回退 model.name（可能是含斜杠的仓库路径，会导致 404）
+                    config["model"]["name"] = svc.get("model_id") or ctx.get("model", {}).get("name", "")
                 print(f"[INFO] 从 context.yaml 补充了缺失配置")
             except Exception as e:
                 print(f"[WARN] 读取 context.yaml 失败: {e}")
