@@ -153,13 +153,23 @@ class PublishStage(BaseStage):
         if self.config.plugin_image_mode and not self.config.plugin_qualified:
             self.skip_step("更新 ModelScope README", "Plugin 不达标，跳过")
         elif self.config.plugin_image_mode:
-            # plugin 达标：更新步骤8原仓库的 README，不创建新仓库、不上传权重
+            # plugin 达标。两种情形：
+            #  (a) 步骤8已建仓(V2 精度达标)：更新原仓库 README，不重传权重（常规路径）。
+            #  (b) 步骤8未建仓(V2 精度不达标 → 需求D：当时不对外发布)：此时 V3 达标，
+            #      需 full-publish 补发对外仓库(创建仓库+上传权重+README)。
             if publish_config.base_modelscope_model_id and readme_path:
                 success = self._update_repo_readme(
                     publish_config.base_modelscope_model_id, "modelscope", readme_path)
                 if not success:
                     ms_failed = True
                     print("  ⚠ 更新 ModelScope README 失败，继续执行 HuggingFace")
+            elif publish_config.publish_modelscope:
+                # 情形(b)：V2 未建仓但 V3 达标 → full-publish 补发
+                print("  ℹ 步骤8未建 ModelScope 仓库(V2 精度不达标)，V3 达标 → full-publish 补发对外仓库")
+                success = self._with_proxy_fallback("ModelScope", self._publish_to_modelscope, readme_path)
+                if not success:
+                    ms_failed = True
+                    print("  ⚠ ModelScope 补发失败，继续执行 HuggingFace")
             else:
                 self.skip_step("更新 ModelScope README", "无步骤8仓库信息或无 README")
         elif publish_config.publish_modelscope:
@@ -175,13 +185,20 @@ class PublishStage(BaseStage):
         if self.config.plugin_image_mode and not self.config.plugin_qualified:
             self.skip_step("更新 HuggingFace README", "Plugin 不达标，跳过")
         elif self.config.plugin_image_mode:
-            # plugin 达标：更新步骤8原仓库的 README
+            # plugin 达标：同 ModelScope，(a)已建仓→更新README；(b)V2未建仓但V3达标→full-publish补发
             if publish_config.base_huggingface_repo_id and readme_path:
                 success = self._update_repo_readme(
                     publish_config.base_huggingface_repo_id, "huggingface", readme_path)
                 if not success:
                     hf_failed = True
                     print("  ⚠ 更新 HuggingFace README 失败")
+            elif publish_config.publish_huggingface:
+                # 情形(b)：V2 未建仓但 V3 达标 → full-publish 补发
+                print("  ℹ 步骤8未建 HuggingFace 仓库(V2 精度不达标)，V3 达标 → full-publish 补发对外仓库")
+                success = self._with_proxy_fallback("HuggingFace", self._publish_to_huggingface, readme_path)
+                if not success:
+                    hf_failed = True
+                    print("  ⚠ HuggingFace 补发失败")
             else:
                 self.skip_step("更新 HuggingFace README", "无步骤8仓库信息或无 README")
         elif publish_config.publish_huggingface:

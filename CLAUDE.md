@@ -73,24 +73,25 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 5 精度算子调优       → [条件] env_type≠native 且 V2精度相对退化>5% 时分组排查定位问题算子（最多3轮）
 6 性能评测           → V1/V2 4k1k benchmark 对比 → 异常自动 issue
 7 性能算子调优       → [条件] env_type≠native 且 ratio<80% 时逐个禁用直到达标
-8 V2发布(Pro)        → 打包 + 上传，tag 后缀 -v2（统一私有发布，报告注明是否达标）
---- Plugin 验证流程（仅 qualified_core=true 触发，即 service_ok AND accuracy_ok；性能不阻断）---
+8 V2发布(Pro)        → 打包 Harbor 私有(始终) + V2 精度达标才对外传权重/README，tag 后缀 -v2
+--- Plugin 验证流程（plugin_entry=service_ok 触发，V2 精度不阻塞；性能不阻断）---
 9  Plugin 安装       → install_plugin.py 安装 vllm-plugin-FL → 失败则 issue + 停止
 10 Plugin 启服务     → 以达标算子集 + plugin 模式启动 → 崩溃则 issue + 停止
 11 Plugin 精度评测   → 与 V1 基线对比 → 不达标则算子调优（plugin 模式）
 12 Plugin 性能评测   → 与 V1 基线对比 → 不达标则算子调优（plugin 模式）
 13 V3发布(Max)       → tag 后缀 -v3，[不达标]issue + 镜像上传(私有) / [达标]镜像上传 + 更新 README
---- V4 减算子流程（qualified_core=true 触发，紧接 V3；性能不阻断，精度硬闸门）---
+--- V4 减算子流程（service_ok AND V3(plugin)精度达标 触发，紧接 V3；性能不阻断，精度硬闸门）---
 13.5 V4减算子(Flag-express) → operator_reduction.py 两阶段（阶段1性能搜索不测精度、阶段2精度回溯）在 V3 达标算子集上减算子提性能，追求性能绝对值最大化、达标基准是超越 V3（不与 V1 比），保底≥1算子，精度相对退化≤5% 为成立前提 → tag 后缀 -v4，plugin 镜像模式发布
 ```
 
-执行顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → [qualified_core=true] → 9 → 10 → 11 → 12 → 13 → [qualified_core=true] → 13.5(V4)
-（qualified_core = service_ok AND accuracy_ok；性能不看重、不阻断，仅影响发布 tag 的 qualified 标签，精度是唯一硬闸门）
+执行顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → [plugin_entry=service_ok] → 9 → 10 → 11 → 12 → 13 → [V3 精度达标] → 13.5(V4)
+（**plugin/V3 入口 = service_ok**：V2 精度不阻塞 V3 尝试；**V4 入口 = service_ok AND V3(plugin)精度达标**，不叠加 V2 精度；性能全程不阻断，仅影响发布 tag 的 qualified 标签）
+（对外发布(魔搭/HF)门控：V2 精度达标→步骤8建仓+传权重+README；V2 精度不达标→步骤8仅 Harbor 私有、不对外，若 V3 达标由步骤13 full-publish 补发；**V2 与 V3 都不达标→对外都不发**，仅留私有镜像）
 
 **算子累计禁用规则**：5 禁用精度问题算子 → 6 在此基础上测性能 → 7 继续禁用性能问题算子。步骤 10-12 以步骤 5/7 的最终算子集为起点：**精度达标则不重新调优；精度不达标按精度三级递进（先 issue → plugin 模式关算子调优 → 全关仍不达标才判框架问题）在 plugin 模式下继续调优；性能不达标不强制重调，尽力即可、达上限即停**（见步骤 11/12 说明）。各步骤详细流程见对应 SKILL.md 的"编排层指令"章节。
 
 **Plugin 流程特殊规则**：
-- 触发条件（用户 2026-07 定稿）：步骤 8 完成且 `workflow.service_ok AND accuracy_ok`（记为 **qualified_core**，即能起服务 + 精度硬闸门 rel_drop≤5%）。**性能不看重、不阻断**：performance_ok=false 不再阻止步骤 9-13，性能仅决定发布 tag 的 qualified 标签。精度崩(accuracy_ok=false)才 skip 步骤 9-13。
+- 触发条件（用户 2026-07-20 定稿，**入口只看能否起服务**）：步骤 8 完成且 `workflow.service_ok`（记为 **plugin_entry**，即 V2 环境能起服务）。**V2(注入)精度不达标不阻塞 V3 尝试**——V2(FlagGems 注入)与 V3(plugin)是两套不同的算子调度路径，V2 注入精度差不代表 V3 plugin 也差；V3 自己的精度在步骤11单独判。**性能不看重、不阻断**：performance_ok=false 不阻止步骤 9-13，性能仅决定发布 tag 的 qualified 标签。仅当 V2 服务起不来(service_ok=false)才 skip 步骤 9-13。
 - 崩溃停止：步骤 9 安装失败或步骤 10 服务崩溃 → 写 issue → 设 `plugin_workflow.crash_stopped=true` → **停止任务**
 - Issue 路由：步骤 9-13 所有 issue 通过 `issue_reporter.py full --type plugin-error --repo flagos-ai/vllm-plugin-FL` 提交（只保存本地文件）
 - **Plugin 阶段算子调优（精度三级递进）**：步骤 11 **精度**不达标时按三级递进处理：①先提交 issue 记录问题；②用 `operator_search.py run --plugin-mode --final-output-name v3_performance --state-path operator_config_v3.json` 在 Plugin 模式下继续关闭拖累精度的算子直到精度达标；③若全关 flaggems 算子仍精度不达标，判定为框架问题，提交 plugin-error issue，accuracy_ok=false（精度硬闸门未过 → V3 不产出）。步骤 12 **性能**不达标：仅写 performance-degraded issue + 标 performance_ok=false，**照常继续步骤13**（可选跑一次 plugin 性能调优尽力提升，达上限即停，不强求达标）。
