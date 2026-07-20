@@ -29,7 +29,11 @@ except ImportError:
 
 DEFAULT_REPO = "https://github.com/flagos-ai/vllm-plugin-FL"
 PACKAGE_NAME = "vllm-plugin-FL"
-IMPORT_NAME = "vllm_plugin_fl"
+# 真实导入名候选：镜像自带的 plugin 实际模块名是 vllm_fl（entry point fl），
+# 旧版硬编码 vllm_plugin_fl 已过期，会导致 verify 误报 importable=false。
+# 按顺序探测，任一可导入即视为可用。
+IMPORT_NAME = "vllm_plugin_fl"          # 兼容保留（历史包名）
+IMPORT_NAME_CANDIDATES = ["vllm_fl", "vllm_plugin_fl"]
 CLONE_DIR = "/tmp/vllm-plugin-FL"
 
 
@@ -215,11 +219,20 @@ def verify_plugin():
             "error": f"{PACKAGE_NAME} 未安装",
         }
 
-    # 尝试 import
-    code, out, err = run_cmd(
-        f'python3 -c "import {IMPORT_NAME}; print({IMPORT_NAME}.__version__)"'
-    )
-    importable = code == 0
+    # 尝试 import：按候选模块名依次探测，任一可导入即视为可用。
+    # （镜像自带 plugin 的真实模块名是 vllm_fl，旧硬编码 vllm_plugin_fl 会误报未安装）
+    importable = False
+    imported_name = ""
+    last_err = ""
+    for cand in IMPORT_NAME_CANDIDATES:
+        code, out, err = run_cmd(
+            f'python3 -c "import {cand}; print(getattr({cand}, \'__version__\', \'\'))"'
+        )
+        if code == 0:
+            importable = True
+            imported_name = cand
+            break
+        last_err = err
 
     return {
         "success": importable,
@@ -227,7 +240,8 @@ def verify_plugin():
         "installed": True,
         "version": version,
         "importable": importable,
-        "import_error": err if not importable else "",
+        "import_name": imported_name,
+        "import_error": last_err if not importable else "",
         "timestamp": datetime.now().isoformat(),
     }
 
