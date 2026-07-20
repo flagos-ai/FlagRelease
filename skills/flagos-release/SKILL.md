@@ -125,18 +125,23 @@ python main.py --from-context /flagos-workspace/shared/context.yaml --only-readm
 
 ### 步骤 0 — 发布条件检查
 
-从 `context.yaml` 读取 `workflow.qualified` 状态，用于报告生成。所有发布统一为私有。
+从 `context.yaml` 读取 `workflow.qualified` 状态，用于报告生成。所有对外仓库均为私有可见性。
 
 ```
 读取 workflow.qualified (= service_ok AND accuracy_ok AND performance_ok)
 
-publish.private = true   → 统一私有发布
+publish.private = true   → 对外仓库可见性恒为私有
 日志: "发布模式: 私有"
 
 qualified 状态记录到报告中:
   - qualified=true: "达标"
   - qualified=false: "未达标"
 ```
+
+**对外发布(魔搭/HF)建仓门控（需求 D，用户 2026-07-20 定稿）**——与"可见性"无关，决定是否建仓/传权重：
+- 步骤8(V2, 非 plugin 模式)：Harbor 镜像**始终**推送(私有)；**仅当 V2 精度达标(`workflow.accuracy_ok=true`)** 才创建 ModelScope/HuggingFace 仓库并上传权重。V2 精度不达标 → 只留 Harbor 私有镜像(过程产物)，**不建对外仓库**。
+- 步骤13(V3, plugin 模式)：若步骤8已建仓(V2 达标)→更新其 README；若步骤8未建仓(V2 不达标)但 V3 精度达标 → **full-publish 补发**(建仓+传权重+README)。
+- 净效果：V2 达标→对外发布；V2 不达标+V3 达标→V3 时补发；**V2 与 V3 都不达标→对外一律不发**，仅私有镜像。
 
 **qualified 判定细节**（仅用于报告展示）：
 - `service_ok = true`：V1 和 V2 都能正常启动
