@@ -2171,6 +2171,7 @@ ${SEG4_CTX_SUMMARY}
   ③ 全关 flaggems 算子仍精度不达标 → 判定为框架问题，提交 plugin-error issue（标注全关仍不达标），保持 accuracy_ok=false（精度硬闸门未过 → V3 不产出）。
 - 步骤 12 性能不达标 → 仅写 performance-degraded issue 记录 + 标 performance_ok=false，**照常继续步骤13**（可选：跑一次 plugin 模式性能调优尽力提升，达上限即停，不强求达标）。
 - 步骤 13 触发条件：plugin_workflow.accuracy_ok=true（**仅精度硬闸门**；performance_ok 不再门控，仅决定发布 tag 的 qualified 标签）
+- **⚠ 步骤13硬约束（不可跳过）**：只要步骤11精度达标（accuracy_ok=true），**必须**立即执行步骤13发布 V3，**禁止**因 performance_ok=false / qualified=false 而跳过步骤13；**禁止**在步骤13完成前进入 V4 或结束会话。若精度达标却未发 V3，即为流程违规（历史事故：DeepSeek-R1-0528 精度62%达标、性能77.9%<80%，agent误把performance_ok=false当门控、跳过步骤13直接跑V4致V3漏发）。步骤11→步骤13之间除步骤12性能记录外不得插入任何其他阶段。
 - 所有 issue 提交到 flagos-ai/vllm-plugin-FL（非 FlagGems）
 - 算子集以主流程已达标版本为起点；**精度达标则不重新调优，精度不达标则进入上述精度三级递进允许在 plugin 模式下继续调优**（性能不达标不强制重调，按上条尽力即可）
 - 启动环境变量：USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true + 已有 blacklist

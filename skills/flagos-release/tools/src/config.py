@@ -101,7 +101,7 @@ class PipelineConfig:
     host_workspace_base: str = ""  # /data/flagos-workspace/<model>，由 context.yaml workspace.host_path 填充
     config_persisted: bool = False
     plugin_image_mode: bool = False  # plugin 模式：镜像 tag 追加 -plugin，仓库名追加 -plugin
-    plugin_qualified: bool = False   # plugin 精度+性能均达标时为 True，否则跳过 README 更新
+    plugin_qualified: bool = False   # plugin 精度达标(accuracy_ok)即为 True→更新 README；性能不门控
     version_tag: str = "v2"          # 发布版本标签：v1/v2/v3/v4
     also_tag: str = ""               # 额外镜像 tag 版本（V2=V3 同镜像双 tag 场景）
     incompatible_tag: str = ""       # 不适配标记名（设置后只打标记不发布版本镜像）
@@ -302,9 +302,14 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
             if len(parts) == 2:
                 config.publish.base_huggingface_repo_id = parts[1]
 
-    # plugin_workflow.qualified → plugin_qualified
+    # plugin_qualified → 决定是否更新 README。
+    # 现行规则（用户 2026-07 定稿）：精度是唯一硬闸门，性能不门控。
+    # 只要 plugin 精度达标（accuracy_ok=true）即视为合格、应更新 README；
+    # plugin_workflow.qualified 含性能门控(performance_ok)，不能用作 README 门控，
+    # 否则精度达标但性能<80%的 V3 会被误判"不达标"跳过 README
+    # （历史事故：DeepSeek-R1-0528 精度62%达标、性能77.9%，README被误跳）。
     plugin_wf = ctx.get('plugin_workflow', {})
-    if plugin_wf.get('qualified', False):
+    if plugin_wf.get('accuracy_ok', False) or plugin_wf.get('qualified', False):
         config.plugin_qualified = True
 
     return config
