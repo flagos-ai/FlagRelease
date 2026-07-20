@@ -641,6 +641,9 @@ class PublishStage(BaseStage):
         registry = prefix_ref.split("/")[0]
         # 目标：<registry>/<project>/<marker>（复用 Harbor 目标的 registry+project 前缀）
         project_prefix = "/".join(prefix_ref.split(":")[0].split("/")[:-1])
+        # Docker repository 名必须全小写，marker 常含模型名(可能带大写,如 Qwen2.5-7B-Instruct)，
+        # 不小写化会报 "invalid reference format"。与 chip_detector.sanitize_docker_tag().lower() 一致。
+        marker = marker.lower()
         marker_path = f"{project_prefix}/{marker}" if project_prefix else f"{registry}/{marker}"
 
         print(f"[{self.name}] 不适配标记: {source} → {marker_path}")
