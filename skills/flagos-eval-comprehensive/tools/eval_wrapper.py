@@ -13,7 +13,7 @@
   python3 eval_wrapper.py --eval-cmd "python3 fast_gpqa.py --config fast_gpqa_config.yaml --output /flagos-workspace/results/gpqa_native.json" \
       --service-log /flagos-workspace/logs/startup_native.log \
       --stall-timeout 300 \
-      --max-timeout 3600
+      --max-timeout 7200
 
 输出约定:
   正常: 最后一行为 JSON (结果文件内容)，退出码 0
@@ -196,8 +196,8 @@ def main():
                         help="API 地址（显式指定时优先级最高，否则从 context-yaml 读取 port）")
     parser.add_argument("--stall-timeout", type=int, default=300,
                         help="评测进程无新输出超过此秒数视为卡死 (默认 300s)")
-    parser.add_argument("--max-timeout", type=int, default=3600,
-                        help="评测最大允许时间 (默认 3600s)")
+    parser.add_argument("--max-timeout", type=int, default=7200,
+                        help="评测最大允许时间 (默认 7200s = 2h)")
     parser.add_argument("--check-interval", type=int, default=15,
                         help="监控检查间隔 (默认 15s)")
     args = parser.parse_args()
