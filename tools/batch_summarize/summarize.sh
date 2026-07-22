@@ -4,6 +4,7 @@
 # 用法:
 #   bash summarize.sh <batch_log_path>                              # 批量模式：交互式
 #   bash summarize.sh --model <model_dir>                           # 单模型模式
+#   bash summarize.sh --model <model_dir> --result-json result.json # 单模型结构化结果
 #   bash summarize.sh <batch_log_path> --print --output report.md   # 非交互，直接输出文件
 #
 # 默认启动交互式 Claude 会话，可以实时对话追问。加 --print 则为非交互模式直接输出。
@@ -16,8 +17,15 @@ WORKSPACE="/data/flagos-workspace"
 OUTPUT_FILE=""
 BATCH_LOG=""
 MODEL_DIR=""
+MODEL_NAME=""
 TASK_FILE=""
 PRINT_MODE=false
+RESULT_JSON=""
+RESULT_TARGET=""
+RESULT_VENDOR="unknown"
+RESULT_OUTCOME=""
+RESULT_EXIT_CODE=""
+RESULT_ELAPSED_SECONDS=""
 
 show_help() {
     echo "FlagOS 迁移结果汇总工具"
@@ -29,6 +37,7 @@ show_help() {
     echo "参数:"
     echo "  <batch_log_path>         批次日志文件路径（批量模式）"
     echo "  --model, -m DIR          模型目录路径（单模型模式，与 batch_log 二选一）"
+    echo "  --result-json FILE       生成供进度汇报使用的结构化单模型结果"
     echo "  --task-file, -t FILE     任务列表文件（明确本次批量的模型范围）"
     echo "  --print, -p              非交互模式（直接输出报告，不启动对话）"
     echo "  --output, -o FILE        报告输出到文件（隐含 --print）"
@@ -57,6 +66,13 @@ while [[ $# -gt 0 ]]; do
         --output|-o) OUTPUT_FILE="$2"; PRINT_MODE=true; shift 2 ;;
         --workspace|-w) WORKSPACE="$2"; shift 2 ;;
         --model|-m) MODEL_DIR="$2"; shift 2 ;;
+        --model-name) MODEL_NAME="$2"; shift 2 ;;
+        --result-json) RESULT_JSON="$2"; shift 2 ;;
+        --target) RESULT_TARGET="$2"; shift 2 ;;
+        --vendor) RESULT_VENDOR="$2"; shift 2 ;;
+        --outcome) RESULT_OUTCOME="$2"; shift 2 ;;
+        --exit-code) RESULT_EXIT_CODE="$2"; shift 2 ;;
+        --elapsed-seconds) RESULT_ELAPSED_SECONDS="$2"; shift 2 ;;
         --task-file|-t) TASK_FILE="$2"; shift 2 ;;
         --help|-h) show_help; exit 0 ;;
         -*) echo "未知参数: $1"; exit 1 ;;
@@ -69,6 +85,36 @@ while [[ $# -gt 0 ]]; do
             shift ;;
     esac
 done
+
+# 结构化单模型分析模式：由专用分析器调用 Claude JSON Schema 输出并原子落盘。
+# 该模式与原有交互式/Markdown 详细报告完全隔离。
+if [ -n "$RESULT_JSON" ]; then
+    if [ -z "$MODEL_DIR" ] || [ -z "$RESULT_OUTCOME" ] || [ -z "$RESULT_EXIT_CODE" ] || [ -z "$RESULT_ELAPSED_SECONDS" ]; then
+        echo "错误: --result-json 需要同时提供 --model、--outcome、--exit-code、--elapsed-seconds" >&2
+        exit 2
+    fi
+    if [ -z "$MODEL_NAME" ]; then
+        MODEL_NAME="$(basename "$MODEL_DIR")"
+    fi
+    ANALYZER="${SCRIPT_DIR}/model_result_analyzer.py"
+    RESULT_PROMPT="${SCRIPT_DIR}/summarize_model_result.md"
+    if [ ! -f "$ANALYZER" ] || [ ! -f "$RESULT_PROMPT" ]; then
+        echo "错误: 单模型结构化分析器或提示词不存在" >&2
+        exit 2
+    fi
+    exec python3 "$ANALYZER" \
+        --model-dir "$MODEL_DIR" \
+        --model-name "$MODEL_NAME" \
+        --result-json "$RESULT_JSON" \
+        --prompt-file "$RESULT_PROMPT" \
+        --target "$RESULT_TARGET" \
+        --vendor "$RESULT_VENDOR" \
+        --outcome "$RESULT_OUTCOME" \
+        --exit-code "$RESULT_EXIT_CODE" \
+        --elapsed-seconds "$RESULT_ELAPSED_SECONDS" \
+        --timeout-seconds "${FLAGOS_MODEL_ANALYSIS_TIMEOUT_SECONDS:-900}" \
+        --claude-command "${CLAUDE_COMMAND:-claude}"
+fi
 
 # 检测 Claude Code
 if ! command -v claude &>/dev/null; then

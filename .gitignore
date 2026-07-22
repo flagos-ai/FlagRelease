@@ -9,3 +9,8 @@ nohup.out
 防自由发挥加固方案.md
 commits_summary_*.txt
 performance_compare.csv
+
+# 本地飞书通知配置（包含 Webhook 凭证）
+feishu.env
+.feishu.env
+*.feishu.env
