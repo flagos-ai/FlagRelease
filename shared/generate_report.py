@@ -248,13 +248,22 @@ class ReportData:
 
         # issue markdown files (含复现步骤)
         # 排除 issue_report_/issue_data_ 中间文件，只读最终的 issue_{type}_{repo}_{ts}.md
+        # 同一 issue 常生成多个时间戳副本，按标题去重（保留首个）。
         if os.path.isdir(r):
+            _seen_issue_titles = set()
             for f in sorted(Path(r).glob("issue_*.md")):
                 if f.name.startswith(("issue_report_", "issue_data_")):
                     continue
                 content = read_text(str(f))
-                if content:
-                    self.issue_files.append(parse_issue_md(content))
+                if not content:
+                    continue
+                parsed = parse_issue_md(content)
+                title = (parsed.get("title") or "").strip()
+                if title and title in _seen_issue_titles:
+                    continue
+                if title:
+                    _seen_issue_titles.add(title)
+                self.issue_files.append(parsed)
 
         # oplists
         for name in ("initial_oplist", "accuracy_tuned_oplist", "final_oplist", "v4_oplist"):
@@ -580,6 +589,124 @@ def lookup_tflops(gpu_type: str) -> Optional[float]:
     return None
 
 
+# GPU 单卡显存查表（GB），nvidia-smi 未采集时的兜底
+GPU_MEMORY_MAP = {
+    "A100": 80, "A800": 80,
+    "H100": 80, "H800": 80,
+    "H20-3E": 140, "H20": 96,
+    "L40S": 48, "L40": 48, "L20": 48,
+    "B200": 192, "B100": 192, "GB200": 192,
+    "4090": 24, "4080": 16, "3090": 24,
+    "910B": 64, "910C": 64, "910A": 32,
+    "Z100": 32, "K100": 64, "K100_AI": 64,
+    "MLU590": 48, "MLU370": 24,
+}
+
+
+def lookup_gpu_memory(gpu_type: str) -> Optional[int]:
+    """从 GPU 型号模糊匹配单卡显存(GB)。优先匹配更长的型号名(如 H20-3E 先于 H20)。"""
+    if not gpu_type:
+        return None
+    normalized = gpu_type.strip().upper().replace(" ", "").replace("_", "")
+    for key, val in sorted(GPU_MEMORY_MAP.items(), key=lambda x: -len(x[0])):
+        if key.upper().replace("-", "").replace("_", "") in normalized.replace("-", ""):
+            return val
+    return None
+
+
+def read_total_cost_usd(workspace: str) -> Optional[float]:
+    """累加 logs/seg*_cost.txt 中的美金消费（含 seg2_step7_cost.txt / seg4v4_cost.txt 等变体）。"""
+    logs_dir = os.path.join(workspace, "logs")
+    if not os.path.isdir(logs_dir):
+        return None
+    total = 0.0
+    found = False
+    for f in sorted(Path(logs_dir).glob("seg*_cost.txt")):
+        txt = read_text(str(f))
+        if not txt:
+            continue
+        for tok in txt.split():
+            try:
+                total += float(tok)
+                found = True
+                break  # 每文件取首个数值
+            except ValueError:
+                continue
+    return total if found else None
+
+
+USD_TO_RMB_RATE = 7.2
+
+
+def _tag_timestamp(image_url: str) -> Optional[str]:
+    """从 harbor 镜像 tag 里的 12 位时间戳(YYYYMMDDHHMM)解析为 ISO 时间。"""
+    if not image_url:
+        return None
+    m = re.search(r':(\d{12})-v[234]', image_url)
+    if not m:
+        m = re.search(r':(\d{12})', image_url)
+    if not m:
+        return None
+    ts = m.group(1)
+    try:
+        dt = datetime.strptime(ts, "%Y%m%d%H%M")
+        return dt.strftime("%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return None
+
+
+def build_report_basename(data, ext: str = ".md") -> str:
+    """报告文件名：厂商_模型名_时间戳（不再用固定的 report）。
+
+    - 厂商取 gpu.vendor（如 nvidia）
+    - 模型名取 model.name 的 basename（去 org 前缀）
+    - 时间戳优先取最高版本发布镜像 tag 的 12 位串，取不到用当前时间
+    """
+    ctx = data.context or {}
+    vendor = (ctx.get("gpu", {}) or {}).get("vendor", "") or "unknown"
+
+    model_name = (ctx.get("model", {}) or {}).get("name", "") or "model"
+    if "/" in model_name:
+        model_name = model_name.rsplit("/", 1)[-1]
+
+    # 时间戳：从发布镜像 tag 解析 12 位；否则当前时间
+    versions = ctx.get("versions", {}) or {}
+    release = ctx.get("release", {}) or {}
+    ts = ""
+    for vk in ("v4", "v3", "v2"):
+        vc = versions.get(vk, {}) or {}
+        img = (
+            release.get(f"{vk}_harbor_image", "")
+            or vc.get("image_url", "") or vc.get("harbor_image", "") or vc.get("image", "")
+        )
+        m = re.search(r":(\d{12})", img)
+        if m:
+            ts = m.group(1)
+            break
+    if not ts:
+        ts = datetime.now().strftime("%Y%m%d%H%M")
+
+    def _safe(s: str) -> str:
+        return re.sub(r"[^A-Za-z0-9._-]", "-", s)
+
+    return f"{_safe(vendor)}_{_safe(model_name)}_{ts}{ext}"
+
+
+def _fmt_dt(value: Any) -> str:
+    """展示用时间格式化：把 ISO 时间里日期与时间之间的 'T' 换成空格。
+
+    仅替换日期/时间分隔的那个 T（形如 2026-07-17T21:31:21），
+    不改动其它内容；空值/非时间串原样返回。
+    """
+    s = str(value) if value is not None else ""
+    if not s or s == "-":
+        return s or "-"
+    s = re.sub(r"(?<=\d{4}-\d{2}-\d{2})T(?=\d{2}:\d{2})", " ", s)
+    # 去掉 ISO 尾部的 UTC 标记 Z（展示口径不带时区后缀）
+    s = re.sub(r"(?<=\d{2}:\d{2}:\d{2})Z$", "", s)
+    return s
+
+
 # =============================================================================
 # 版本配置标签
 # =============================================================================
@@ -690,34 +817,72 @@ def generate_text_report(data: ReportData) -> str:
     lines.append("")
     lines.append("| 项目 | 内容 |")
     lines.append("|------|------|")
-    project_name = ctx.get("project", {}).get("name", "") or model.get("project_name", "")
-    lines.append(f"| 项目名称 | {project_name or '-'} |")
-    lines.append(f"| 开始时间 | {timing.get('workflow_start', '-')} |")
+    lines.append(f"| 项目名称 | KT2期 |")
+    lines.append(f"| 开始时间 | {_fmt_dt(timing.get('workflow_start', '-'))} |")
 
     # gems+tree 上传时间 = 步骤8完成时间
     release_step = _find_ledger_step(data, "08_release")
     v2_upload_time = release_step.get("finished_at", "-") if release_step else "-"
-    lines.append(f"| gems+tree版本上传时间 | {v2_upload_time} |")
+    lines.append(f"| gems+tree版本上传时间 | {_fmt_dt(v2_upload_time)} |")
 
-    # plugin 上传时间 = 步骤13完成时间
-    plugin_release_step = _find_ledger_step(data, "13_plugin_release")
-    v3_upload_time = plugin_release_step.get("finished_at", "-") if plugin_release_step else "-"
-    lines.append(f"| plugin上传时间 | {v3_upload_time} |")
+    # 发布时间 = 发布镜像产出时间。优先从最高版本镜像 tag 的时间戳解析
+    # （最贴合“镜像产出”口径），取不到再回退 ledger 步骤13/步骤8 完成时间。
+    _versions_ctx = ctx.get("versions", {}) or {}
+    _v4c = _versions_ctx.get("v4", {}) or {}
+    _v3c = _versions_ctx.get("v3", {}) or {}
+    _release_img = (
+        release.get("v4_harbor_image", "")
+        or _v4c.get("image_url", "") or _v4c.get("harbor_image", "") or _v4c.get("image", "")
+        or release.get("v3_harbor_image", "")
+        or _v3c.get("image_url", "") or _v3c.get("harbor_image", "") or _v3c.get("image", "")
+        or plugin_wf.get("plugin_image_url", "")
+    )
+    release_time = _tag_timestamp(_release_img)
+    if not release_time:
+        plugin_release_step = _find_ledger_step(data, "13_plugin_release")
+        release_time = plugin_release_step.get("finished_at", "") if plugin_release_step else ""
+    if not release_time:
+        release_time = v2_upload_time  # 步骤8完成时间（上面已取）
+    lines.append(f"| 发布时间 | {_fmt_dt(release_time) if release_time else '-'} |")
 
-    lines.append(f"| 模型 | {model.get('name', '-')} |")
-    lines.append(f"| 模型类型 | {model.get('model_type', '') or '文本生成'} |")
+    # 模型名只取 basename（去掉 org 前缀，如 CohereLabs/aya-23-8B → aya-23-8B）
+    _model_name = model.get("name", "-") or "-"
+    if "/" in _model_name:
+        _model_name = _model_name.rsplit("/", 1)[-1]
+    lines.append(f"| 模型 | {_model_name} |")
+    lines.append(f"| 模型领域 | {model.get('domain', '') or '语言'} |")
     lines.append(f"| 权重来源 | {model.get('url', '') or model.get('name', '-')} |")
-    lines.append(f"| 权重数制 | {model.get('dtype', '-')} |")
-    lines.append(f"| 计算数制（默认权重数制） | {model.get('dtype', '-')} |")
+    lines.append(f"| 权重数制 | {model.get('dtype') or 'bf16'} |")
+    lines.append(f"| 计算数制（默认权重数制） | {model.get('dtype') or 'bf16'} |")
     lines.append(f"| 推理框架后端 | {runtime.get('framework', 'vllm')} |")
     lines.append(f"| 推理框架后端版本 | {core_pkgs.get('vllm', '-')} |")
-    lines.append(f"| 推理框架插件plugin-FL | {flag_pkgs.get('vllm_plugin', '-')} |")
+    # plugin-FL 版本：优先真实版本号（plugin_install.version），
+    # 其次从发布镜像 tag 的 pluginX.Y.Z 解析，最后回退 flag_packages 的采集值
+    _plugin_install = ctx.get("plugin_install", {}) or {}
+    plugin_ver = _plugin_install.get("version", "") or ""
+    if not plugin_ver:
+        _pimg = plugin_wf.get("plugin_image_url", "") or ""
+        m = re.search(r"plugin([0-9][0-9A-Za-z._]*?)(?:-|:)", _pimg)
+        if m:
+            plugin_ver = m.group(1)
+    if not plugin_ver:
+        _fp = flag_pkgs.get("vllm_plugin", "")
+        # 采集值若是 installed/True 之类的占位，不当版本号用
+        plugin_ver = _fp if _fp and _fp not in ("installed", "True", "true", True) else "-"
+    lines.append(f"| 推理框架插件plugin-FL | {plugin_ver} |")
     lines.append(f"| FlagGems版本 | {flag_pkgs.get('flaggems', '-')} |")
     lines.append(f"| Flagtree版本 | {env.get('flagtree_version', flag_pkgs.get('flagtree', '-'))} |")
     lines.append(f"| FlagCX版本 | {flag_pkgs.get('flagcx', '-')} |")
     lines.append(f"| 厂商 | {gpu.get('vendor', '-')} |")
-    mem_gb = gpu.get("memory_gb", ctx.get("gpu", {}).get("memory_gb", "-"))
-    lines.append(f"| GPU | {gpu_type} : {gpu_count} x {mem_gb}GB |")
+    # 单卡显存：优先 context 采集值(nvidia-smi)，缺失时按型号查表兜底
+    mem_gb = gpu.get("memory_gb") or ctx.get("gpu", {}).get("memory_gb")
+    if not mem_gb:
+        mem_gb = lookup_gpu_memory(gpu_type)
+    # 真实显卡型号：去掉软件识别的 -3e 后缀，并把 NVIDIA 与型号间的分隔符
+    # （_ 或 -）统一为空格（NVIDIA_H20-3e / NVIDIA-H20-3e → NVIDIA H20）
+    gpu_type_display = re.sub(r"-3e\b", "", gpu_type)
+    gpu_type_display = re.sub(r"^(NVIDIA)[\s_-]+", r"\1 ", gpu_type_display)
+    lines.append(f"| GPU | {gpu_type_display} : {gpu_count} x {str(mem_gb) + 'GB' if mem_gb else '-GB'} |")
     lines.append(f"| 容器 | {container.get('name', '-')} |")
     lines.append(f"| release自动化工具版本 | v0.1.0 |")
 
@@ -809,6 +974,7 @@ def generate_text_report(data: ReportData) -> str:
         # 算子替换列表（txt）
         lines.append("### 算子替换列表（txt）")
         txt = ops_data["txt"]
+        lines.append(f"替换算子数：{len(txt)}")
         if txt:
             lines.append("```json")
             lines.append("[")
@@ -837,8 +1003,8 @@ def generate_text_report(data: ReportData) -> str:
         gpqa = data.gpqa_versions.get(ver_key)
         lines.append("")
         lines.append(f"### {ver_label}")
-        lines.append("| 数据集 | 评测条数 | 正确率(%) | 开启算子数 | FlagOS配置 |")
-        lines.append("|--------|---------|-----------|-----------|-----------|")
+        lines.append("| 数据集 | 评测条数 | 正确率(%) | 开启算子数 |")
+        lines.append("|--------|---------|-----------|-----------|")
 
         if gpqa:
             score = gpqa.get("score", "-")
@@ -863,9 +1029,9 @@ def generate_text_report(data: ReportData) -> str:
                         or []
                     )
                     op_count = str(len(v4_ops)) if v4_ops else "-"
-            lines.append(f"| GPQA_Diamond | {total} | {score} | {op_count} | {config_label} |")
+            lines.append(f"| GPQA_Diamond | {total} | {score} | {op_count} |")
         else:
-            lines.append(f"| GPQA_Diamond | - | - | - | - |")
+            lines.append(f"| GPQA_Diamond | - | - | - |")
 
     # 精度结果对比
     lines.append("")
@@ -918,11 +1084,11 @@ def generate_text_report(data: ReportData) -> str:
         metrics = _extract_perf_metrics(perf) if perf else {}
         lines.append("")
         lines.append(f"### {ver_label}")
-        lines.append("| 模型名 | 厂商 | TFLOPS（单卡） | 卡数 | TFLOPS（单卡） × 卡数 | 4k-1k 64并发 - mean TTFT（ms） | 4k-1k 64并发 - P99 TTFT（ms） | 4k-1k 64并发 - output toks/s | 4k-1k 64并发 - total tok/s | 4k-1k 64并发 - Mean TPOT (ms) | 开算子数 | FlagOS配置 | 单算力吞吐 |")
-        lines.append("|--------|------|---------------|------|---------------------|------|------|------|------|------|------|------|------|")
+        lines.append("| 模型名 | 厂商 | TFLOPS（单卡） | 卡数 | TFLOPS（单卡） × 卡数 | 4k-1k 64并发 - mean TTFT（ms） | 4k-1k 64并发 - P99 TTFT（ms） | 4k-1k 64并发 - output toks/s | 4k-1k 64并发 - total tok/s | 4k-1k 64并发 - Mean TPOT (ms) | 开算子数 | 单算力吞吐 |")
+        lines.append("|--------|------|---------------|------|---------------------|------|------|------|------|------|------|------|")
 
         if not metrics:
-            lines.append(f"| {model_name} | {vendor} | {tflops_str} | {gpu_count} | {total_tflops_str} | - | - | - | - | - | - | {config_label} | - |")
+            lines.append(f"| {model_name} | {vendor} | {tflops_str} | {gpu_count} | {total_tflops_str} | - | - | - | - | - | - | - |")
         else:
             ttft = metrics.get("Mean TTFT (ms)", "-")
             p99_ttft = metrics.get("P99 TTFT (ms)", "-")
@@ -959,7 +1125,7 @@ def generate_text_report(data: ReportData) -> str:
             except (ValueError, TypeError, ZeroDivisionError):
                 pass
 
-            lines.append(f"| {model_name} | {vendor} | {tflops_str} | {gpu_count} | {total_tflops_str} | {ttft} | {p99_ttft} | {output_tps} | {total_tps_val} | {tpot} | {op_count} | {config_label} | {throughput_per_tflops} |")
+            lines.append(f"| {model_name} | {vendor} | {tflops_str} | {gpu_count} | {total_tflops_str} | {ttft} | {p99_ttft} | {output_tps} | {total_tps_val} | {tpot} | {op_count} | {throughput_per_tflops} |")
 
     # 性能结果对比
     lines.append("")
@@ -1010,9 +1176,39 @@ def generate_text_report(data: ReportData) -> str:
     lines.append("")
     lines.append("| 项目 | 内容 |")
     lines.append("|------|------|")
+    # 流程耗时：优先总时长；为 0/缺失时按 ledger 步骤时间戳算 wall-clock 跨度
     total_dur = timing.get("total_duration_seconds", 0)
+    if not total_dur:
+        ts_list = []
+
+        def _add_ts(tv):
+            if not tv:
+                return
+            try:
+                dt = datetime.fromisoformat(str(tv).replace("Z", "+00:00"))
+                # 统一为 naive（去掉时区），避免 aware/naive 混比报错
+                if dt.tzinfo is not None:
+                    dt = dt.replace(tzinfo=None)
+                ts_list.append(dt)
+            except (ValueError, TypeError):
+                pass
+
+        for step in data.ledger_steps():
+            _add_ts(step.get("started_at"))
+            _add_ts(step.get("finished_at"))
+        _add_ts(timing.get("workflow_start"))
+        _add_ts(timing.get("workflow_end"))
+        if len(ts_list) >= 2:
+            total_dur = int((max(ts_list) - min(ts_list)).total_seconds())
     lines.append(f"| 流程耗时 | {format_duration(total_dur) if total_dur else '-'} |")
-    lines.append(f"| 流程消费 | — |")
+
+    # 流程消费：logs/seg*_cost.txt 为美金，×7.2 换算人民币
+    cost_usd = read_total_cost_usd(data.workspace)
+    if cost_usd is not None:
+        cost_rmb = cost_usd * USD_TO_RMB_RATE
+        lines.append(f"| 流程消费 | {cost_rmb:.2f} 元（≈ ${cost_usd:.2f} × {USD_TO_RMB_RATE}） |")
+    else:
+        lines.append(f"| 流程消费 | — |")
 
     # ═══════════════════════════════════════════════
     # 发布信息
@@ -1025,8 +1221,18 @@ def generate_text_report(data: ReportData) -> str:
     # V1（手动发布，自动化不产出）
     lines.append("  - V1：（阶段一手动发布）")
 
+    versions_ctx = ctx.get("versions", {}) or {}
+    v2_ctx = versions_ctx.get("v2", {}) or {}
+    v3_ctx = versions_ctx.get("v3", {}) or {}
+    v4_ctx = versions_ctx.get("v4", {}) or {}
+
     # V2
-    v2_harbor = release.get("v2_harbor_image", "") or release.get("harbor_image", "")
+    v2_harbor = (
+        release.get("v2_harbor_image", "")
+        or release.get("harbor_image", "")
+        or v2_ctx.get("image_url", "")
+        or v2_ctx.get("harbor_image", "")
+    )
     image_reg = ctx.get("image", {}).get("registry_url", "")
     if not v2_harbor and image_reg and "-v2" in image_reg:
         v2_harbor = image_reg
@@ -1035,21 +1241,44 @@ def generate_text_report(data: ReportData) -> str:
     lines.append(f"  - V2：{v2_harbor or '-'}")
 
     # V3
-    v3_harbor = release.get("v3_harbor_image", "") or plugin_wf.get("plugin_image_url", "")
+    v3_harbor = (
+        release.get("v3_harbor_image", "")
+        or v3_ctx.get("image_url", "")
+        or v3_ctx.get("harbor_image", "")
+        or v3_ctx.get("image", "")
+        or plugin_wf.get("plugin_image_url", "")
+    )
     lines.append(f"  - V3：{v3_harbor or '-'}")
 
-    # V4
-    versions_ctx = ctx.get("versions", {}) or {}
+    # V4（镜像可能存在 image_url / harbor_image / image 任一字段）
     v4_harbor = (
         release.get("v4_harbor_image", "")
-        or (versions_ctx.get("v4", {}) or {}).get("harbor_image", "")
+        or v4_ctx.get("image_url", "")
+        or v4_ctx.get("harbor_image", "")
+        or v4_ctx.get("image", "")
     )
     lines.append(f"  - V4：{v4_harbor or '-'}")
 
 
     lines.append("")
-    ms_url = release.get("modelscope_url", "")
-    hf_url = release.get("huggingface_url", "")
+    # MS/HF 链接：release.* → plugin_workflow.* → versions.* → 按命名规则合成
+    model_short = (model.get("name", "") or "").split("/")[-1]
+    ms_url = (
+        release.get("modelscope_url", "")
+        or plugin_wf.get("plugin_modelscope_url", "")
+        or v3_ctx.get("modelscope_url", "")
+        or v2_ctx.get("modelscope_url", "")
+    )
+    hf_url = (
+        release.get("huggingface_url", "")
+        or plugin_wf.get("plugin_huggingface_url", "")
+        or v3_ctx.get("huggingface_url", "")
+        or v2_ctx.get("huggingface_url", "")
+    )
+    if not ms_url and model_short:
+        ms_url = f"https://modelscope.cn/models/FlagRelease/{model_short}-FlagOS"
+    if not hf_url and model_short:
+        hf_url = f"https://huggingface.co/FlagRelease/{model_short}-FlagOS"
     lines.append(f"- ModelScope: {ms_url or '-'}")
     lines.append(f"- HuggingFace: {hf_url or '-'}")
 
@@ -1060,106 +1289,61 @@ def generate_text_report(data: ReportData) -> str:
     lines.append("# 结论")
     lines.append("")
 
-    qualified = wf.get("qualified")
-    acc_ok = wf.get("accuracy_ok")
-    perf_ok = wf.get("performance_ok")
-    svc_ok = wf.get("service_ok")
-
-    if qualified is True:
-        lines.append("- 流自动化程结论：✅ 流程已达标")
-    elif qualified is False:
+    # 发布镜像上传状态以「真实镜像产出」为准，而非单一 qualified 字段。
+    # 任一版本镜像非空即视为已产出发布镜像。
+    produced = [(lbl, img) for lbl, img in (("V2", v2_harbor), ("V3", v3_harbor), ("V4", v4_harbor)) if img]
+    if produced:
+        # 最高版本作为发布版本标注
+        top_label = produced[-1][0]
+        note = f"（{top_label} 已产出）"
+        # 精度硬闸门未过但仍靠禁算子达标发布时，附注原因
+        if wf.get("qualified") is False and wf.get("accuracy_ok") is False:
+            note = f"（{top_label} 已产出；曾遇精度不达标，经算子调整后达标发布）"
+        lines.append(f"- 发布镜像上传正常：✅ 合格{note}")
+    else:
+        # 无任何镜像产出：标清原因
         reasons = []
-        if not svc_ok:
+        if wf.get("service_ok") is False:
             reasons.append("服务启动失败")
-        if not acc_ok:
+        if wf.get("accuracy_ok") is False:
             reasons.append("精度不达标")
-        if not perf_ok:
+        if wf.get("performance_ok") is False:
             reasons.append("性能不达标")
-        lines.append(f"- 流自动化程结论：❌ 未达标 ({', '.join(reasons) if reasons else '未知原因'})")
+        reason_str = "、".join(reasons) if reasons else ("流程未完成" if not data.workflow_complete else "未产出发布镜像")
+        lines.append(f"- 发布镜像上传正常：❌ 未产出（{reason_str}）")
+
+    # 流程自动化结论
+    if produced:
+        lines.append("- 流程自动化结论：✅ 流程已达标")
     elif not data.workflow_complete:
-        lines.append("- 流自动化程结论：⏳ 流程未完成")
+        lines.append("- 流程自动化结论：⏳ 流程未完成")
     else:
-        lines.append("- 流自动化程结论：N/A")
-
-    # gems+tree 上传
-    if v2_harbor:
-        lines.append(f"- gems+tree上传正常：✅")
-    else:
-        lines.append(f"- gems+tree上传正常：❌")
-
-    # Plugin 上传
-    plugin_triggered = plugin_wf.get("triggered", False)
-    plugin_qualified = plugin_wf.get("qualified")
-    plugin_crash = plugin_wf.get("crash_stopped", False)
-    if not plugin_triggered:
-        lines.append(f"- Plugin 上传正常：⏭ 未触发")
-    elif plugin_crash:
-        lines.append(f"- Plugin 上传正常：❌ 崩溃中止")
-    elif plugin_qualified is True:
-        lines.append(f"- Plugin 上传正常：✅")
-    elif plugin_qualified is False:
-        lines.append(f"- Plugin 上传正常：❌ 不合格")
-    else:
-        lines.append(f"- Plugin 上传正常：-")
-
-    lines.append(f"- 该模型目前是否达到正常模型发布标准（是否安装plugin成功）：{'是' if plugin_wf.get('service_ok') else '否'}")
+        lines.append("- 流程自动化结论：❌ 未达标")
 
     # ═══════════════════════════════════════════════
-    # 提交的 Issue
+    # 提交到 flagos 仓库的 Issue
+    # 说明：GitHub API 自动上传尚未实现，故只列 issue 标题，不放链接。
+    # 数据源 results/issue_*.md，按标题去重（同一 issue 常有多个时间戳副本）。
     # ═══════════════════════════════════════════════
-    submitted_issues = data.get("issues", "submitted", default=[]) or []
-    type_label = {
-        "operator-crash": "算子崩溃",
-        "accuracy-zero": "精度归零",
-        "accuracy-degraded": "精度下降",
-        "performance-degraded": "性能下降",
-        "flagtree-error": "FlagTree 错误",
-        "plugin-error": "Plugin 错误",
-    }
+    lines.append("")
+    lines.append("## 提交到 flagos 仓库的 Issue")
 
-    if data.issue_files or submitted_issues:
-        lines.append("")
-        lines.append("# 提交的 Issue")
+    # 按标题去重，保留首次出现顺序
+    seen_titles = set()
+    unique_titles: List[str] = []
+    for issue in data.issue_files:
+        title = (issue.get("title") or "").strip()
+        if title and title not in seen_titles:
+            seen_titles.add(title)
+            unique_titles.append(title)
 
-        # 合并两个来源：issue_files（本地 md 解析）+ submitted_issues（context.yaml 记录）
-        # 构建 issue 列表，优先从 submitted_issues 获取 URL
-        submitted_url_map: Dict[str, str] = {}  # title -> url
-        if submitted_issues and isinstance(submitted_issues, list):
-            for iss in submitted_issues:
-                if isinstance(iss, dict):
-                    t = iss.get("title", "")
-                    u = iss.get("url", "")
-                    if t and u:
-                        submitted_url_map[t] = u
-
-        issue_idx = 0
-        for issue in data.issue_files:
-            issue_idx += 1
-            itype = type_label.get(issue["type"], issue["type"])
-            title = issue["title"] or "未知问题"
-            # URL 优先级：issue md 内提取 > submitted_issues 记录
-            url = issue.get("url", "") or submitted_url_map.get(title, "")
-            if url:
-                lines.append(f"{issue_idx}. [{itype}] {title}  ")
-                lines.append(f"   {url}")
-            else:
-                lines.append(f"{issue_idx}. [{itype}] {title}")
-
-        # 补充 submitted_issues 中有 URL 但 issue_files 中没有的条目
-        seen_titles = {iss["title"] for iss in data.issue_files if iss.get("title")}
-        for iss in (submitted_issues or []):
-            if isinstance(iss, dict):
-                title = iss.get("title", "")
-                url = iss.get("url", "")
-                if title and title not in seen_titles and url:
-                    issue_idx += 1
-                    itype_raw = iss.get("type", "")
-                    itype = type_label.get(itype_raw, itype_raw)
-                    lines.append(f"{issue_idx}. [{itype}] {title}  ")
-                    lines.append(f"   {url}")
-            elif isinstance(iss, str) and iss not in seen_titles:
-                issue_idx += 1
-                lines.append(f"{issue_idx}. {iss}")
+    lines.append(f"issue 数量：{len(unique_titles)}")
+    if unique_titles:
+        lines.append("issue 标题：")
+        for idx, title in enumerate(unique_titles, 1):
+            lines.append(f"{idx}. {title}")
+    else:
+        lines.append("issue 标题：无")
 
     # ═══════════════════════════════════════════════
     # 发布的 README
@@ -1398,7 +1582,7 @@ def generate_json_report(data: ReportData) -> dict:
             "performance.ok": "主流程性能是否达标（含调优后结果）",
             "operator_tuning": "算子调优详情（含搜索过程、各阶段算子列表）",
             "service_crash": "服务崩溃诊断（崩溃算子、恢复状态）",
-            "issues.submitted": "已提交到 GitHub 的 issue 列表（含 URL）",
+            "issues.submitted": "context 记录的 issue 条目（GitHub 自动上传未实现，报告仅按标题列出本地 issue_*.md，不含 URL）",
             "release.qualified": "主流程综合判定 = service_ok AND accuracy_ok AND performance_ok",
             "plugin": "Plugin 流程独立判定，不影响主流程 release.qualified",
             "steps[].status": "pending / in_progress / success / failed / skipped",
@@ -1634,14 +1818,19 @@ def main():
         output = generate_text_report(data)
 
     if args.output:
-        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-        if os.path.exists(args.output):
-            base, ext = os.path.splitext(args.output)
-            backup_path = f"{base}_prev{ext}"
-            shutil.copy2(args.output, backup_path)
-        with open(args.output, "w", encoding="utf-8") as f:
+        ext = ".json" if args.json_mode else ".md"
+        out_path = args.output
+        # --output 指向目录（已存在的目录，或以 / 结尾）时，按 厂商_模型名_时间戳 自动命名
+        if out_path.endswith(os.sep) or os.path.isdir(out_path):
+            out_path = os.path.join(out_path, build_report_basename(data, ext))
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        if os.path.exists(out_path):
+            base, e = os.path.splitext(out_path)
+            backup_path = f"{base}_prev{e}"
+            shutil.copy2(out_path, backup_path)
+        with open(out_path, "w", encoding="utf-8") as f:
             f.write(output)
-        print(f"报告已写入: {args.output}", file=sys.stderr)
+        print(f"报告已写入: {out_path}", file=sys.stderr)
     else:
         print(output)
 
