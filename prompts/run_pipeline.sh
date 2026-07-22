@@ -2,7 +2,7 @@
 # FlagOS 全自动迁移流程 — 一键启动脚本（V1+V2+V3 算子调优）
 #
 # 用法:
-#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>]
+#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>] [--feishu-webhook URL]
 #
 # 自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址
 # 模型路径：仅需模型名，自动搜索宿主机路径；未找到则容器内自动下载。也可通过 --model-path 显式指定
@@ -96,7 +96,7 @@ if [[ "${1:-}" == "--image" ]]; then
 else
     # 统一格式：7 个位置参数
     if [ $# -lt 7 ]; then
-        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>]"
+        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>] [--feishu-webhook URL]"
         echo ""
         echo "自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址"
         echo ""
@@ -122,6 +122,8 @@ else
             --verbose) FILTER_FLAGS="--verbose"; shift ;;
             --proxy) PROXY_LIST="$2"; shift 2 ;;
             --flagrelease-token) export FLAGRELEASE_API_TOKEN="$2"; shift 2 ;;
+            # 飞书 Webhook 通过 export 传给 detached 汇报 worker（旁路，不影响主流程）。
+            --feishu-webhook) export FEISHU_WEBHOOK_URL="$2"; shift 2 ;;
             --model-path)
                 if [ -z "${2:-}" ]; then
                     echo "错误: --model-path 需要指定路径"
@@ -608,6 +610,21 @@ DEBUG_FILE="${LOG_DIR}/claude_debug_${TIMESTAMP}.log"
 PIPELINE_LOG="${LOG_DIR}/pipeline.log"
 TERMINAL_LOG="${LOG_DIR}/terminal.log"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROGRESS_RUNNER="${PROJECT_ROOT}/tools/notifications/progress_runner.sh"
+FLAGOS_PROGRESS_RUN_ID="${FLAGOS_PROGRESS_RUN_ID:-single_${TIMESTAMP}_$$}"
+
+# 汇报完全旁路：组件不存在、无权限、挂死或退出非零都不会进入主流程控制路径。
+progress_emit_detached() {
+    if [ "${FLAGOS_PROGRESS_REPORT:-1}" = "0" ]; then
+        return 0
+    fi
+    nohup "${PROGRESS_RUNNER}" emit "$@" \
+        </dev/null \
+        >/dev/null \
+        2>&1 &
+    return 0
+}
 
 echo "日志文件:"
 echo "  原始事件流: ${LOG_FILE}"
@@ -733,7 +750,40 @@ except: pass
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 未找到有效容器，跳过 GPU 服务清理"
     fi
 }
-trap 'upload_to_platform_on_exit; cleanup_gpu_services' EXIT
+
+pipeline_on_exit() {
+    local original_exit_code="$1"
+    local elapsed_seconds=0
+    local ended_at=0
+    local outcome="failed"
+
+    # 保留原有退出清理；平台上传失败不能覆盖主流程退出码。
+    upload_to_platform_on_exit || true
+    cleanup_gpu_services || true
+
+    # 批量模式由 run_batch.sh 投递模型事件，避免重复通知。
+    if [ "${FLAGOS_BATCH_MODE:-0}" != "1" ] && [ -n "${PIPELINE_START_TS:-}" ]; then
+        ended_at=$(date +%s)
+        elapsed_seconds=$(( ended_at - PIPELINE_START_TS ))
+        if [ "${original_exit_code}" -eq 0 ]; then
+            outcome="success"
+        elif [ "${original_exit_code}" -eq 124 ]; then
+            outcome="timeout"
+        fi
+        progress_emit_detached single-finish \
+            --batch-id "${FLAGOS_PROGRESS_RUN_ID}" \
+            --workspace "${FLAGOS_WORKSPACE:-/data/flagos-workspace}" \
+            --target "${TARGET:-${IMAGE:-${CONTAINER:-unknown}}}" \
+            --model "${MODEL:-unknown}" \
+            --outcome "${outcome}" \
+            --exit-code "${original_exit_code}" \
+            --elapsed-seconds "${elapsed_seconds}" \
+            --run-started-at "${PIPELINE_START_TS}" \
+            --run-ended-at "${ended_at}" || :
+    fi
+    return 0
+}
+trap 'pipeline_on_exit "$?"' EXIT
 
 # ===== 段间完成性校验 =====
 # 检查 context_snapshot.yaml 中 workflow_ledger 的步骤完成状态
@@ -800,6 +850,14 @@ PYEOF
 
 # ===== 全流程计时 =====
 PIPELINE_START_TS=$(date +%s)
+if [ "${FLAGOS_BATCH_MODE:-0}" != "1" ]; then
+    progress_emit_detached single-start \
+        --batch-id "${FLAGOS_PROGRESS_RUN_ID}" \
+        --workspace "${FLAGOS_WORKSPACE:-/data/flagos-workspace}" \
+        --target "${TARGET:-${IMAGE:-${CONTAINER:-unknown}}}" \
+        --model "${MODEL}" \
+        --started-at "${PIPELINE_START_TS}" || :
+fi
 
 # ===== 段1: 1/2/3 (容器准备 + 环境检测 + 服务启动) =====
 echo ""
@@ -2270,6 +2328,14 @@ else
     fi
 fi
 
+# 保存 Plugin/V3 阶段耗时；后续 V4 阶段会复用 SEG4_* 临时变量。
+SEG4_PLUGIN_ELAPSED=${SEG4_ELAPSED:-0}
+SEG4_PLUGIN_MIN=${SEG4_MIN:-0}
+SEG4_PLUGIN_SEC=${SEG4_SEC:-0}
+SEG4V4_ELAPSED=0
+SEG4V4_MIN=0
+SEG4V4_SEC=0
+
 # ===== 段4: V4 减算子 + 发布 (步骤 8-9) =====
 # 触发条件：qualified_core=true（service_ok AND accuracy_ok；性能不再门控）。
 # V4 在 V3 plugin 镜像基础上减算子提性能，
@@ -2510,6 +2576,9 @@ SEG4_END_TS=$(date +%s)
 SEG4_ELAPSED=$(( SEG4_END_TS - SEG4_START_TS ))
 SEG4_MIN=$(( SEG4_ELAPSED / 60 ))
 SEG4_SEC=$(( SEG4_ELAPSED % 60 ))
+SEG4V4_ELAPSED=${SEG4_ELAPSED}
+SEG4V4_MIN=${SEG4_MIN}
+SEG4V4_SEC=${SEG4_SEC}
 echo ""
 echo "┌──────────────────────────────────────────────────────────────┐"
 echo "│  段4 完成 — 耗时 ${SEG4V4_MIN}m ${SEG4V4_SEC}s                                       │"
@@ -2900,36 +2969,80 @@ PIPELINE_ELAPSED=$(( PIPELINE_END_TS - PIPELINE_START_TS ))
 PIPELINE_MIN=$(( PIPELINE_ELAPSED / 60 ))
 PIPELINE_SEC=$(( PIPELINE_ELAPSED % 60 ))
 
-# 读取各段费用
-SEG1_COST=$(cat "${LOG_DIR}/seg1_cost.txt" 2>/dev/null || echo "N/A")
-SEG2_COST=$(cat "${LOG_DIR}/seg2_cost.txt" 2>/dev/null || echo "N/A")
-SEG3_COST=$(cat "${LOG_DIR}/seg3_cost.txt" 2>/dev/null || echo "N/A")
-SEG4_COST=$(cat "${LOG_DIR}/seg4_cost.txt" 2>/dev/null || echo "N/A")
-SEG5_COST=$(cat "${LOG_DIR}/seg5_cost.txt" 2>/dev/null || echo "N/A")
-# 计算总费用（通过环境变量传递，避免 shell 注入）
-TOTAL_COST=$(SEG1_COST="${SEG1_COST}" SEG2_COST="${SEG2_COST}" SEG3_COST="${SEG3_COST}" SEG4_COST="${SEG4_COST}" SEG5_COST="${SEG5_COST}" python3 -c "
-import os
+# 读取各段真实 Claude 会话费用；每个 cost 文件只计一次，缺失保持 N/A。
+sum_cost_files() {
+    python3 - "$@" <<'PYEOF'
+import math
+import sys
+from pathlib import Path
+
 costs = []
-for k in ['SEG1_COST', 'SEG2_COST', 'SEG3_COST', 'SEG4_COST', 'SEG5_COST']:
-    try: costs.append(float(os.environ.get(k, '').strip()))
-    except: pass
-print(f'{sum(costs):.2f}' if costs else 'N/A')
-" 2>/dev/null || echo "N/A")
+for raw_path in sys.argv[1:]:
+    try:
+        value = float(Path(raw_path).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        continue
+    if math.isfinite(value) and value >= 0:
+        costs.append(value)
+print(f"{sum(costs):.2f}" if costs else "N/A")
+PYEOF
+}
+
+format_cost_value() {
+    if [ "$1" = "N/A" ]; then
+        printf 'N/A'
+    else
+        printf '$%s' "$1"
+    fi
+}
+
+SEG1_COST=$(sum_cost_files "${LOG_DIR}/seg1_cost.txt")
+SEG2_COST=$(sum_cost_files \
+    "${LOG_DIR}/seg2_cost.txt" \
+    "${LOG_DIR}/seg2_retry_cost.txt" \
+    "${LOG_DIR}/seg2_retry2_cost.txt" \
+    "${LOG_DIR}/seg2_step7_cost.txt")
+SEG3_COST=$(sum_cost_files "${LOG_DIR}/seg3_cost.txt")
+SEG4_PLUGIN_COST=$(sum_cost_files "${LOG_DIR}/seg4_cost.txt")
+SEG4_V4_COST=$(sum_cost_files "${LOG_DIR}/seg4v4_cost.txt")
+SEG4_COST=$(sum_cost_files "${LOG_DIR}/seg4_cost.txt" "${LOG_DIR}/seg4v4_cost.txt")
+SEG5_COST=$(sum_cost_files "${LOG_DIR}/seg5_cost.txt")
+TOTAL_COST=$(sum_cost_files \
+    "${LOG_DIR}/seg1_cost.txt" \
+    "${LOG_DIR}/seg2_cost.txt" \
+    "${LOG_DIR}/seg2_retry_cost.txt" \
+    "${LOG_DIR}/seg2_retry2_cost.txt" \
+    "${LOG_DIR}/seg2_step7_cost.txt" \
+    "${LOG_DIR}/seg3_cost.txt" \
+    "${LOG_DIR}/seg4_cost.txt" \
+    "${LOG_DIR}/seg4v4_cost.txt" \
+    "${LOG_DIR}/seg5_cost.txt")
+
+SEG1_COST_FMT=$(format_cost_value "${SEG1_COST}")
+SEG2_COST_FMT=$(format_cost_value "${SEG2_COST}")
+SEG3_COST_FMT=$(format_cost_value "${SEG3_COST}")
+SEG4_PLUGIN_COST_FMT=$(format_cost_value "${SEG4_PLUGIN_COST}")
+SEG4_V4_COST_FMT=$(format_cost_value "${SEG4_V4_COST}")
+SEG5_COST_FMT=$(format_cost_value "${SEG5_COST}")
+TOTAL_COST_FMT=$(format_cost_value "${TOTAL_COST}")
 
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║  全流程完成 — 耗时 & 费用汇总                                ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
-printf "║  段1  容器准备+环境检测+服务启动   %6s   \$%-8s║\n" "${SEG1_MIN}m${SEG1_SEC}s" "${SEG1_COST}"
-printf "║  段2  精度评测+调优+性能评测+调优  %6s   \$%-8s║\n" "${SEG2_MIN}m${SEG2_SEC}s" "${SEG2_COST}"
-printf "║  段3  打包发布(V2 Pro)             %6s   \$%-8s║\n" "${SEG3_MIN}m${SEG3_SEC}s" "${SEG3_COST}"
+printf "║  段1  容器准备+环境检测+服务启动   %6s   %-9s║\n" "${SEG1_MIN}m${SEG1_SEC}s" "${SEG1_COST_FMT}"
+printf "║  段2  精度评测+调优+性能评测+调优  %6s   %-9s║\n" "${SEG2_MIN}m${SEG2_SEC}s" "${SEG2_COST_FMT}"
+printf "║  段3  打包发布(V2 Pro)             %6s   %-9s║\n" "${SEG3_MIN}m${SEG3_SEC}s" "${SEG3_COST_FMT}"
 if [ "${PLUGIN_ENTRY}" = "True" ]; then
-printf "║  段4  Plugin验证+V3交付      %6s   \$%-8s║\n" "${SEG4_MIN}m${SEG4_SEC}s" "${SEG4_COST}"
+printf "║  段4  Plugin验证+V3交付            %6s   %-9s║\n" "${SEG4_PLUGIN_MIN}m${SEG4_PLUGIN_SEC}s" "${SEG4_PLUGIN_COST_FMT}"
 fi
 if [ "${QUALIFIED_CORE_V3}" = "True" ]; then
-printf "║  段4  V4 减算子+发布(express)      %6s   \$%-8s║\n" "${SEG4_MIN}m${SEG4_SEC}s" "${SEG4_COST:-0}"
+printf "║  段4  V4减算子+发布(express)       %6s   %-9s║\n" "${SEG4V4_MIN}m${SEG4V4_SEC}s" "${SEG4_V4_COST_FMT}"
+fi
+if [ "${SEG5_COST}" != "N/A" ]; then
+printf "║  段5  兼容流程费用                    -   %-9s║\n" "${SEG5_COST_FMT}"
 fi
 echo "║──────────────────────────────────────────────────────────────║"
-printf "║  总计                              %6s   \$%-8s║\n" "${PIPELINE_MIN}m${PIPELINE_SEC}s" "${TOTAL_COST}"
+printf "║  总计                              %6s   %-9s║\n" "${PIPELINE_MIN}m${PIPELINE_SEC}s" "${TOTAL_COST_FMT}"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Claude Code 流程结束"

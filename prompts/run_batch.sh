@@ -2,7 +2,7 @@
 # FlagOS 批量串行迁移 — 逐个调用 run_pipeline.sh
 #
 # 用法:
-#   bash prompts/run_batch.sh <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--proxy proxy1,proxy2,...] [--timeout seconds]
+#   bash prompts/run_batch.sh <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--proxy proxy1,proxy2,...] [--timeout seconds] [--feishu-webhook URL]
 #
 # 任务列表文件格式（每行一个任务，| 分隔）:
 #   # 注释行和空行自动跳过
@@ -10,9 +10,10 @@
 #   my_existing_container | Qwen2.5-7B-Instruct
 #
 # 选项:
-#   --verbose        透传给 run_pipeline.sh，显示全量终端输出
-#   --stop-on-error  某个任务失败后终止整个批次（默认继续下一个）
-#   --force          强制重跑已完成的任务（默认跳过 workflow.all_done=true 的任务）
+#   --verbose         透传给 run_pipeline.sh，显示全量终端输出
+#   --stop-on-error   某个任务失败后终止整个批次（默认继续下一个）
+#   --force           强制重跑已完成的任务（默认跳过 workflow.all_done=true 的任务）
+#   --feishu-webhook  飞书自定义机器人 Webhook 地址；不传则不发送飞书通知
 #
 # 双 pipeline 说明:
 #   本脚本仅做批量调度，分支路由（A/B/native）由 run_pipeline.sh 内部按环境检测
@@ -33,7 +34,7 @@ set -uo pipefail
 
 # ========== 参数解析 ==========
 if [ $# -lt 6 ]; then
-    echo "用法: $0 <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force]"
+    echo "用法: $0 <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--feishu-webhook URL]"
     echo ""
     echo "任务列表文件格式（每行 | 分隔）:"
     echo "  镜像地址或容器名 | 模型名"
@@ -55,6 +56,8 @@ while [[ $# -gt 0 ]]; do
         --verbose) VERBOSE_FLAG="--verbose"; shift ;;
         --proxy) PROXY_FLAG="--proxy $2"; shift 2 ;;
         --timeout) MODEL_TIMEOUT="$2"; shift 2 ;;
+        # export 后 detached worker 与子进程 run_pipeline.sh 均自动继承此变量。
+        --feishu-webhook) export FEISHU_WEBHOOK_URL="$2"; shift 2 ;;
         *) echo "未知参数: $1"; exit 1 ;;
     esac
 done
@@ -63,6 +66,20 @@ if [ ! -f "$TASK_FILE" ]; then
     echo "错误: 任务列表文件不存在: $TASK_FILE"
     exit 1
 fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROGRESS_RUNNER="${PROJECT_ROOT}/tools/notifications/progress_runner.sh"
+
+# 汇报是完全旁路的观察者：不检查组件、不等待、不继承 tee 文件描述符，
+# 也不保存后台 PID。命令不存在、无权限或自身失败都只会丢失本次事件。
+progress_emit_detached() {
+    nohup "${PROGRESS_RUNNER}" emit "$@" \
+        </dev/null \
+        >/dev/null \
+        2>&1 &
+    return 0
+}
 
 # ========== 断点检查 ==========
 is_task_done() {
@@ -130,8 +147,41 @@ fi
 BATCH_START_TS=$(date +%s)
 BATCH_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BATCH_LOG="/data/flagos-workspace/batch_${BATCH_TIMESTAMP}.log"
+SUMMARY_FILE=""
+REPORT_FILE=""
+IDX=0; PASS=0; FAIL=0; SKIP=0
+RESULTS=()
+BATCH_END_EVENT_EMITTED=false
 mkdir -p /data/flagos-workspace 2>/dev/null || true
 exec > >(tee -a "$BATCH_LOG") 2>&1
+
+batch_on_exit() {
+    local exit_code="$1"
+    local ended_at elapsed processed
+    [ "${BATCH_END_EVENT_EMITTED}" = "true" ] && return 0
+    ended_at=$(date +%s)
+    elapsed=$(( ended_at - BATCH_START_TS ))
+    processed=$(( PASS + FAIL + SKIP ))
+    progress_emit_detached batch-end \
+        --batch-id "${BATCH_TIMESTAMP}" \
+        --workspace /data/flagos-workspace \
+        --exit-code "${exit_code}" \
+        --elapsed-seconds "${elapsed}" \
+        --run-ended-at "${ended_at}" \
+        --processed "${processed}" \
+        --passed "${PASS}" \
+        --failed "${FAIL}" \
+        --skipped "${SKIP}" || :
+    return 0
+}
+trap 'batch_on_exit "$?"' EXIT
+
+progress_emit_detached batch-start \
+    --batch-id "${BATCH_TIMESTAMP}" \
+    --workspace /data/flagos-workspace \
+    --task-file "${TASK_FILE}" \
+    --total-models "${TOTAL}" \
+    --batch-started-at "${BATCH_START_TS}" || :
 
 # ========== Banner ==========
 echo "============================================================"
@@ -148,9 +198,6 @@ echo "============================================================"
 echo ""
 
 # ========== 逐个执行 ==========
-IDX=0; PASS=0; FAIL=0; SKIP=0
-RESULTS=()
-
 while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
     TARGET=$(echo "$TARGET" | xargs)
     MODEL=$(echo "$MODEL" | xargs)
@@ -185,6 +232,14 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
         echo "[${IDX}/${TOTAL}] ${MODEL} — 已完成，跳过"
         ((SKIP++))
         RESULTS+=("⊘ | ${MODEL} | ${TARGET} | ${BV%%|*} | ${BV#*|} | - | skipped")
+        progress_emit_detached skip-model \
+            --batch-id "${BATCH_TIMESTAMP}" \
+            --workspace /data/flagos-workspace \
+            --model "${MODEL}" \
+            --target "${TARGET}" \
+            --task-index "${IDX}" \
+            --total-models "${TOTAL}" \
+            --batch-elapsed-seconds "$(( $(date +%s) - BATCH_START_TS ))" || :
         continue
     fi
 
@@ -195,10 +250,12 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
     echo "╚══════════════════════════════════════════════════════════════╝"
 
     TASK_START_TS=$(date +%s)
-    timeout --signal=TERM --kill-after=60 "$MODEL_TIMEOUT" \
+    FLAGOS_BATCH_MODE=1 \
+    timeout --signal=TERM --kill-after=60 "${MODEL_TIMEOUT}" \
         bash prompts/run_pipeline.sh "$TARGET" "$MODEL" "$MS_TOKEN" "$HF_TOKEN" "$GH_TOKEN" "$HARBOR_USER" "$HARBOR_PASS" $VERBOSE_FLAG $PROXY_FLAG < /dev/null
     EXIT_CODE=$?
-    TASK_ELAPSED=$(( $(date +%s) - TASK_START_TS ))
+    TASK_END_TS=$(date +%s)
+    TASK_ELAPSED=$(( TASK_END_TS - TASK_START_TS ))
     TASK_MIN=$(( TASK_ELAPSED / 60 ))
     TASK_SEC=$(( TASK_ELAPSED % 60 ))
     ELAPSED_FMT="${TASK_MIN}m${TASK_SEC}s"
@@ -211,6 +268,19 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
         ((FAIL++))
         RESULTS+=("⏱ | ${MODEL} | ${TARGET} | ${BRANCH} | ${VERS} | ${ELAPSED_FMT} | timeout")
         echo "[${IDX}/${TOTAL}] ${MODEL} — ⏱ 超时 (>${MODEL_TIMEOUT}s, ${ELAPSED_FMT})"
+        progress_emit_detached model-finish \
+            --batch-id "${BATCH_TIMESTAMP}" \
+            --workspace /data/flagos-workspace \
+            --task-index "${IDX}" \
+            --total-models "${TOTAL}" \
+            --target "${TARGET}" \
+            --model "${MODEL}" \
+            --outcome timeout \
+            --exit-code "${EXIT_CODE}" \
+            --elapsed-seconds "${TASK_ELAPSED}" \
+            --batch-elapsed-seconds "$(( TASK_END_TS - BATCH_START_TS ))" \
+            --run-started-at "${TASK_START_TS}" \
+            --run-ended-at "${TASK_END_TS}" || :
         if $STOP_ON_ERROR; then
             echo ""
             echo "⚠ --stop-on-error 已启用，终止批量执行"
@@ -220,10 +290,36 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
         ((PASS++))
         RESULTS+=("✓ | ${MODEL} | ${TARGET} | ${BRANCH} | ${VERS} | ${ELAPSED_FMT} | exit=0")
         echo "[${IDX}/${TOTAL}] ${MODEL} — ✓ 完成 (分支${BRANCH}, ${VERS}, ${ELAPSED_FMT})"
+        progress_emit_detached model-finish \
+            --batch-id "${BATCH_TIMESTAMP}" \
+            --workspace /data/flagos-workspace \
+            --task-index "${IDX}" \
+            --total-models "${TOTAL}" \
+            --target "${TARGET}" \
+            --model "${MODEL}" \
+            --outcome success \
+            --exit-code "${EXIT_CODE}" \
+            --elapsed-seconds "${TASK_ELAPSED}" \
+            --batch-elapsed-seconds "$(( TASK_END_TS - BATCH_START_TS ))" \
+            --run-started-at "${TASK_START_TS}" \
+            --run-ended-at "${TASK_END_TS}" || :
     else
         ((FAIL++))
         RESULTS+=("✗ | ${MODEL} | ${TARGET} | ${BRANCH} | ${VERS} | ${ELAPSED_FMT} | exit=${EXIT_CODE}")
         echo "[${IDX}/${TOTAL}] ${MODEL} — ✗ 失败 (exit=${EXIT_CODE}, ${ELAPSED_FMT})"
+        progress_emit_detached model-finish \
+            --batch-id "${BATCH_TIMESTAMP}" \
+            --workspace /data/flagos-workspace \
+            --task-index "${IDX}" \
+            --total-models "${TOTAL}" \
+            --target "${TARGET}" \
+            --model "${MODEL}" \
+            --outcome failed \
+            --exit-code "${EXIT_CODE}" \
+            --elapsed-seconds "${TASK_ELAPSED}" \
+            --batch-elapsed-seconds "$(( TASK_END_TS - BATCH_START_TS ))" \
+            --run-started-at "${TASK_START_TS}" \
+            --run-ended-at "${TASK_END_TS}" || :
         if $STOP_ON_ERROR; then
             echo ""
             echo "⚠ --stop-on-error 已启用，终止批量执行"
@@ -300,5 +396,22 @@ else
         echo "  可手动执行: bash ${SUMMARIZE_SCRIPT} ${BATCH_LOG} --task-file ${TASK_FILE} --print --output ${REPORT_FILE}"
     fi
 fi
+
+# 正常路径在所有原有批次工作结束后才投递；默认 after-batch worker
+# 因而不会与下一模型或原有详细报告竞争资源。
+BATCH_END_TS=$(date +%s)
+# 标记在投递之前设置，防止 SIGTERM 在投递后、标记前到达导致 EXIT trap 重复投递。
+# 旁路事件允许丢失，标记提前设置不影响可靠性，反而消除竞态窗口。
+BATCH_END_EVENT_EMITTED=true
+progress_emit_detached batch-end \
+    --batch-id "${BATCH_TIMESTAMP}" \
+    --workspace /data/flagos-workspace \
+    --exit-code "${BATCH_EXIT}" \
+    --elapsed-seconds "${BATCH_ELAPSED}" \
+    --run-ended-at "${BATCH_END_TS}" \
+    --processed "$(( PASS + FAIL + SKIP ))" \
+    --passed "${PASS}" \
+    --failed "${FAIL}" \
+    --skipped "${SKIP}" || :
 
 exit $BATCH_EXIT
