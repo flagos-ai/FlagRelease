@@ -684,6 +684,14 @@ def build_report_basename(data, ext: str = ".md") -> str:
             ts = m.group(1)
             break
     if not ts:
+        # 回退：release.harbor_image / image.registry_url（旧格式发布镜像常存于此）
+        for img in (release.get("harbor_image", ""),
+                    (ctx.get("image", {}) or {}).get("registry_url", "")):
+            m = re.search(r":(\d{12})", img or "")
+            if m:
+                ts = m.group(1)
+                break
+    if not ts:
         ts = datetime.now().strftime("%Y%m%d%H%M")
 
     def _safe(s: str) -> str:
@@ -757,9 +765,41 @@ def _count_ops_from_oplist(oplist_lines: List[str]) -> int:
     return len([l for l in oplist_lines if l.strip() and not l.startswith("#")])
 
 
+def compute_verdict(ctx: dict) -> dict:
+    """综合判定迁移结果（成功/失败），返回 {ok, reasons, incompatible}。
+
+    判负规则（任一即失败）：
+    - service_ok / accuracy_ok / performance_ok 明确为 False（主流程硬闸门未过）
+    - incompatible 为 True（Plugin/框架不适配，未产出完整达标 Max 版）
+    否则视为成功（主流程达标并产出发布镜像）。
+    """
+    wf = ctx.get("workflow", {}) or {}
+    reasons: List[str] = []
+    if wf.get("service_ok") is False:
+        reasons.append("服务启动失败")
+    if wf.get("accuracy_ok") is False:
+        reasons.append("精度不达标（rel_drop 超阈值）")
+    if wf.get("performance_ok") is False:
+        reasons.append("性能不达标")
+    incompatible = wf.get("incompatible") is True
+    if incompatible and not reasons:
+        # 主流程达标但 Plugin 不适配
+        reasons.append("Plugin/框架不适配（主流程达标，未产出达标 Max 版）")
+    ok = len(reasons) == 0
+    return {"ok": ok, "reasons": reasons, "incompatible": incompatible}
+
+
 def generate_text_report(data: ReportData) -> str:
     """按照 FlagOS 标准报告模板生成 Markdown 报告。"""
     lines: List[str] = []
+
+    # ── 顶部迁移结果醒目行（成功/失败一眼可辨）──
+    _verdict = compute_verdict(data.context or {})
+    if _verdict["ok"]:
+        lines.append("# 迁移结果：✅ 成功")
+    else:
+        lines.append(f"# 迁移结果：❌ 失败（{'、'.join(_verdict['reasons'])}）")
+    lines.append("")
 
     # ── 版本定义说明 ──
     lines.append("> **自动化流程产出镜像版本：**")
@@ -1289,36 +1329,24 @@ def generate_text_report(data: ReportData) -> str:
     lines.append("# 结论")
     lines.append("")
 
-    # 发布镜像上传状态以「真实镜像产出」为准，而非单一 qualified 字段。
-    # 任一版本镜像非空即视为已产出发布镜像。
+    # 结论以「综合闸门判定」为准（compute_verdict），不再仅凭镜像 tag 字符串误判。
+    # 说明：精度/性能硬闸门未过时，即使 context 里残留基础镜像 tag，也不算达标发布。
+    verdict = compute_verdict(ctx)
     produced = [(lbl, img) for lbl, img in (("V2", v2_harbor), ("V3", v3_harbor), ("V4", v4_harbor)) if img]
-    if produced:
-        # 最高版本作为发布版本标注
-        top_label = produced[-1][0]
-        note = f"（{top_label} 已产出）"
-        # 精度硬闸门未过但仍靠禁算子达标发布时，附注原因
-        if wf.get("qualified") is False and wf.get("accuracy_ok") is False:
-            note = f"（{top_label} 已产出；曾遇精度不达标，经算子调整后达标发布）"
-        lines.append(f"- 发布镜像上传正常：✅ 合格{note}")
-    else:
-        # 无任何镜像产出：标清原因
-        reasons = []
-        if wf.get("service_ok") is False:
-            reasons.append("服务启动失败")
-        if wf.get("accuracy_ok") is False:
-            reasons.append("精度不达标")
-        if wf.get("performance_ok") is False:
-            reasons.append("性能不达标")
-        reason_str = "、".join(reasons) if reasons else ("流程未完成" if not data.workflow_complete else "未产出发布镜像")
-        lines.append(f"- 发布镜像上传正常：❌ 未产出（{reason_str}）")
 
-    # 流程自动化结论
-    if produced:
+    if verdict["ok"]:
+        top_label = produced[-1][0] if produced else "发布镜像"
+        lines.append(f"- 发布镜像上传正常：✅ 合格（{top_label} 已产出）")
         lines.append("- 流程自动化结论：✅ 流程已达标")
-    elif not data.workflow_complete:
-        lines.append("- 流程自动化结论：⏳ 流程未完成")
     else:
-        lines.append("- 流程自动化结论：❌ 未达标")
+        reason_str = "、".join(verdict["reasons"])
+        # 失败但主流程曾产出低版本镜像时，如实注明（例如精度未过、Plugin 不适配）
+        if produced and verdict["incompatible"]:
+            top_label = produced[-1][0]
+            lines.append(f"- 发布镜像上传正常：⚠️ 部分产出（{top_label} 已产出，但未达标：{reason_str}）")
+        else:
+            lines.append(f"- 发布镜像上传正常：❌ 未达标发布（{reason_str}）")
+        lines.append(f"- 流程自动化结论：❌ 迁移失败（{reason_str}）")
 
     # ═══════════════════════════════════════════════
     # 提交到 flagos 仓库的 Issue
