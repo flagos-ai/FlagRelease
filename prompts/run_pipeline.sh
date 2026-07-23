@@ -613,6 +613,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PROGRESS_RUNNER="${PROJECT_ROOT}/tools/notifications/progress_runner.sh"
 FLAGOS_PROGRESS_RUN_ID="${FLAGOS_PROGRESS_RUN_ID:-single_${TIMESTAMP}_$$}"
+# 汇报默认 live：模型事件即时消费通知。批量调用已在 run_batch.sh 中 export 覆盖，此处仅兜底单跑场景。
+export FLAGOS_PROGRESS_WORKER_MODE="${FLAGOS_PROGRESS_WORKER_MODE:-live}"
 
 # 汇报完全旁路：组件不存在、无权限、挂死或退出非零都不会进入主流程控制路径。
 progress_emit_detached() {

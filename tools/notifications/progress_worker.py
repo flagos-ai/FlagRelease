@@ -34,6 +34,7 @@ DEFAULT_WORKSPACE = Path("/data/flagos-workspace")
 DEFAULT_ROOT = DEFAULT_WORKSPACE / ".flagrelease-progress"
 EVENT_TYPES = {
     "batch-start",
+    "model-start",
     "model-finish",
     "skip-model",
     "batch-end",
@@ -109,6 +110,9 @@ def event_sequence(event_type: str, task_index: Optional[int]) -> int:
         return 0
     if event_type == "single-finish":
         return 10
+    if event_type == "model-start":
+        # 排在自身 model-finish（task_index*10）之前
+        return max(1, int(task_index or 0)) * 10 - 5
     if event_type in {"model-finish", "skip-model"}:
         return max(1, int(task_index or 0)) * 10
     return 999_999_999
@@ -344,6 +348,25 @@ def process_event(root: Path, event: Dict[str, Any]) -> None:
         summary_command(root, stream_id, "batch-start", args)
         return
 
+    if event_type == "model-start":
+        args = [
+            *common,
+            "--task-index",
+            str(int(event.get("task_index") or 0)),
+            "--target",
+            str(event.get("target") or ""),
+            "--model",
+            str(event.get("model") or ""),
+            "--vendor",
+            str(event.get("vendor") or "unknown"),
+        ]
+        if event.get("run_started_at") is not None:
+            args.extend(["--event-time-epoch", str(int(event["run_started_at"]))])
+        if event.get("batch_elapsed_seconds") is not None:
+            args.extend(["--batch-elapsed-seconds", str(int(event["batch_elapsed_seconds"]))])
+        summary_command(root, stream_id, "model-start", args)
+        return
+
     if event_type in {"model-finish", "skip-model"}:
         result_file = analyze_model(root, event)
         args = [
@@ -524,14 +547,16 @@ def run_worker(root: Path, stream_id: str, start_only: bool = False) -> int:
                     progressed = True
                     continue
                 event_type = str(event.get("event_type") or "")
-                if event_type in {"model-finish", "skip-model", "batch-end"}:
+                if event_type in {"model-start", "model-finish", "skip-model", "batch-end"}:
                     start_done = any((root / "processed" / stream).glob("*_batch-start_*.json"))
                     if not start_done:
                         # A detached batch-start emitter may simply have been
                         # scheduled later. Leave all later events untouched; the
                         # start emitter will launch a worker when it lands.
                         return 0
-                if start_only and event.get("event_type") != "batch-start":
+                # after-batch 模式下 start_only worker 也放行 model-start，
+                # 使"每个模型开始"通知即时发出；model-finish 仍延后到 batch-end。
+                if start_only and event.get("event_type") not in {"batch-start", "model-start"}:
                     return 0
                 if event.get("event_type") == "batch-end":
                     settle_before_batch_end(root, stream, event)
@@ -658,8 +683,14 @@ def command_emit(args: argparse.Namespace) -> int:
     if mode not in {"live", "after-batch", "external"}:
         mode = "after-batch"
     synchronous = os.environ.get("FLAGOS_PROGRESS_SYNC_WORKER", "0") == "1"
-    should_start = mode == "live" or args.event_type in {"batch-start", "batch-end", "single-start", "single-finish"}
-    start_only = mode == "after-batch" and args.event_type == "batch-start"
+    should_start = mode == "live" or args.event_type in {
+        "batch-start",
+        "model-start",
+        "batch-end",
+        "single-start",
+        "single-finish",
+    }
+    start_only = mode == "after-batch" and args.event_type in {"batch-start", "model-start"}
     if mode != "external" and should_start:
         if synchronous:
             return run_worker(root, stream_id, start_only=start_only)

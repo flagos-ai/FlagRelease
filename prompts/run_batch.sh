@@ -71,6 +71,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PROGRESS_RUNNER="${PROJECT_ROOT}/tools/notifications/progress_runner.sh"
 
+# 汇报默认 live 模式：每个模型跑完立即后台分析并通知（控制流仍完全异步、不阻塞主迁移）。
+# 允许调用方显式覆盖（after-batch=批次结束统一分析；external=只写事件不消费）。
+export FLAGOS_PROGRESS_WORKER_MODE="${FLAGOS_PROGRESS_WORKER_MODE:-live}"
+
 # 汇报是完全旁路的观察者：不检查组件、不等待、不继承 tee 文件描述符，
 # 也不保存后台 PID。命令不存在、无权限或自身失败都只会丢失本次事件。
 progress_emit_detached() {
@@ -250,6 +254,15 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
     echo "╚══════════════════════════════════════════════════════════════╝"
 
     TASK_START_TS=$(date +%s)
+    progress_emit_detached model-start \
+        --batch-id "${BATCH_TIMESTAMP}" \
+        --workspace /data/flagos-workspace \
+        --task-index "${IDX}" \
+        --total-models "${TOTAL}" \
+        --target "${TARGET}" \
+        --model "${MODEL}" \
+        --run-started-at "${TASK_START_TS}" \
+        --batch-elapsed-seconds "$(( TASK_START_TS - BATCH_START_TS ))" || :
     FLAGOS_BATCH_MODE=1 \
     timeout --signal=TERM --kill-after=60 "${MODEL_TIMEOUT}" \
         bash prompts/run_pipeline.sh "$TARGET" "$MODEL" "$MS_TOKEN" "$HF_TOKEN" "$GH_TOKEN" "$HARBOR_USER" "$HARBOR_PASS" $VERBOSE_FLAG $PROXY_FLAG < /dev/null

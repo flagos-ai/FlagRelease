@@ -35,9 +35,22 @@ VENDOR_ALIASES = {
     "kunlunxin": "kunlunxin",
     "kunlun": "kunlunxin",
     "xpu": "kunlunxin",
-    "tianshu": "tianshu",
+    "iluvatar": "iluvatar",
+    "tianshu": "iluvatar",
 }
 VENDOR_TOKEN_RE = re.compile(r"(?:^|[/:_.@-])([a-z0-9]+)(?=$|[/:_.@-])", re.IGNORECASE)
+# 镜像命名常把厂商名与编号连写(如 metax001),识别时剥掉 token 尾部数字再查表。
+VENDOR_TRAILING_DIGITS_RE = re.compile(r"\d+$")
+
+
+def canonical_vendor_for_token(token: str) -> Optional[str]:
+    """Map one lowercased token to a canonical vendor, tolerating trailing digits."""
+    if token in VENDOR_ALIASES:
+        return VENDOR_ALIASES[token]
+    stripped = VENDOR_TRAILING_DIGITS_RE.sub("", token)
+    if stripped != token and stripped in VENDOR_ALIASES:
+        return VENDOR_ALIASES[stripped]
+    return None
 
 
 def now_iso() -> str:
@@ -76,11 +89,11 @@ def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
 
 def vendor_from_target(target: str) -> str:
     """Infer one canonical vendor from delimiter-bounded tokens in a task target."""
-    matches = {
-        VENDOR_ALIASES[token.lower()]
-        for token in VENDOR_TOKEN_RE.findall(str(target or "").lower())
-        if token.lower() in VENDOR_ALIASES
-    }
+    matches = set()
+    for token in VENDOR_TOKEN_RE.findall(str(target or "").lower()):
+        vendor = canonical_vendor_for_token(token)
+        if vendor:
+            matches.add(vendor)
     return next(iter(matches)) if len(matches) == 1 else "unknown"
 
 
@@ -399,16 +412,24 @@ def build_task_queue_markdown(state: Dict[str, Any], max_items: int = 5) -> str:
     if not tasks:
         return ""
     visible = tasks if max_items <= 0 else tasks[:max_items]
+    show_vendor = str(state.get("vendor") or "").lower() == "mixed"
     lines = ["### 任务队列"]
     for position, task in enumerate(visible, 1):
-        lines.append(f"{position}. {task.get('model') or '-'}")
+        index = int(as_float(task.get("task_index")) or position)
+        model = task.get("model") or "-"
+        if show_vendor:
+            lines.append(f"{index}. {task.get('vendor') or 'unknown'} · {model}")
+        else:
+            lines.append(f"{index}. {model}")
     omitted = len(tasks) - len(visible)
     if omitted:
         lines.extend(["", f"> 另有 {omitted} 个模型"])
     return "\n".join(lines)
 
 
-def build_models_markdown_table(state: Dict[str, Any], max_rows: Optional[int] = None) -> str:
+def build_models_markdown_table(
+    state: Dict[str, Any], max_rows: Optional[int] = None, show_all: bool = False
+) -> str:
     tasks = state.get("tasks", [])
     if not tasks:
         return ""
@@ -424,7 +445,7 @@ def build_models_markdown_table(state: Dict[str, Any], max_rows: Optional[int] =
     all_indexes = list(task_by_index)
     ended = bool(state.get("ended_at"))
 
-    if ended:
+    if ended or show_all:
         candidates = all_indexes
     else:
         candidates = sorted(set(completed) | ({current_index} if current_index else set()))
@@ -442,6 +463,8 @@ def build_models_markdown_table(state: Dict[str, Any], max_rows: Optional[int] =
             priority = problems + sorted(completed, reverse=True) + candidates
         else:
             priority = ([current_index] if current_index else []) + sorted(completed, reverse=True)
+            if show_all:
+                priority = priority + all_indexes
         selected: List[int] = []
         for index in priority:
             if index in candidates and index not in selected:
@@ -479,8 +502,8 @@ def build_models_markdown_table(state: Dict[str, Any], max_rows: Optional[int] =
             result = "⛔ 未完成" if ended else "🔄 运行中"
             duration_cost = "-"
         else:
-            vendor = str(state.get("vendor") or "待识别")
-            result = "⛔ 未完成"
+            vendor = str(task.get("vendor") or state.get("vendor") or "待识别")
+            result = "⛔ 未完成" if ended else "⏳ 待执行"
             duration_cost = "-"
         model_name = str(task.get("model") or "-")
         model_cell = f"{vendor}<br>{model_name}" if show_vendor else model_name
@@ -715,10 +738,66 @@ def command_batch_start(args: argparse.Namespace) -> int:
     fields: List[Tuple[str, str]] = [("任务规模", f"{state['total_models']} 个模型")]
     title = f"{state['vendor']}｜{state['total_models']} 个模型"
     lead = "⏳ 批量任务已启动"
-    queue = build_task_queue_markdown(state)
+    # 批量开始时展示完整模型列表（含厂商/序号），而非仅前 5 个队列摘要。
+    queue = build_task_queue_markdown(state, max_items=0)
     note = f"批次：{state['batch_id']}"
     return emit_or_notify(
         state, "task_start", title, "running", fields, queue, args.notify, args.dry_run, lead, note
+    )
+
+
+def command_model_start(args: argparse.Namespace) -> int:
+    if not args.model:
+        raise ValueError("model-start 必须提供 --model")
+    path = state_path(args)
+    loaded = load_json(path)
+    state = loaded if isinstance(loaded, dict) else {}
+    if not state:
+        # batch-start 事件可能尚未落地；用最小骨架承载单模型开始通知。
+        state = {
+            "schema_version": SCHEMA_VERSION,
+            "batch_id": args.batch_id or path.stem,
+            "workspace": str(args.workspace),
+            "vendor": args.vendor.strip() or vendor_from_target(args.target or "") or "unknown",
+            "total_models": args.task_index or 1,
+            "tasks": [],
+            "models": [],
+            "current_model": None,
+            "ended_at": None,
+        }
+    task_index = resolve_task_index(state, args.task_index, args.model, args.target or "")
+    task = next(
+        (
+            item
+            for item in state.get("tasks", [])
+            if int(as_float(item.get("task_index")) or 0) == int(task_index or 0)
+        ),
+        {},
+    )
+    vendor = args.vendor.strip() or str(task.get("vendor") or "") or vendor_from_target(args.target or "") or "unknown"
+    state["current_model"] = {
+        "task_index": task_index,
+        "model": args.model,
+        "target": args.target or task.get("target") or "",
+        "vendor": vendor,
+        "started_at": epoch_iso(args.event_time_epoch),
+    }
+    if args.batch_elapsed_seconds is not None:
+        state["batch_elapsed_seconds"] = max(0, args.batch_elapsed_seconds)
+    atomic_write_json(path, state)
+    metrics = batch_metrics(state)
+    total = metrics["total_models"] or state.get("total_models") or 0
+    position = int(task_index or metrics["processed_models"] + 1)
+    fields: List[Tuple[str, str]] = [("当前进度", f"第 {position} / {total} 个")]
+    if args.target:
+        fields.append(("任务", args.target))
+    title = f"{state.get('vendor', 'unknown')}｜{position} / {total}"
+    lead = f"🚀 开始迁移 · {args.model}"
+    note = batch_progress_note(state)
+    table = build_models_markdown_table(state, show_all=True)
+    payload = {"state": state, "metrics": metrics}
+    return emit_or_notify(
+        payload, "model_start", title, "running", fields, table, args.notify, args.dry_run, lead, note
     )
 
 
@@ -777,7 +856,7 @@ def command_model_finish(args: argparse.Namespace) -> int:
     lead = f"{model_result_label(model)} · {model['model']}"
     note = batch_progress_note(state)
     payload = {"state": state, "latest": model, "metrics": metrics}
-    table = build_models_markdown_table(state)
+    table = build_models_markdown_table(state, show_all=True)
     result_summary = model_result_summary(model)
     if result_summary:
         table = f"**结果说明**：{result_summary}\n\n{table}" if table else f"**结果说明**：{result_summary}"
@@ -930,6 +1009,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands = {
         "batch-start": command_batch_start,
+        "model-start": command_model_start,
         "model-finish": command_model_finish,
         "batch-end": command_batch_end,
         "single-start": command_single_start,
