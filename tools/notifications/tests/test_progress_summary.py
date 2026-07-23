@@ -176,9 +176,14 @@ class ProgressSummaryTests(unittest.TestCase):
             "repo/cambricon-mlu:v1": "cambricon",
             "repo/musa.mtt:v1": "mthreads",
             "repo/kunlun-xpu:v1": "kunlunxin",
-            "repo/tianshu:model": "tianshu",
+            "repo/iluvatar:model": "iluvatar",
+            "repo/tianshu:model": "iluvatar",
+            "repo/hy3-metax001-gems:v1": "metax",
+            "repo/nvidia002-cuda:v1": "nvidia",
+            "harbor.baai.ac.cn/flagrelease-public/hy3-metax001-gems5.0.2-tree0.5.1-cxnone-plugin0.2.0-vllm0.20.2-cp312-pt28-maca37-x64-3.8.1:202607061058": "metax",
             "repo/notmetaxmodel:v1": "unknown",
             "repo/metax-hygon:model": "unknown",
+            "repo/metax001-kunlun:v1": "unknown",
         }
         for target, expected in cases.items():
             with self.subTest(target=target):
@@ -287,7 +292,7 @@ class ProgressSummaryTests(unittest.TestCase):
             "--outcome", "success",
             "--exit-code", "0", "--elapsed-seconds", "120", "--dry-run",
         )
-        self.assertIn("结果汇总", self.card_title(model_finish))
+        self.assertIn("模型完成", self.card_title(model_finish))
         self.assertIn("mixed｜1 / 2", self.card_title(model_finish))
         self.assertIn("✅ V3 Max 达标上传 · model-a", self.card_text(model_finish))
         self.assertIn("**当前总耗时**", self.card_text(model_finish))
@@ -309,8 +314,8 @@ class ProgressSummaryTests(unittest.TestCase):
             "batch-end", "--workspace", self.workspace, "--state-file", state_file,
             "--exit-code", "1", "--dry-run",
         )
-        self.assertIn("任务结束", self.card_title(final))
-        self.assertNotIn("结果汇总", self.card_title(final))
+        self.assertIn("结果汇总", self.card_title(final))
+        self.assertNotIn("模型完成", self.card_title(final))
         self.assertIn("mixed｜1 / 2 达标", self.card_title(final))
         self.assertIn("批次结束", self.card_text(final))
         self.assertIn("**批次总耗时**", self.card_text(final))
@@ -350,6 +355,51 @@ class ProgressSummaryTests(unittest.TestCase):
         self.assertIn("2m00s", finished_text)
         self.assertIn("| # | 模型 | 结果 | 耗时 / 费用 |", finished_text)
         self.assertIn("待执行：1 个 · 下一模型：model-b", finished_text)
+
+    def test_batch_start_lists_all_models(self):
+        task_file = self.workspace / "tasks.txt"
+        task_file.write_text(
+            "img-a | model-a\nimg-b | model-b\nimg-c | model-c\n", encoding="utf-8"
+        )
+        state_file = self.workspace / "batch_all_progress.json"
+        start = self.run_cli(
+            "batch-start", "--workspace", self.workspace, "--state-file", state_file,
+            "--batch-id", "all", "--task-file", task_file, "--vendor", "metax", "--dry-run",
+        )
+        text = self.card_text(start)
+        for name in ("model-a", "model-b", "model-c"):
+            self.assertIn(name, text)
+        self.assertNotIn("另有", text)
+
+    def test_model_start_card_shows_progress_and_full_table(self):
+        task_file = self.workspace / "tasks.txt"
+        task_file.write_text("img-a | model-a\nimg-b | model-b\n", encoding="utf-8")
+        state_file = self.workspace / "batch_ms_progress.json"
+        self.run_cli(
+            "batch-start", "--workspace", self.workspace, "--state-file", state_file,
+            "--batch-id", "ms", "--task-file", task_file, "--vendor", "metax", "--dry-run",
+        )
+        started = self.run_cli(
+            "model-start", "--workspace", self.workspace, "--state-file", state_file,
+            "--batch-id", "ms", "--model", "model-a", "--target", "img-a",
+            "--task-index", "1", "--vendor", "metax", "--dry-run",
+        )
+        self.assertIn("模型开始", self.card_title(started))
+        text = self.card_text(started)
+        self.assertIn("🚀 开始迁移 · model-a", text)
+        self.assertIn("第 1 / 2 个", text)
+        self.assertIn("🔄 运行中", text)
+        self.assertIn("⏳ 待执行", text)
+        self.assertIn("model-b", text)
+
+    def test_model_start_without_prior_batch_state_uses_skeleton(self):
+        state_file = self.workspace / "batch_orphan_progress.json"
+        started = self.run_cli(
+            "model-start", "--workspace", self.workspace, "--state-file", state_file,
+            "--batch-id", "orphan", "--model", "model-x",
+            "--target", "repo/metax-x:latest", "--task-index", "1", "--dry-run",
+        )
+        self.assertIn("🚀 开始迁移 · model-x", self.card_text(started))
 
     def test_abnormal_batch_end_marks_current_model_unfinished(self):
         state = {
@@ -419,8 +469,8 @@ class ProgressSummaryTests(unittest.TestCase):
         self.assertNotIn("执行环境", self.card_text(start))
         self.assertNotIn("整体进度", self.card_text(start))
         self.assertNotIn("未知", self.card_text(start))
-        self.assertIn("任务结束", self.card_title(end))
-        self.assertNotIn("结果汇总", self.card_title(end))
+        self.assertIn("结果汇总", self.card_title(end))
+        self.assertNotIn("模型完成", self.card_title(end))
         self.assertIn("✅ V3 Max 达标上传", self.card_text(end))
         self.assertIn("**总耗时**\n12s", self.card_text(end))
         self.assertIn("**总费用**\n未知", self.card_text(end))

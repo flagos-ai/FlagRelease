@@ -15,8 +15,10 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 EVENTS = {
     "task_start": {"keyword": "任务开始", "template": "blue"},
-    "task_end": {"keyword": "任务结束", "template": "green"},
-    "result_summary": {"keyword": "结果汇总", "template": "turquoise"},
+    # 单模型层级用「模型开始 / 模型完成」成对；批量层级用「任务开始 / 结果汇总」。
+    "model_start": {"keyword": "模型开始", "template": "indigo"},
+    "task_end": {"keyword": "结果汇总", "template": "green"},
+    "result_summary": {"keyword": "模型完成", "template": "turquoise"},
 }
 
 

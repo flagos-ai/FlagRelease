@@ -81,8 +81,8 @@ class FeishuNotifyFailureTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(completed.stdout)
         title = payload["card"]["header"]["title"]["content"]
-        self.assertIn("任务结束", title)
-        self.assertNotIn("结果汇总", title)
+        self.assertIn("结果汇总", title)
+        self.assertNotIn("模型完成", title)
         elements = payload["card"]["body"]["elements"]
         self.assertTrue(any(element.get("tag") == "column_set" for element in elements))
         body = json.dumps(elements, ensure_ascii=False)
@@ -98,9 +98,23 @@ class NotificationWiringTests(unittest.TestCase):
         self.assertIn("bash prompts/run_pipeline.sh", batch)
         self.assertIn("FLAGOS_BATCH_MODE=1", batch)
         self.assertIn("progress_emit_detached model-finish", batch)
+        self.assertIn("progress_emit_detached model-start", batch)
         self.assertNotIn("run_progress run-model", batch)
         self.assertNotIn("run_progress_safe", batch)
         self.assertNotIn("--state-file", batch)
+
+    def test_batch_emits_model_start_before_pipeline_invocation(self):
+        batch = RUN_BATCH.read_text(encoding="utf-8")
+        start_pos = batch.index("progress_emit_detached model-start")
+        invoke_pos = batch.index("bash prompts/run_pipeline.sh")
+        self.assertLess(start_pos, invoke_pos)
+
+    def test_batch_defaults_worker_mode_live(self):
+        batch = RUN_BATCH.read_text(encoding="utf-8")
+        self.assertIn(
+            'export FLAGOS_PROGRESS_WORKER_MODE="${FLAGOS_PROGRESS_WORKER_MODE:-live}"',
+            batch,
+        )
 
     def test_batch_preserves_original_archive_checkpoint_and_stop_order(self):
         batch = RUN_BATCH.read_text(encoding="utf-8")

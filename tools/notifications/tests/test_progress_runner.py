@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 import stat
@@ -11,6 +12,21 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNNER = REPO_ROOT / "tools" / "notifications" / "progress_runner.sh"
+WORKER_PY = REPO_ROOT / "tools" / "notifications" / "progress_worker.py"
+
+
+def _load_worker_module():
+    import sys
+    pkg_dir = str(WORKER_PY.parent)
+    if pkg_dir not in sys.path:
+        sys.path.insert(0, pkg_dir)
+    spec = importlib.util.spec_from_file_location("progress_worker_undertest", WORKER_PY)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+pw = _load_worker_module()
 
 
 class ProgressQueueTests(unittest.TestCase):
@@ -122,6 +138,26 @@ class ProgressQueueTests(unittest.TestCase):
             "1050",
         )
 
+    def emit_model_start(self, batch_id="test"):
+        return self.run_runner(
+            "emit",
+            "model-start",
+            "--batch-id",
+            batch_id,
+            "--workspace",
+            self.workspace,
+            "--task-index",
+            "1",
+            "--total-models",
+            "1",
+            "--target",
+            "repo/metax-model:v1",
+            "--model",
+            "model-a",
+            "--run-started-at",
+            "1005",
+        )
+
     def result_path(self, batch_id="test"):
         return self.progress_root / "results" / batch_id / "000001_model-a.json"
 
@@ -148,6 +184,31 @@ class ProgressQueueTests(unittest.TestCase):
         self.assertEqual(result["pipeline"]["outcome"], "success")
         self.assertEqual(result["pipeline"]["exit_code"], 0)
         self.assertIsNone(result["cost"]["migration_cost_usd"])
+
+    def test_model_start_updates_current_model_in_live_mode(self):
+        self.emit_batch_start()
+        self.emit_model_start()
+        state = json.loads(self.state_path().read_text(encoding="utf-8"))
+        self.assertIsNotNone(state.get("current_model"))
+        self.assertEqual(state["current_model"]["model"], "model-a")
+        processed = list((self.progress_root / "processed" / "test").glob("*model-start*.json"))
+        self.assertEqual(len(processed), 1)
+
+    def test_after_batch_mode_notifies_model_start_but_defers_finish(self):
+        self.env["FLAGOS_PROGRESS_WORKER_MODE"] = "after-batch"
+        self.emit_batch_start()
+        self.emit_model_start()
+        # model-start 即时消费（进 processed，state 更新），model-finish 仍延后
+        self.assertTrue(
+            list((self.progress_root / "processed" / "test").glob("*model-start*.json"))
+        )
+        state = json.loads(self.state_path().read_text(encoding="utf-8"))
+        self.assertEqual(state["current_model"]["model"], "model-a")
+        self.emit_model()
+        self.assertFalse(self.result_path().exists())
+        self.assertTrue(
+            list((self.progress_root / "queue" / "test").glob("*model-finish*.json"))
+        )
 
     def test_after_batch_mode_queues_models_until_batch_end(self):
         self.env["FLAGOS_PROGRESS_WORKER_MODE"] = "after-batch"
@@ -320,6 +381,111 @@ class ProgressQueueTests(unittest.TestCase):
         state = json.loads(self.state_path("late-start").read_text(encoding="utf-8"))
         self.assertEqual(len(state["models"]), 1)
         self.assertIsNotNone(state["ended_at"])
+
+
+class EventSequenceInvariantTests(unittest.TestCase):
+    """model-start 的排序号必须夹在上一个模型的 finish 与自身 finish 之间。"""
+
+    def test_model_start_sits_between_previous_and_own_finish(self):
+        for idx in range(1, 6):
+            start = pw.event_sequence("model-start", idx)
+            own_finish = pw.event_sequence("model-finish", idx)
+            self.assertLess(start, own_finish, f"model{idx} start 应早于自身 finish")
+            if idx > 1:
+                prev_finish = pw.event_sequence("model-finish", idx - 1)
+                self.assertLess(prev_finish, start, f"model{idx-1} finish 应早于 model{idx} start")
+
+    def test_full_batch_sequence_is_strictly_interleaved(self):
+        events = [("batch-start", None)]
+        for idx in range(1, 4):
+            events.append(("model-start", idx))
+            events.append(("model-finish", idx))
+        ordered = sorted(events, key=lambda e: pw.event_sequence(e[0], e[1]))
+        # 期望：batch-start → (start1, finish1) → (start2, finish2) → (start3, finish3)
+        self.assertEqual(
+            ordered,
+            [
+                ("batch-start", None),
+                ("model-start", 1), ("model-finish", 1),
+                ("model-start", 2), ("model-finish", 2),
+                ("model-start", 3), ("model-finish", 3),
+            ],
+        )
+
+
+class OutOfOrderArrivalTests(unittest.TestCase):
+    """慢分析导致的乱序落盘：worker 仍按 sequence 处理，不因落盘时刻颠倒。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+        self.workspace = self.base / "workspace"
+        self.progress_root = self.base / "progress"
+        for name in ("model-a", "model-b"):
+            (self.workspace / name / "logs").mkdir(parents=True)
+        self.task_file = self.base / "tasks.txt"
+        self.task_file.write_text(
+            "repo/metax-a:v1 | model-a\nrepo/metax-b:v1 | model-b\n", encoding="utf-8"
+        )
+        self.claude = self.base / "claude"
+        envelope = json.dumps({
+            "structured_output": {
+                "cost": {"migration_cost_usd": 1.0, "complete": True},
+                "delivery": {"version": "v3", "accuracy_ok": True, "uploaded": True},
+                "notification": {"result_label": "达标上传", "lead": "✅", "summary": "ok", "warning": None},
+                "evidence": {"accuracy": [], "upload": [], "cost": []},
+            },
+            "total_cost_usd": 0.01,
+        })
+        self.claude.write_text(f"#!/bin/sh\nprintf '%s\\n' '{envelope}'\n", encoding="utf-8")
+        self.claude.chmod(self.claude.stat().st_mode | stat.S_IXUSR)
+        self.env = os.environ.copy()
+        self.env.pop("FEISHU_WEBHOOK_URL", None)
+        self.env.update({
+            "CLAUDE_COMMAND": str(self.claude),
+            "FLAGOS_PROGRESS_ROOT": str(self.progress_root),
+            "FLAGOS_PROGRESS_NOTIFY": "0",
+            "FLAGOS_PROGRESS_SYNC_WORKER": "1",
+            "FLAGOS_PROGRESS_WORKER_MODE": "external",  # 只入队，稍后统一起 worker
+            "FLAGOS_MODEL_ANALYSIS_TIMEOUT_SECONDS": "5",
+            "FLAGOS_PROGRESS_END_SETTLE_SECONDS": "0",
+            "FLAGOS_PROGRESS_END_MAX_WAIT_SECONDS": "0",
+        })
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _emit(self, *args):
+        subprocess.run([str(RUNNER), "emit", *map(str, args)], cwd=REPO_ROOT,
+                       env=self.env, capture_output=True, text=True, timeout=15, check=True)
+
+    def test_late_finish_still_processed_before_next_model_start(self):
+        bid = "ooo"
+        self._emit("batch-start", "--batch-id", bid, "--workspace", self.workspace,
+                   "--task-file", self.task_file, "--total-models", "2", "--batch-started-at", "1000")
+        # 模拟：model-a 的 finish 分析慢，导致 model-b 的 start 先落盘
+        self._emit("model-start", "--batch-id", bid, "--workspace", self.workspace,
+                   "--task-index", "2", "--total-models", "2", "--target", "repo/metax-b:v1",
+                   "--model", "model-b", "--run-started-at", "1200")
+        self._emit("model-finish", "--batch-id", bid, "--workspace", self.workspace,
+                   "--task-index", "1", "--total-models", "2", "--target", "repo/metax-a:v1",
+                   "--model", "model-a", "--outcome", "success", "--exit-code", "0",
+                   "--elapsed-seconds", "100", "--run-ended-at", "1150")
+        # 起 worker 统一消费
+        subprocess.run([str(RUNNER), "worker", "--batch-id", bid], cwd=REPO_ROOT,
+                       env=self.env, capture_output=True, text=True, timeout=30, check=True)
+        processed = sorted((self.progress_root / "processed" / bid).glob("*.json"))
+        names = [p.name for p in processed]
+        # 文件名按 sequence 前缀排序：model-a finish(020) 必在 model-b start(015)... 校验实际处理顺序号
+        def seq(n):
+            return int(n.split("_", 1)[0])
+        order = [(seq(n), n.split("_")[1]) for n in names]
+        # model-a finish (task1 → 10) 必排在 model-b start (task2 → 15) 之前，
+        # 即使 model-b start 先落盘。这就是"慢分析不颠倒顺序"的核心保证。
+        self.assertEqual(
+            order,
+            [(0, "batch-start"), (10, "model-finish"), (15, "model-start")],
+        )
 
 
 if __name__ == "__main__":
