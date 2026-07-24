@@ -646,7 +646,8 @@ def format_issue(
     """将 issue_data 格式化为 Bug Report markdown"""
 
     issue_type = issue_data.get("type", "operator-crash")
-    title = issue_data.get("title", "Bug Report")
+    # 标题统一以 【FR】 开头（幂等），使本地 markdown 与提交到 GitHub 的标题一致
+    title = _ensure_fr_prefix(issue_data.get("title", "Bug Report"))
     affected_ops = issue_data.get("affected_ops", [])
     op_details = issue_data.get("op_details", [])
     error_messages = issue_data.get("error_messages", [])
@@ -973,6 +974,18 @@ def _generate_flaggems_section(flaggems_ctx: Dict[str, Any]) -> str:
 # submit — 提交 issue
 # =============================================================================
 
+def _ensure_fr_prefix(title: str) -> str:
+    """确保 issue 标题以 【FR】 开头（幂等）。
+
+    兼容已带全角【FR】或半角 [FR] 前缀的标题，避免重复添加。
+    """
+    t = title.strip()
+    # 已带前缀（全角或半角，允许其后有空格）则原样返回
+    if t.startswith("【FR】") or t.startswith("[FR]"):
+        return t
+    return f"【FR】{t}"
+
+
 def submit_issue(
     issue_file: str,
     repo: str = "flagos-ai/FlagGems",
@@ -1001,6 +1014,9 @@ def submit_issue(
                 break
         if not title:
             title = "Bug Report"
+
+    # 所有 issue 标题统一以 【FR】 开头（幂等：已带前缀则不重复添加）
+    title = _ensure_fr_prefix(title)
 
     # 保存带类型+仓库名+时间戳的 markdown 文件
     repo_short = repo.replace("/", "_")

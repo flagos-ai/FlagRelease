@@ -19,23 +19,6 @@ provides:
   - entry.type
 ---
 
-<!--
- Copyright 2026 FlagOS Contributors
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- -->
-
-
 # 容器准备 Skill
 
 支持三种入口，自动识别用户输入类型。容器就绪后通过 `setup_workspace.sh` 一次性部署所有工具脚本。
@@ -119,15 +102,16 @@ python3 skills/flagos-container-preparation/tools/check_model_local.py \
 
 ## 入口 2 — 已有镜像
 
-1. 自动检测 GPU 厂商
-2. **根据 GPU 厂商选择对应模板**，填充变量后生成 docker run 命令并自动执行
-3. 验证容器状态
+1. **镜像就绪保证（由 `run_pipeline.sh` 编排层完成，本 skill 无需执行）**：pipeline 启动时已做 `docker image inspect` 存在性检查，不在本地则 `docker pull`（直连失败按代理列表重试），全部失败则整个任务明确退出——**执行层禁止再跑 docker pull，也禁止因"镜像不存在/docker run 失败"降级复用旧容器**
+2. 自动检测 GPU 厂商
+3. **根据 GPU 厂商选择对应模板**，填充变量后生成 docker run 命令并自动执行
+4. 验证容器状态
 
 ### docker run 命令模板
 
 | 变量 | 说明 | 来源 |
 |------|------|------|
-| `${CONTAINER_NAME}` | 容器名称 | 自动生成，含冲突检测（见下方命名规则） |
+| `${CONTAINER_NAME}` | 容器名称 | **由 `run_pipeline.sh` 编排层预生成并注入 prompt（含冲突时间戳），执行层必须原样使用，禁止自行生成/判断**（见下方命名规则） |
 | `${MODEL_PATH}` | 宿主机模型路径 | `check_model_local.py` 搜索：**找到则使用实际路径**（如 `/home/admin/workspace/models/Qwen3-0.6B`）；**未找到则使用 `/data/models/<model_name>`**（预创建并挂载空目录，容器内下载） |
 | `${CONTAINER_MODEL_PATH}` | 容器内模型路径 | 与 `${MODEL_PATH}` 保持一致（宿主机路径原样映射到容器内同路径） |
 | `${WORKSPACE_PATH}` | 宿主机工作目录 | `/data/flagos-workspace` |
@@ -138,13 +122,16 @@ python3 skills/flagos-container-preparation/tools/check_model_local.py \
 
 ### 容器命名与冲突处理（镜像模式专用）
 
-容器名生成规则：
+容器名由 `run_pipeline.sh` 编排层**确定性预生成**（规则如下），通过 prompt 注入执行层：
 1. 基础名称：`<model_short_name>_flagos`（如 `Qwen3-8B_flagos`）
 2. 创建前检测：`docker inspect --type=container <基础名称>`
 3. 如不存在 → 直接使用基础名称
-4. 如已存在 → 追加时间戳：`<model_short_name>_flagos_<MMDD_HHMM>`（如 `Qwen3-8B_flagos_0410_1500`）
+4. 如已存在 → 追加时间戳：`<model_short_name>_flagos_<MMDD_HHMM>`（同分钟再冲突则 `<MMDD_HHMMSS>`）
 
-**禁止行为**：镜像模式下禁止复用任何已存在的容器，即使该容器是由同一镜像创建的。必须通过 `docker run` 创建全新容器。
+**禁止行为**（真机事故教训：曾因 docker run 失败降级复用旧容器，导致旧镜像跑新任务、结果错误归属）：
+- 镜像模式下禁止复用任何已存在的容器，即使该容器是由同一镜像创建的。必须通过 `docker run` 创建全新容器
+- docker run 失败**不是**复用的理由——修正变量重试/借鉴挂载参数重试（容器名不变）仍失败则终止任务
+- 执行层禁止改动编排层注入的容器名
 
 #### 模板 A：NVIDIA
 
@@ -224,6 +211,23 @@ docker run -d --name ${CONTAINER_NAME} \
     ${IMAGE} sleep infinity
 ```
 
+#### 模板 F：Hygon DCU（海光）
+
+```bash
+docker run -d --name ${CONTAINER_NAME} \
+    --net=host --ipc=host \
+    --device=/dev/kfd --device=/dev/mkfd --device=/dev/dri \
+    --group-add video \
+    -v /opt/hyhal:/opt/hyhal \
+    -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
+    -v ${WORKSPACE_PATH:-/data/flagos-workspace/${MODEL_NAME}}:/flagos-workspace \
+    -v /data:/data \
+    ${IMAGE} sleep infinity
+```
+
+> **Hygon 识别**：宿主机存在 `/opt/hyhal` 或 `/opt/dtk` 目录，或 `hy-smi` 命令可用，或 `detect_gpu.py` 返回 `vendor=hygon`。
+> **必需设备**：`/dev/kfd`（ROCm kernel driver）、`/dev/mkfd`（Hygon DCU 特有）、`/dev/dri`（DRM 渲染）。缺少 `/dev/mkfd` 时 DCU 不可用。
+
 **模板规则**：
 - 业务环境变量（`USE_FLAGGEMS`、`VLLM_USE_V1` 等）不写入模板，由后续 skill 按需添加
 - 所有模板统一挂载 `/flagos-workspace`（宿主机路径为 `/data/flagos-workspace/${MODEL_NAME}`，按模型隔离）
@@ -271,7 +275,7 @@ model:
   local_path: "<宿主机路径>"
   container_path: "<容器内路径>"
 gpu:
-  vendor: "<nvidia|huawei|mthreads|metax|cambricon>"
+  vendor: "<nvidia|huawei|mthreads|metax|cambricon|hygon>"
   type: "<GPU 型号>"
   count: <数量>
 workspace:

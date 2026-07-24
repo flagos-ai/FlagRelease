@@ -89,7 +89,7 @@ def check_execution_mode():
 def check_core_packages():
     """检查核心组件版本"""
     packages = {}
-    for pkg_name, import_name in [("torch", "torch"), ("vllm", "vllm"), ("sglang", "sglang")]:
+    for pkg_name, import_name in [("torch", "torch"), ("vllm", "vllm")]:
         try:
             mod = importlib.import_module(import_name)
             packages[pkg_name] = getattr(mod, "__version__", "installed")
@@ -272,8 +272,8 @@ def scan_flaggems_integration():
         if val is not None:
             integration["env_vars"][var] = val
 
-    # 维度2：vllm/sglang 及其平台适配层代码扫描
-    for framework in ["vllm", "sglang", "vllm_ascend"]:
+    # 维度2：vllm 及其平台适配层代码扫描
+    for framework in ["vllm", "vllm_ascend"]:
         try:
             mod = importlib.import_module(framework)
             fw_path = mod.__path__[0]
@@ -395,6 +395,56 @@ def classify_env_type(capabilities, integration):
         return "vllm_plugin_flaggems"
     else:
         return "vllm_flaggems"
+
+
+def classify_entry_image_type(capabilities, flagtree):
+    """准入镜像分类 — 决定走哪条 pipeline（双 pipeline 架构的顶层开关）。
+
+    新流程按准入镜像类型分发：
+      - gems_tree        : flaggems + flagtree，无 plugin        → 分支 A（简单路径）
+      - gems_tree_plugin : flaggems + flagtree + plugin          → 分支 B（复杂路径）
+      - native           : 无 flaggems                           → 原 native 简化流程
+      - unknown          : 组件不完整（如仅 tree、仅 gems），交由编排层判断
+
+    Returns:
+        dict: {
+            entry_image_type: str,
+            has_flaggems: bool,
+            has_flagtree: bool,
+            has_plugin: bool,
+            pipeline_branch: str,   # A | B | native | ""
+            reason: str,
+        }
+    """
+    has_flaggems = capabilities.get("flaggems_installed", False)
+    has_plugin = capabilities.get("vllm_plugin_installed", False)
+    has_flagtree = bool(flagtree.get("installed", False))
+
+    if not has_flaggems:
+        entry_type = "native"
+        branch = "native"
+        reason = "未检测到 flaggems，走 native 简化流程"
+    elif has_plugin:
+        entry_type = "gems_tree_plugin"
+        branch = "B"
+        reason = "flaggems + plugin（+tree）预装，走分支 B（复杂路径，V1 三选/V2 分支）"
+    else:
+        entry_type = "gems_tree"
+        branch = "A"
+        reason = "flaggems（+tree）无 plugin，走分支 A（简单路径）"
+
+    # flagtree 缺失不改变分类，仅记录（flaggems 是核心判据，见 CLAUDE.md 场景定义）
+    if has_flaggems and not has_flagtree:
+        reason += "；⚠ 未检测到 flagtree"
+
+    return {
+        "entry_image_type": entry_type,
+        "has_flaggems": has_flaggems,
+        "has_flagtree": has_flagtree,
+        "has_plugin": has_plugin,
+        "pipeline_branch": branch,
+        "reason": reason,
+    }
 
 
 def extract_flaggems_code_details(integration):
@@ -655,6 +705,7 @@ def _build_inject_block(caps, indent="", extra_kwargs=None):
     return "\n".join(indent + line for line in lines)
 
 
+# ============ 冷注入（base 镜像源码无 flag_gems 引用时从零插入） =====
 def _inject_single_file(code_path, caps):
     """对单个文件注入环境变量驱动代码，替换 flag_gems.enable()/only_enable() 调用"""
     if not code_path or not os.path.isfile(code_path):
@@ -695,7 +746,12 @@ def _inject_single_file(code_path, caps):
 
 
 def _inject_control_code(code_details, caps):
-    """注入环境变量驱动的算子控制代码到所有包含 flag_gems.enable() 的文件"""
+    """注入环境变量驱动的算子控制代码到所有包含 flag_gems.enable() 的文件
+
+    双模式：
+    - replace：源码已有 flag_gems.enable() 调用点 → 原位替换（原有逻辑）
+    - cold：全镜像无调用点（plugin 镜像常态）→ 解析 model runner 锚点从零插入
+    """
     code_paths = code_details.get("code_paths", [])
 
     # 向后兼容：如果没有 code_paths，使用旧的 code_path
@@ -704,8 +760,17 @@ def _inject_control_code(code_details, caps):
         if code_path:
             code_paths = [{"file": code_path, "enable_call": "", "priority": 1}]
 
+    inject_mode = "replace"
     if not code_paths:
-        return {"injected": False, "error": "no code_paths found"}
+        # 冷注入：无既有调用点，锚点=每个 worker 都会 import 的 model runner 模块
+        anchors = _find_cold_inject_anchors()
+        if not anchors:
+            return {"injected": False, "mode": "cold",
+                    "error": "no code_paths and no cold-inject anchors found"}
+        print(f"  源码无 flag_gems 调用点，冷注入锚点: {anchors}")
+        code_paths = [{"file": p, "enable_call": "", "priority": i + 1}
+                      for i, p in enumerate(anchors)]
+        inject_mode = "cold"
 
     results = []
     injected_count = 0
@@ -714,7 +779,10 @@ def _inject_control_code(code_details, caps):
 
     for cp in code_paths:
         filepath = cp["file"]
-        r = _inject_single_file(filepath, caps)
+        if inject_mode == "cold":
+            r = _cold_inject_single_file(filepath, caps)
+        else:
+            r = _inject_single_file(filepath, caps)
         results.append(r)
         if r.get("injected"):
             if r.get("already"):
@@ -745,6 +813,7 @@ def _inject_control_code(code_details, caps):
     print(f"  ✓ 共处理 {len(code_paths)} 个文件: {injected_count} 新注入, {already_count} 已注入")
     return {
         "injected": True,
+        "mode": inject_mode,
         "file": first_file,
         "backup": first_backup,
         "files": [r["file"] for r in results if r.get("injected")],
@@ -833,12 +902,19 @@ def collect_all():
     code_details = extract_flaggems_code_details(integration)
     caps = capabilities["capabilities"]
 
-    # 非 plugin 环境：一次性注入环境变量驱动代码 + 写入控制环境变量
+    # 一次性注入环境变量驱动代码（两处共用同一能力）：
+    # - vllm_flaggems：replace 模式（原位替换既有调用点）+ 写控制环境变量
+    # - vllm_plugin_flaggems：通常 cold 模式（plugin 镜像源码无调用点）。注入块自带
+    #   plugin 门控（VLLM_FL_PREFER_ENABLED 存在则 pass），plugin 路径下静默不干扰；
+    #   分支 B V2.1（vendor plugin + 代码注入）依赖此注入生效。不写控制环境变量，
+    #   避免干扰 V1 三选。
     inject_result = {}
     control_env = {}
     if env_type == "vllm_flaggems":
         inject_result = _inject_control_code(code_details, caps)
         control_env = _write_control_env_vars(env_type, caps)
+    elif env_type == "vllm_plugin_flaggems":
+        inject_result = _inject_control_code(code_details, caps)
     elif env_type == "native":
         control_env = _write_control_env_vars(env_type, caps)
 
@@ -877,6 +953,7 @@ def collect_all():
             "has_flagtree": flagtree["installed"],
             **code_details,
         },
+        "entry_classification": classify_entry_image_type(capabilities, flagtree),
         "control_env": control_env,
         "inject_result": inject_result,
     }
@@ -910,6 +987,15 @@ def output_report(data):
     report.append(f"\n## 环境场景: {env_type} — {env_type_labels.get(env_type, '未知')}")
     if env_cls.get("has_flagtree"):
         report.append(f"  FlagTree:     已安装")
+
+    # 准入镜像分类（双 pipeline 分发开关）
+    entry_cls = data.get("entry_classification", {})
+    if entry_cls:
+        branch_labels = {"A": "分支 A（简单路径）", "B": "分支 B（复杂路径）",
+                         "native": "native 简化流程", "": "待定"}
+        report.append(f"\n## 准入镜像类型: {entry_cls.get('entry_image_type', 'unknown')} "
+                      f"→ {branch_labels.get(entry_cls.get('pipeline_branch', ''), '未知')}")
+        report.append(f"  判定依据: {entry_cls.get('reason', '-')}")
     if env_type == "vllm_flaggems":
         code_paths = env_cls.get('code_paths', [])
         if code_paths:
@@ -1021,13 +1107,42 @@ def output_report(data):
     print("\n".join(report))
 
 
+def detect_model_dtype(model_path: str) -> str:
+    """从模型 config.json 读取权重数制（torch_dtype）。"""
+    if not model_path:
+        return ""
+    config_json = os.path.join(model_path, "config.json")
+    if not os.path.exists(config_json):
+        # 尝试常见子目录
+        for sub in ["", "config"]:
+            p = os.path.join(model_path, sub, "config.json") if sub else config_json
+            if os.path.exists(p):
+                config_json = p
+                break
+        else:
+            return ""
+    try:
+        with open(config_json, "r") as f:
+            cfg = json.load(f)
+        return cfg.get("torch_dtype", "")
+    except Exception:
+        return ""
+
+
 def main():
     parser = argparse.ArgumentParser(description="FlagOS 环境检查合并脚本")
     parser.add_argument("--output-json", action="store_true", help="输出 JSON 格式")
     parser.add_argument("--report", action="store_true", help="输出人类可读报告")
+    parser.add_argument("--model-path", default="", help="模型路径，用于检测权重数制 (torch_dtype)")
     args = parser.parse_args()
 
     data = collect_all()
+
+    # 追加模型权重数制检测
+    if args.model_path:
+        dtype = detect_model_dtype(args.model_path)
+        if dtype:
+            data["model_dtype"] = dtype
 
     if args.output_json:
         output_json(data)

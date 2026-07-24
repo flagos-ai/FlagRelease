@@ -19,23 +19,6 @@ provides:
   - flagos_optimized_perf.result_path
 ---
 
-<!--
- Copyright 2026 FlagOS Contributors
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- -->
-
-
 # 性能测试 Skill
 
 支持三版自动化性能测试：V1 (Native) → V2 (Full FlagGems) → V3 (Optimized FlagGems)（如需优化），标准 markdown 表格输出。
@@ -182,6 +165,17 @@ docker exec $CONTAINER cp /flagos-workspace/scripts/config/perf_config.yaml /fla
 
 **前置条件**：关闭 FlagGems，以 native 模式启动服务。
 
+**无 V1 场景（V1 性能基线完全缺失）**：分支 B 三选=none（强依赖 flaggems）或 V1 服务无法启动时，跳过本步骤，改用合成基线（编排层在步骤4之前生成，全芯片统一标准）：
+
+```bash
+# 1. V2 使能 flaggems 后首次可正常启动状态（未被精度调优削减）quick 测一轮
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/benchmark_runner.py --mode quick --output-name v2_initial_performance"
+# 2. ×1.2 合成基线（吞吐×1.2、延迟÷1.2），按 native_performance.json 标准格式落盘
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/synthesize_perf_baseline.py --v2-initial /flagos-workspace/results/v2_initial_performance.json --output /flagos-workspace/results/native_performance.json"
+```
+
+合成文件带 `_meta.synthetic=true` 标记：下游 `performance_compare.py` / `operator_optimizer.py init` / `operator_search.py` 照常当 V1 基线消费（零特殊处理），`generate_report.py` 识别标记并在报告注明"合成基线，非实测 V1"。脚本拒绝覆盖已存在的实测 V1 基线（防误用）。80% 判据下等价于要求调优后性能 ≥ V2 初始的 1.2 倍。
+
 ```bash
 # 关闭 FlagGems
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable"
@@ -232,6 +226,13 @@ print(f'已记录 {len(ops)} 个算子到 ops_list.json')
 ```
 
 ## 步骤 6：运行 V2 FlagGems 性能测试
+
+**V2 服务启动崩溃处理**：如果 FlagGems 模式服务在此步骤启动时崩溃（步骤3已验证过但缓存清理后可能暴露新问题），按以下流程处理：
+1. 备份崩溃日志
+2. 调用 `diagnose_ops.py crash-log` 定位问题算子
+3. 禁用问题算子 → 清理 Triton 缓存 → 重启服务
+4. 恢复成功 → 调用 `issue_reporter.py full --type operator-crash --recovered` → 继续 benchmark
+5. 不可恢复（连续 2 轮无法定位新算子）→ 调用 `issue_reporter.py full --type operator-crash` → 设 `performance_ok=false` → 跳到步骤 8 发布
 
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/benchmark_runner.py \

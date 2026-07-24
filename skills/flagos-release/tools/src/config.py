@@ -68,7 +68,8 @@ class PublishConfig:
     weights_dir: str = ""
     # 自动读取评测结果目录（步骤4/5产出），填入 README
     results_dir: str = ""
-    # 仓库可见性
+    # 仓库可见性：恒为私有。发布点(publish.py)已硬编码私有，不再读此字段决定可见性，
+    # 保留仅为向后兼容。禁止改 False 或据此恢复公开发布分支。
     private: bool = True
     # 已有的 Harbor 镜像地址（跳过 commit/tag/push）
     existing_harbor_image: str = ""
@@ -103,6 +104,7 @@ class ModelInfo:
     container_run_cmd: str = ""
     serve_start_cmd: str = ""
     serve_infer_cmd: str = ""
+    canonical_model_path: str = ""
 
 
 @dataclass
@@ -113,7 +115,10 @@ class PipelineConfig:
     host_workspace_base: str = ""  # /data/flagos-workspace/<model>，由 context.yaml workspace.host_path 填充
     config_persisted: bool = False
     plugin_image_mode: bool = False  # plugin 模式：镜像 tag 追加 -plugin，仓库名追加 -plugin
-    plugin_qualified: bool = False   # plugin 精度+性能均达标时为 True，否则跳过 README 更新
+    plugin_qualified: bool = False   # plugin 精度达标(accuracy_ok)即为 True→更新 README；性能不门控
+    version_tag: str = "v2"          # 发布版本标签：v1/v2/v3/v4
+    also_tag: str = ""               # 额外镜像 tag 版本（V2=V3 同镜像双 tag 场景）
+    incompatible_tag: str = ""       # 不适配标记名（设置后只打标记不发布版本镜像）
 
     # 各阶段配置
     chip: ChipConfig = field(default_factory=ChipConfig)
@@ -152,29 +157,28 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
             {'metric': method, 'origin': ev['v1_score'], 'flagos': ev['v2_score']}
         ]
 
-    # serve_start_cmd
+    # serve_start_cmd + container_run_cmd
+    # 核心原则：README 中下载路径、docker run 挂载路径、vllm serve 模型路径三者必须一致
+    # 统一使用 canonical_model_path 作为唯一模型路径
+    import re
     svc = ctx.get('service', {})
     runtime = ctx.get('runtime', {})
     commands = ctx.get('commands', {})
     model_short = model.get('name', '').split('/')[-1] if model.get('name') else ''
     flagrelease_name = f"{model_short}-FlagOS" if model_short else ''
-    user_model_path = f"/data/{flagrelease_name}" if flagrelease_name else model.get('container_path', '')
+    canonical_model_path = f"/data/{flagrelease_name}" if flagrelease_name else model.get('container_path', '/data/model')
 
     if commands.get('serve_start'):
-        import re
         serve_cmd = commands['serve_start']
-        # 替换模型路径为用户下载路径
-        container_path = model.get('container_path', '')
-        if container_path and user_model_path:
-            serve_cmd = serve_cmd.replace(container_path, user_model_path)
+        # 用正则替换 vllm serve 后的模型路径参数（第一个非 -- 参数）
+        serve_cmd = re.sub(r'(vllm\s+serve\s+)\S+', rf'\1{canonical_model_path}', serve_cmd)
         # 替换端口为默认 8000
         serve_cmd = re.sub(r'--port\s+\d+', '--port 8000', serve_cmd)
         config.model_info.serve_start_cmd = serve_cmd
     else:
-        port = svc.get('port', 8000)
         tp = runtime.get('tp_size') or 1
         max_model_len = svc.get('max_model_len', '')
-        cmd_parts = [f"vllm serve {user_model_path}",
+        cmd_parts = [f"vllm serve {canonical_model_path}",
                      f"--host 0.0.0.0 --port 8000",
                      f"--tensor-parallel-size {tp}",
                      f"--served-model-name {model_short}" if model_short else None,
@@ -185,19 +189,23 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
 
     # container_run_cmd (优先从 context commands 读取实际命令)
     if commands.get('container_run'):
-        import re
         run_cmd = commands['container_run']
-        # 替换镜像为 {{IMAGE}} 占位符（镜像通常是最后一个非选项参数或可通过已知镜像名匹配）
+        # 替换镜像为目标镜像占位符
         image_name = ctx.get('image', {}).get('name', '')
         if image_name:
             run_cmd = run_cmd.replace(image_name, '{{IMAGE}}')
         # 移除 workspace 挂载（-v ...:/flagos-workspace）
         run_cmd = re.sub(r'\s*-v\s+\S+:/flagos-workspace', '', run_cmd)
-        # 替换模型挂载为简化的 -v /data:/data
+        # 替换所有模型相关挂载为 -v /data:/data（canonical_model_path 在 /data/ 下，天然可达）
         container_path = model.get('container_path', '')
         local_path = model.get('local_path', '')
-        if container_path and local_path:
+        if container_path:
             run_cmd = re.sub(r'-v\s+\S+:' + re.escape(container_path), '-v /data:/data', run_cmd)
+        elif local_path:
+            run_cmd = re.sub(r'-v\s+' + re.escape(local_path) + r':\S+', '-v /data:/data', run_cmd)
+        # 如果命令中没有 -v /data:/data（原始命令无模型挂载或替换未命中），追加
+        if '-v /data:/data' not in run_cmd and '-v /data:' not in run_cmd:
+            run_cmd = re.sub(r'(docker\s+run\s+)', r'\1-v /data:/data ', run_cmd)
         # 替换容器名为通用名
         run_cmd = re.sub(r'--name[= ]\S+', '--name flagos', run_cmd)
         config.model_info.container_run_cmd = run_cmd
@@ -206,6 +214,9 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
             "docker run -itd --gpus=all --network=host "
             "-v /data:/data --name flagos {{IMAGE}}"
         )
+
+    # 保存 canonical_model_path 供模板使用
+    config.model_info.canonical_model_path = canonical_model_path
 
     # ---- chip ----
     gpu = ctx.get('gpu', {})
@@ -224,7 +235,7 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     # ---- publish ----
     config.publish.tag_image = True
     config.publish.push_harbor = True
-    # 统一私有发布，达标与否在总结报告中注明
+    # 统一私有发布（发布点已硬编码私有，不留公开口子），达标与否在总结报告中注明
     workflow = ctx.get('workflow', {})
     config.publish.private = True
     config.config_persisted = workflow.get('config_persisted', False)
@@ -274,6 +285,17 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     # 有 token 则启用对应平台上传
     config.publish.publish_modelscope = bool(config.publish.modelscope_token)
     config.publish.publish_huggingface = bool(config.publish.huggingface_token)
+
+    # ===== 需求 D（用户 2026-07-20 定稿）：V2 精度不达标时不对外发布 =====
+    # 非 plugin 模式(步骤8 V2 发布)：仅当 V2 精度达标(workflow.accuracy_ok=true) 才创建
+    # ModelScope/HuggingFace 仓库并上传权重；V2 精度不达标 → 仅 Harbor 私有镜像(过程产物)，
+    # 不对外发布。若后续 V3(plugin)达标，由步骤13的 full-publish 兜底补发对外仓库。
+    # 说明：plugin 模式(步骤13)不走此分支，其 README/发布门控由 plugin_qualified 决定。
+    if not config.plugin_image_mode:
+        v2_accuracy_ok = bool(workflow.get('accuracy_ok'))
+        if not v2_accuracy_ok:
+            config.publish.publish_modelscope = False
+            config.publish.publish_huggingface = False
     # results_dir 用于 README 自动读取评测结果
     workspace = ctx.get('workspace', {})
     container_workspace = workspace.get('container_path', '/flagos-workspace')
@@ -305,9 +327,14 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
             if len(parts) == 2:
                 config.publish.base_huggingface_repo_id = parts[1]
 
-    # plugin_workflow.qualified → plugin_qualified
+    # plugin_qualified → 决定是否更新 README。
+    # 现行规则（用户 2026-07 定稿）：精度是唯一硬闸门，性能不门控。
+    # 只要 plugin 精度达标（accuracy_ok=true）即视为合格、应更新 README；
+    # plugin_workflow.qualified 含性能门控(performance_ok)，不能用作 README 门控，
+    # 否则精度达标但性能<80%的 V3 会被误判"不达标"跳过 README
+    # （历史事故：DeepSeek-R1-0528 精度62%达标、性能77.9%，README被误跳）。
     plugin_wf = ctx.get('plugin_workflow', {})
-    if plugin_wf.get('qualified', False):
+    if plugin_wf.get('accuracy_ok', False) or plugin_wf.get('qualified', False):
         config.plugin_qualified = True
 
     return config
@@ -439,9 +466,23 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
             config.model_info.flagrelease_name_pre = model_name.split('-')[0]
 
     # ==================== 镜像 tag ====================
+    # V3 (Max) 发布到 flagrelease-project 仓库（交付 SVT 验收），其余版本（V1/V2/V4）走 public
+    if getattr(config, 'version_tag', None) == "v3":
+        if config.chip.harbor_registry == "harbor.baai.ac.cn/flagrelease-public":
+            config.chip.harbor_registry = "harbor.baai.ac.cn/flagrelease-project"
+
     if not config.chip.date_tag:
         tag = datetime.datetime.now().strftime("%Y%m%d%H%M")
-        config.chip.date_tag = f"{tag}-plugin" if config.plugin_image_mode else tag
+        # 根据 version_tag 决定后缀
+        version_tag = getattr(config, 'version_tag', None)
+        if version_tag:
+            version_suffix_map = {"v1": "-v1", "v2": "-v2", "v3": "-v3", "v4": "-v4"}
+            suffix = version_suffix_map.get(version_tag, "")
+        elif config.plugin_image_mode:
+            suffix = "-plugin"  # 向后兼容：未设置 version_tag 但设置了 plugin_image_mode
+        else:
+            suffix = ""
+        config.chip.date_tag = f"{tag}{suffix}"
 
     if not config.publish.image_target_tag and config.publish.existing_harbor_image:
         config.publish.image_target_tag = config.publish.existing_harbor_image
@@ -460,15 +501,23 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
         ) if vendor_name and vendor_name != "unknown" else None
 
         if chip_info:
-            config.publish.image_target_tag = _generate_tag(
-                info=chip_info,
-                model_name=model_name or "unknown",
-                harbor_registry=config.chip.harbor_registry,
-                tree=config.chip.tree,
-                gems_version=config.chip.gems_version,
-                cx=config.chip.cx,
-                date_tag=config.chip.date_tag,
-            )
+            # 委托 get_image_name.sh 采集容器实际版本生成镜像名。
+            # 采集失败不应中断整个 auto_fill（后续还有 harbor_path/仓库ID/命令等填充），
+            # 留空 tag 交由 validate_config 报缺失，行为不比旧字符串拼接脆弱。
+            try:
+                config.publish.image_target_tag = _generate_tag(
+                    info=chip_info,
+                    model_name=model_name or "unknown",
+                    harbor_registry=config.chip.harbor_registry,
+                    tree=config.chip.tree,
+                    gems_version=config.chip.gems_version,
+                    cx=config.chip.cx,
+                    date_tag=config.chip.date_tag,
+                    container_name=config.container_name,
+                    vendor_name=vendor_name,
+                )
+            except Exception as e:
+                print(f"  ⚠ 自动生成镜像 tag 失败，留空待手动指定: {e}")
 
     if not config.publish.harbor_path and config.publish.image_target_tag:
         config.publish.harbor_path = config.publish.image_target_tag

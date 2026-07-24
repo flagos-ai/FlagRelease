@@ -908,6 +908,32 @@ def sanitize_docker_tag(tag: str) -> str:
     return tag
 
 
+def _normalize_vendor_for_naming(vendor_name: str) -> str:
+    """将 context/枚举里的厂商名归一化为 get_image_name.sh 认可的名称。
+
+    脚本认: ascend hygon iluvatar kunlunxin metax mthreads nvidia tsingmicro zhenwu
+    context 可能用别名: huawei→ascend, tianshu→iluvatar, moore→mthreads 等。
+    """
+    v = (vendor_name or "").strip().lower()
+    alias = {
+        "huawei": "ascend",
+        "ascend": "ascend",
+        "tianshu": "iluvatar",
+        "iluvatar": "iluvatar",
+        "moore": "mthreads",
+        "mthreads": "mthreads",
+        "muxi": "metax",
+        "metax": "metax",
+        "kunlun": "kunlunxin",
+        "kunlunxin": "kunlunxin",
+        "hygon": "hygon",
+        "nvidia": "nvidia",
+        "tsingmicro": "tsingmicro",
+        "zhenwu": "zhenwu",
+    }
+    return alias.get(v, v)
+
+
 def generate_image_tag(
     info: ChipVersionInfo,
     model_name: str,
@@ -915,67 +941,67 @@ def generate_image_tag(
     tree: str = "none",
     gems_version: str = "",
     cx: str = "none",
-    date_tag: str = ""
+    date_tag: str = "",
+    container_name: str = "",
+    vendor_name: str = "",
 ) -> str:
-    """
-    生成镜像 tag
+    """生成镜像 tag（统一命名规范，委托 get_image_name.sh 采集）
 
-    格式: {registry}/flagrelease-{vendor}-release-model_{model}-tree_{tree}-gems_{gems}-cx_{cx}-python_{python}-torch_{backend}-{torch_version}-pcp_{sdk}-gpu_{gpu}-arc_{arch}-driver_{driver}:{date}
+    新格式（镜像名主体由 get_image_name.sh 生成）:
+      {registry}/{model}-{gpu}-gems{g}-tree{t}-cx{c}-plugin{p}-{vllm}{v}-cp{py}-pt{pt}-{sdk}{s}-{arch}-{driver}:{date_tag}
+
+    date_tag 由调用方（config.py）传入且已含版本后缀（-v1..-v4），
+    脚本自带的时间戳被丢弃，改用传入的 date_tag，从而保留 V1-V4 tag 区分。
 
     Args:
-        info: 芯片版本信息
+        info: 芯片版本信息（vendor 来源兜底）
         model_name: 模型名称
-        harbor_registry: Harbor 仓库地址
-        tree: tree 参数
-        gems_version: gems 版本
-        cx: cx 参数
-        date_tag: 日期标签，如果为空则自动生成
+        harbor_registry: Harbor 仓库地址（作为 registry 前缀保留）
+        date_tag: 日期标签（含 -vN 后缀），为空则脚本内部生成时间戳
+        container_name: 容器名（脚本 docker exec 采集版本用）
+        vendor_name: 厂商名（归一化后传给脚本）
 
     Returns:
         完整的镜像 tag
     """
-    import datetime
+    import os
 
+    # 厂商名：优先显式传入，回退 info.vendor
+    vn = vendor_name or (info.vendor.value if info and info.vendor else "")
+    vn = _normalize_vendor_for_naming(vn)
+
+    script_path = os.path.join(os.path.dirname(__file__), "..", "get_image_name.sh")
+    script_path = os.path.abspath(script_path)
+
+    # 脚本需要容器名（zhenwu 除外）；其余厂商缺容器名无法采集 → 抛错由调用方兜底
+    cmd = ["bash", script_path, vn]
+    if vn == "zhenwu":
+        cmd.append(model_name or "unknown")
+    else:
+        if not container_name:
+            raise ValueError(
+                f"generate_image_tag: 厂商 {vn} 需要 container_name 才能采集版本信息"
+            )
+        cmd.extend([container_name, model_name or "unknown"])
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError(
+            f"get_image_name.sh 生成镜像名失败 (vendor={vn}): "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+
+    raw = result.stdout.strip()  # 形如 "model-gpu-...-driver:时间戳"
+
+    # 拆出镜像名主体，丢弃脚本自带时间戳
+    image_body = raw.rsplit(":", 1)[0] if ":" in raw else raw
+
+    # date_tag（含 -vN 后缀）为空则回退脚本时间戳
     if not date_tag:
-        date_tag = datetime.datetime.now().strftime("%Y%m%d%H%M")
+        date_tag = raw.rsplit(":", 1)[1] if ":" in raw else datetime.datetime.now().strftime("%Y%m%d%H%M")
 
-    # 清理模型名称，保留字母数字、连字符和小数点
-    clean_model = re.sub(r'[^a-zA-Z0-9.\-]', '-', model_name.lower())
-    clean_model = re.sub(r'-+', '-', clean_model).strip('-')
-
-    vendor_name = info.vendor.value
-
-    # 如果版本字段为空，使用占位符
-    driver_version = info.driver_version if info.driver_version else "x"
-    sdk_version = info.sdk_version if info.sdk_version else "x"
-    python_version = info.python_version if info.python_version else "x"
-    torch_version = info.torch_version if info.torch_version else "x"
-    torch_backend = info.torch_backend if info.torch_backend else "x"
-    gpu_model = info.gpu_model if info.gpu_model else "x"
-    gpu_model = get_gpu_code(gpu_model, vendor_name)
-    arch = info.arch if info.arch else "amd64"
-    gems_version = gems_version if gems_version else "none"
-
-    # 构建镜像名（日期放在最后）
-    tag_parts = [
-        f"flagrelease-{vendor_name}-release",
-        f"model_{clean_model}",
-        f"tree_{tree}",
-        f"gems_{gems_version}",
-        f"cx_{cx}",
-        f"python_{python_version}",
-        f"torch_{torch_backend}-{torch_version}",
-        f"pcp_{sdk_version}",
-        f"gpu_{gpu_model}",
-        f"arc_{arch}",
-        f"driver_{driver_version}",
-    ]
-
-    image_name = "-".join(tag_parts)
-
-    # 清理可能的无效字符组合
-    image_name = sanitize_docker_tag(image_name)
-
-    full_tag = f"{harbor_registry}/{image_name}:{date_tag}"
+    # Docker 仓库名（: 之前的 repository 部分）必须全小写，模型名可能含大写
+    image_body = sanitize_docker_tag(image_body).lower()
+    full_tag = f"{harbor_registry}/{image_body}:{date_tag}"
 
     return full_tag

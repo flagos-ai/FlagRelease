@@ -22,23 +22,6 @@ provides:
   - release.huggingface_url
 ---
 
-<!--
- Copyright 2026 FlagOS Contributors
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- -->
-
-
 # 发布 Skill
 
 将验证完成的 FlagOS 环境打包为 Docker 镜像并发布到 Harbor，同时将模型权重上传到 ModelScope / HuggingFace。
@@ -142,18 +125,23 @@ python main.py --from-context /flagos-workspace/shared/context.yaml --only-readm
 
 ### 步骤 0 — 发布条件检查
 
-从 `context.yaml` 读取 `workflow.qualified` 状态，用于报告生成。所有发布统一为私有。
+从 `context.yaml` 读取 `workflow.qualified` 状态，用于报告生成。所有对外仓库均为私有可见性。
 
 ```
 读取 workflow.qualified (= service_ok AND accuracy_ok AND performance_ok)
 
-publish.private = true   → 统一私有发布
+publish.private = true   → 对外仓库可见性恒为私有
 日志: "发布模式: 私有"
 
 qualified 状态记录到报告中:
   - qualified=true: "达标"
   - qualified=false: "未达标"
 ```
+
+**对外发布(魔搭/HF)建仓门控（需求 D，用户 2026-07-20 定稿）**——与"可见性"无关，决定是否建仓/传权重：
+- 步骤8(V2, 非 plugin 模式)：Harbor 镜像**始终**推送(私有)；**仅当 V2 精度达标(`workflow.accuracy_ok=true`)** 才创建 ModelScope/HuggingFace 仓库并上传权重。V2 精度不达标 → 只留 Harbor 私有镜像(过程产物)，**不建对外仓库**。
+- 步骤13(V3, plugin 模式)：若步骤8已建仓(V2 达标)→更新其 README；若步骤8未建仓(V2 不达标)但 V3 精度达标 → **full-publish 补发**(建仓+传权重+README)。
+- 净效果：V2 达标→对外发布；V2 不达标+V3 达标→V3 时补发；**V2 与 V3 都不达标→对外一律不发**，仅私有镜像。
 
 **qualified 判定细节**（仅用于报告展示）：
 - `service_ok = true`：V1 和 V2 都能正常启动
@@ -170,31 +158,47 @@ qualified 状态记录到报告中:
 | B1 | 镜像打 tag（自动生成标准命名） | 可配置跳过 |
 | B2 | 推送到 Harbor（流式输出进度） | 可配置跳过 |
 | B3 | 生成 README（含发布可见性标记 + 评测结果） | 可配置跳过 |
-| B4 | 发布到 ModelScope（SDK + CLI 降级，`private` 由步骤 0 决定） | 可配置跳过 |
-| B5 | 发布到 HuggingFace（SDK + CLI 降级，`private` 由步骤 0 决定） | 可配置跳过 |
+| B4 | 发布到 ModelScope（SDK + CLI 降级，强制私有，不留公开口子） | 可配置跳过 |
+| B5 | 发布到 HuggingFace（SDK + CLI 降级，强制私有，不留公开口子） | 可配置跳过 |
 
 ---
 
 # 镜像命名规范
 
+镜像名主体由 `get_image_name.sh`（权威工具，进容器 `docker exec` 采集全部版本）生成，
+`generate_image_tag` 调用它拿主体，再拼 registry 前缀与版本后缀（`-v1`..`-v5`）。
+
 ## Tag 格式
 
 ```
-{registry}/flagrelease-{vendor}-release-model_{model}-tree_{tree}-gems_{gems}-cx_{cx}-python_{python}-torch_{backend}-{torch_version}-pcp_{sdk}-gpu_{gpu_code}-arc_{arch}-driver_{driver}:{YYYYMMDDHHMM}
+{registry}/{model}-{gpu}-gems{g}-tree{t}-cx{c}-plugin{p}-{vllm}{v}-cp{py}-pt{pt}-{sdk}{s}-{arch}-{driver}:{YYYYMMDDHHMM}[-vN]
 ```
+
+字段顺序：模型 → GPU 码 → gems → tree → cx(flagcx) → plugin(vllm-plugin-fl) →
+vllm → cp(python) → pt(torch) → 厂商 SDK → 架构 → 驱动。
 
 ## 示例
 
 ```
-harbor.baai.ac.cn/flagrelease-public/flagrelease-nvidia-release-model_qwen3.5-8b-tree_none-gems_4.2.1rc0-cx_none-python_3.12.3-torch_cuda-2.9.0-pcp_cuda13.1-gpu_nvidia003-arc_amd64-driver_570.158.01:202603301143
+harbor.baai.ac.cn/flagrelease-public/GLM5.2-kunlunxin001-gems4.2.1-treenone-cx0.10.0-plugin0.1.0-vllm0.13.0-cp310-pt29-xrtnone-x64-515.58:202606251805-v2
 ```
 
 ## 规则
 
-- GPU 型号使用编码（`nvidia001` = A100, `nvidia003` = H20, `metax001` = C550）
-- 版本号中 `+` 替换为 `-`
-- 模型名小写
-- 日期 tag 格式 `YYYYMMDDHHMM`（12 位）
+- GPU 码：厂商固定编码（`nvidia003`、`kunlunxin001`、`metax001`、`ascend001`、
+  `hygon001`、`iluvatar001`、`mthreads001`、`tsingmicro001`、zhenwu 用 `pp001`）
+- 版本压缩两档：
+  - `semver`（gems/tree/cx/plugin/vllm）保留 `x.y.z`，去 `+`/`.dev` 后缀
+  - `cver`（python/torch/SDK）主.次去点，如 `3.10.4→310`、`2.9.0→29`
+- 厂商专属 SDK 键：nvidia=`cu`、ascend=`cann`(+`ptnpu`/`vllm-ascend`)、
+  hygon=`dtk`、metax=`maca`、mthreads=`musa`、kunlunxin=`xrt`、
+  iluvatar=`ixml`、tsingmicro=`raisa`、zhenwu=`hggc`
+- 架构：`x86_64→x64`、`aarch64→a64`
+- 采集不到的版本填 `none`（如 `xrtnone`），属规范预期，非错误
+- **版本后缀 `-v1..-v5` 必须保留**：由 config.py 拼在 date_tag 上，
+  脚本自带时间戳被丢弃改用该 date_tag；双 tag/不适配 tag 靠 `-v[0-9]+$`
+  正则替换，依赖此后缀
+- 厂商别名归一化：`huawei→ascend`、`tianshu→iluvatar`、`moore→mthreads` 等
 - `_-` / `-_` / `--` 等非法组合自动清理
 
 ## 模型命名规范

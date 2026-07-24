@@ -105,6 +105,13 @@ class PublishStage(BaseStage):
         publish_config = self.config.publish
         harbor_failed = False
 
+        # 不适配标记模式：只对源镜像打一个"不适配"标签并推送，不发布版本镜像/README/ModelScope
+        incompatible_tag = getattr(self.config, "incompatible_tag", "")
+        if incompatible_tag:
+            print(f"  不适配标记模式: {incompatible_tag}")
+            ok = self._tag_incompatible(incompatible_tag)
+            return self.make_result(ok, "不适配标记完成" if ok else "不适配标记失败")
+
         # 如果已有 Harbor 镜像地址，跳过 commit/tag/push
         if publish_config.existing_harbor_image:
             existing_image = publish_config.existing_harbor_image
@@ -136,6 +143,11 @@ class PublishStage(BaseStage):
                 if not success:
                     harbor_failed = True
                     print("  ⚠ Harbor 推送失败，继续执行后续步骤（README 生成、数据回传）")
+                else:
+                    # V2=V3 同镜像双 tag：额外打一个 --also-tag 版本 tag 并推送
+                    also_tag = getattr(self.config, "also_tag", "")
+                    if also_tag and not harbor_failed:
+                        self._tag_and_push_also(also_tag)
             else:
                 self.skip_step("推送 Harbor", "配置跳过")
 
@@ -155,13 +167,23 @@ class PublishStage(BaseStage):
         if self.config.plugin_image_mode and not self.config.plugin_qualified:
             self.skip_step("更新 ModelScope README", "Plugin 不达标，跳过")
         elif self.config.plugin_image_mode:
-            # plugin 达标：更新步骤8原仓库的 README，不创建新仓库、不上传权重
+            # plugin 达标。两种情形：
+            #  (a) 步骤8已建仓(V2 精度达标)：更新原仓库 README，不重传权重（常规路径）。
+            #  (b) 步骤8未建仓(V2 精度不达标 → 需求D：当时不对外发布)：此时 V3 达标，
+            #      需 full-publish 补发对外仓库(创建仓库+上传权重+README)。
             if publish_config.base_modelscope_model_id and readme_path:
                 success = self._update_repo_readme(
                     publish_config.base_modelscope_model_id, "modelscope", readme_path)
                 if not success:
                     ms_failed = True
                     print("  ⚠ 更新 ModelScope README 失败，继续执行 HuggingFace")
+            elif publish_config.publish_modelscope:
+                # 情形(b)：V2 未建仓但 V3 达标 → full-publish 补发
+                print("  ℹ 步骤8未建 ModelScope 仓库(V2 精度不达标)，V3 达标 → full-publish 补发对外仓库")
+                success = self._with_proxy_fallback("ModelScope", self._publish_to_modelscope, readme_path)
+                if not success:
+                    ms_failed = True
+                    print("  ⚠ ModelScope 补发失败，继续执行 HuggingFace")
             else:
                 self.skip_step("更新 ModelScope README", "无步骤8仓库信息或无 README")
         elif publish_config.publish_modelscope:
@@ -177,13 +199,20 @@ class PublishStage(BaseStage):
         if self.config.plugin_image_mode and not self.config.plugin_qualified:
             self.skip_step("更新 HuggingFace README", "Plugin 不达标，跳过")
         elif self.config.plugin_image_mode:
-            # plugin 达标：更新步骤8原仓库的 README
+            # plugin 达标：同 ModelScope，(a)已建仓→更新README；(b)V2未建仓但V3达标→full-publish补发
             if publish_config.base_huggingface_repo_id and readme_path:
                 success = self._update_repo_readme(
                     publish_config.base_huggingface_repo_id, "huggingface", readme_path)
                 if not success:
                     hf_failed = True
                     print("  ⚠ 更新 HuggingFace README 失败")
+            elif publish_config.publish_huggingface:
+                # 情形(b)：V2 未建仓但 V3 达标 → full-publish 补发
+                print("  ℹ 步骤8未建 HuggingFace 仓库(V2 精度不达标)，V3 达标 → full-publish 补发对外仓库")
+                success = self._with_proxy_fallback("HuggingFace", self._publish_to_huggingface, readme_path)
+                if not success:
+                    hf_failed = True
+                    print("  ⚠ HuggingFace 补发失败")
             else:
                 self.skip_step("更新 HuggingFace README", "无步骤8仓库信息或无 README")
         elif publish_config.publish_huggingface:
@@ -220,7 +249,7 @@ class PublishStage(BaseStage):
             "modelscope_model_id": ms_model_id if not ms_failed else "",
             "modelscope_url": f"https://modelscope.cn/models/{ms_model_id}" if ms_model_id and not ms_failed else "",
             "huggingface_repo_id": hf_repo_id if not hf_failed else "",
-            "huggingface_url": f"https://hf-mirror.com/{hf_repo_id}" if hf_repo_id and not hf_failed else "",
+            "huggingface_url": f"https://huggingface.co/{hf_repo_id}" if hf_repo_id and not hf_failed else "",
         }
         print(f"\n[RELEASE_SUMMARY]{json.dumps(release_summary, ensure_ascii=False)}[/RELEASE_SUMMARY]")
 
@@ -425,7 +454,9 @@ class PublishStage(BaseStage):
                 tree=chip_config.tree,
                 gems_version=chip_config.gems_version,
                 cx=chip_config.cx,
-                date_tag=chip_config.date_tag
+                date_tag=chip_config.date_tag,
+                container_name=self.config.container_name,
+                vendor_name=vendor.value if vendor else "",
             )
 
             self.steps.append(StepResult(
@@ -570,8 +601,103 @@ class PublishStage(BaseStage):
             ))
             return False
 
-    # ==================== README 生成 ====================
+    def _tag_and_push_also(self, also_version: str) -> bool:
+        """V2=V3 同镜像双 tag 场景：把已推送的镜像另打一个版本 tag 并推送。
 
+        用于分支 A/B 中 V2 与 V3 实际为同一镜像（如 V1.3 → V2=V3）的场景，
+        避免重复 commit，直接对同一镜像加第二个版本 tag。
+        """
+        publish_config = self.config.publish
+        source = publish_config.harbor_path
+        if not source:
+            print("  ⚠ 双 tag 跳过：源 harbor_path 为空")
+            return False
+
+        # 将源 tag 的版本后缀替换为 also_version（如 ...-v2 → ...-v3；无后缀则追加）
+        import re
+        also_suffix = f"-{also_version}"
+        if re.search(r"-v[0-9]+$", source):
+            also_path = re.sub(r"-v[0-9]+$", also_suffix, source)
+        else:
+            also_path = f"{source}{also_suffix}"
+
+        print(f"[{self.name}] 双 tag 发布: {source} → {also_path}")
+        tag_cmd = f"docker tag {source} {also_path}"
+        rc = subprocess.run(tag_cmd, shell=True, capture_output=True, text=True)
+        if rc.returncode != 0:
+            print(f"  x 双 tag 打标失败: {rc.stderr[:200]}")
+            self.steps.append(StepResult(
+                step_name=f"双 tag ({also_version})", status=StepStatus.FAILED,
+                error=rc.stderr))
+            return False
+
+        if not self._ensure_harbor_login(also_path):
+            return False
+        push_cmd = f"docker push {also_path}"
+        rc = subprocess.run(push_cmd, shell=True, capture_output=True, text=True, timeout=7200)
+        ok = rc.returncode == 0
+        print(f"  {'+' if ok else 'x'} 双 tag 推送{'成功' if ok else '失败'}: {also_path}")
+        self.steps.append(StepResult(
+            step_name=f"双 tag 推送 ({also_version})",
+            status=StepStatus.SUCCESS if ok else StepStatus.FAILED,
+            output=also_path if ok else rc.stderr))
+        return ok
+
+    def _tag_incompatible(self, marker: str) -> bool:
+        """不适配标记：对源镜像打一个不适配 tag 并推送到 Harbor。
+
+        用于某版本（如厂商 plugin V3.1）验证不通过、需明确标注"不适配"的场景。
+        marker 形如 'Qwen3-8B-flagos-metax不适配'，作为镜像 tag 名。
+        """
+        publish_config = self.config.publish
+        # 源镜像解析（须为本地真实存在的镜像，否则 docker tag 报 No such image）：
+        #   1. 优先已有 Harbor 镜像（existing_harbor_image，如复用准入镜像）
+        #   2. 容器输入：commit 当前容器得到本地镜像（分支 B 场景 harbor_path 是尚未构建的
+        #      版本目标 tag，不能作为 docker tag 源，故必须先 commit）
+        #   3. 兜底：harbor_path（仅当已确为本地存在的镜像时）
+        source = publish_config.existing_harbor_image
+        if not source and self.config.input_type == 'container':
+            if not self._commit_container():
+                return False
+            source = publish_config.image_source or publish_config.harbor_path
+        if not source:
+            source = publish_config.harbor_path
+        if not source:
+            print("  x 不适配标记失败：无源镜像")
+            return False
+
+        # 目标 registry+project 前缀取自 Harbor 目标 tag（harbor_path），而非本地 commit 源镜像
+        # （本地 commit 镜像名无 registry/project，直接复用会生成非法 reference）
+        prefix_ref = publish_config.harbor_path or publish_config.existing_harbor_image or source
+        registry = prefix_ref.split("/")[0]
+        # 目标：<registry>/<project>/<marker>（复用 Harbor 目标的 registry+project 前缀）
+        project_prefix = "/".join(prefix_ref.split(":")[0].split("/")[:-1])
+        # Docker repository 名必须全小写，marker 常含模型名(可能带大写,如 Qwen2.5-7B-Instruct)，
+        # 不小写化会报 "invalid reference format"。与 chip_detector.sanitize_docker_tag().lower() 一致。
+        marker = marker.lower()
+        marker_path = f"{project_prefix}/{marker}" if project_prefix else f"{registry}/{marker}"
+
+        print(f"[{self.name}] 不适配标记: {source} → {marker_path}")
+        rc = subprocess.run(f"docker tag {source} {marker_path}", shell=True,
+                            capture_output=True, text=True)
+        if rc.returncode != 0:
+            print(f"  x 打标失败: {rc.stderr[:200]}")
+            self.steps.append(StepResult(step_name="不适配标记", status=StepStatus.FAILED,
+                                         error=rc.stderr))
+            return False
+        if not self._ensure_harbor_login(marker_path):
+            return False
+        rc = subprocess.run(f"docker push {marker_path}", shell=True,
+                            capture_output=True, text=True, timeout=7200)
+        ok = rc.returncode == 0
+        print(f"  {'+' if ok else 'x'} 不适配标记推送{'成功' if ok else '失败'}: {marker_path}")
+        self.steps.append(StepResult(
+            step_name="不适配标记推送",
+            status=StepStatus.SUCCESS if ok else StepStatus.FAILED,
+            output=marker_path if ok else rc.stderr))
+        return ok
+
+    # ==================== README 生成 =============
     def _generate_readme(self) -> Optional[str]:
         """生成 README"""
         publish_config = self.config.publish
@@ -601,6 +727,7 @@ class PublishStage(BaseStage):
             "container_run_cmd": model_info.container_run_cmd,
             "serve_start_cmd": model_info.serve_start_cmd,
             "serve_infer_cmd": model_info.serve_infer_cmd,
+            "canonical_model_path": model_info.canonical_model_path,
             "new_model_introduction": model_info.new_model_introduction,
             "evaluation_table": self._generate_evaluation_table(),
         }
@@ -832,11 +959,24 @@ class PublishStage(BaseStage):
         vars["image_harbor_path"] = model_info.image_harbor_path or self.config.publish.harbor_path or "N/A"
         image_harbor = vars["image_harbor_path"]
         vars["image_pull_cmd"] = f"docker pull {image_harbor}" if image_harbor != "N/A" else ""
-        vars["weights_local_path"] = self.config.publish.weights_dir or "/data/models/" + (model_info.source_of_model_weights.split("/")[-1] if model_info.source_of_model_weights else "model")
+
+        # 统一模型路径：下载目标、serve 命令、docker run 挂载三者一致
+        canonical_path = model_info.canonical_model_path or "/data/models/model"
+        vars["canonical_model_path"] = canonical_path
+        vars["weights_local_path"] = canonical_path
 
         vars["container_run_cmd"] = model_info.container_run_cmd.strip() if model_info.container_run_cmd else ""
         vars["serve_start_cmd"] = model_info.serve_start_cmd.strip() if model_info.serve_start_cmd else ""
         vars["serve_infer_cmd"] = model_info.serve_infer_cmd.strip() if model_info.serve_infer_cmd else self._default_curl_cmd()
+
+        # 一致性校验：serve_start_cmd 中必须包含 canonical_model_path
+        if vars["serve_start_cmd"] and canonical_path not in vars["serve_start_cmd"]:
+            print(f"  ⚠ 路径一致性警告: serve_start_cmd 中未包含 canonical_model_path ({canonical_path})")
+            print(f"    serve_start_cmd: {vars['serve_start_cmd'][:120]}...")
+            # 尝试自动修正：替换 vllm serve 后的路径
+            import re
+            vars["serve_start_cmd"] = re.sub(
+                r'(vllm\s+serve\s+)\S+', rf'\1{canonical_path}', vars["serve_start_cmd"])
 
         vars["evaluation_table"] = self._generate_evaluation_table()
 
@@ -944,6 +1084,7 @@ class PublishStage(BaseStage):
         model_info = self.config.model_info
         vendor_display = model_info.vendor.capitalize() if model_info.vendor else "Unknown"
         flagrelease_name = model_info.flagrelease_name or model_info.output_name or "model"
+        canonical_model_path = model_info.canonical_model_path or f"/data/{flagrelease_name}"
         new_model_intro = model_info.new_model_introduction or "新模型介绍，待定...."
         eval_table = self._generate_evaluation_table()
         docker_version = model_info.docker_version or "N/A"
@@ -987,7 +1128,7 @@ Environment Setup
 ### Download Open-source Model Weights
 ```bash
 pip install modelscope
-modelscope download --model FlagRelease/{flagrelease_name} --local_dir /data/{flagrelease_name}
+modelscope download --model FlagRelease/{flagrelease_name} --local_dir {canonical_model_path}
 ```
 
 ### Start the Container
@@ -1159,7 +1300,7 @@ The model weights are derived from {source} and are open\\u2011sourced under the
         container_upload_dir = self._get_container_upload_dir()
         print(f"  容器内上传目录: {container_upload_dir}")
         print(f"  目标仓库: {model_id}")
-        print(f"  可见性: {'私有' if publish_config.private else '公开'}")
+        print(f"  可见性: 私有（强制）")
 
         if self._publish_to_modelscope_cli(readme_path):
             return True
@@ -1187,8 +1328,9 @@ The model weights are derived from {source} and are open\\u2011sourced under the
         self._docker_cp_readme_to_container(readme_path, container_upload_dir)
 
         token = publish_config.modelscope_token or ""
-        visibility = 1 if publish_config.private else 3
-        private_label = '私有' if publish_config.private else '公开'
+        # 强制私有发布，不留公开口子（ModelScope visibility=1 私有；恒私有，不再随 config 变）
+        visibility = 1
+        private_label = '私有'
 
         sdk_script = f"""
 import os, sys
@@ -1301,7 +1443,8 @@ print(f'已发布到 ModelScope: {{model_id}}')
         print(f"  目标仓库: {model_id}")
         print(f"  容器内上传目录: {container_upload_dir}")
 
-        visibility = "private" if publish_config.private else "public"
+        # 强制私有发布，不留公开口子
+        visibility = "private"
         create_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}modelscope create {model_id} --visibility {visibility}"
         print(f"  创建/确认仓库: {model_id} ({visibility})")
         result, stdout, stderr = self.run_command(
@@ -1338,8 +1481,10 @@ print(f'已发布到 ModelScope: {{model_id}}')
 
     # ==================== HuggingFace ====================
 
+    _HF_ENDPOINTS = ["https://huggingface.co", "https://hf-mirror.com"]
+
     def _publish_to_huggingface(self, readme_path: Optional[str]) -> bool:
-        """发布到 HuggingFace（CLI 优先，SDK 降级）"""
+        """发布到 HuggingFace（官网优先，镜像站降级；CLI 优先，SDK 降级）"""
         publish_config = self.config.publish
 
         model_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name
@@ -1348,18 +1493,27 @@ print(f'已发布到 ModelScope: {{model_id}}')
         container_upload_dir = self._get_container_upload_dir()
         print(f"  容器内上传目录: {container_upload_dir}")
         print(f"  目标仓库: {repo_id}")
-        print(f"  可见性: {'私有' if publish_config.private else '公开'}")
+        print(f"  可见性: 私有（强制）")
 
-        # 默认使用 hf-mirror 镜像站，避免国内网络直连 huggingface.co 不可达
-        if not os.environ.get("HF_ENDPOINT"):
-            os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-            print(f"  HF_ENDPOINT 未设置，使用镜像站: https://hf-mirror.com")
+        # 如果用户已指定 endpoint，只用该 endpoint
+        user_endpoint = os.environ.get("HF_ENDPOINT", "")
+        endpoints = [user_endpoint] if user_endpoint else self._HF_ENDPOINTS
 
-        if self._publish_to_huggingface_cli(readme_path):
-            return True
+        for i, endpoint in enumerate(endpoints):
+            os.environ["HF_ENDPOINT"] = endpoint
+            print(f"  尝试 HuggingFace endpoint: {endpoint}")
 
-        print("  CLI 方式失败，尝试使用 SDK...")
-        return self._publish_to_huggingface_sdk(readme_path)
+            if self._publish_to_huggingface_cli(readme_path):
+                return True
+
+            print("  CLI 方式失败，尝试使用 SDK...")
+            if self._publish_to_huggingface_sdk(readme_path):
+                return True
+
+            if i < len(endpoints) - 1:
+                print(f"  ⚠ endpoint {endpoint} 不可用，切换到 {endpoints[i+1]}")
+
+        return False
 
     def _publish_to_huggingface_sdk(self, readme_path: Optional[str]) -> bool:
         """使用 SDK 发布到 HuggingFace（降级方案，容器内执行）"""
@@ -1381,8 +1535,9 @@ print(f'已发布到 ModelScope: {{model_id}}')
         self._docker_cp_readme_to_container(readme_path, container_upload_dir)
 
         token = publish_config.huggingface_token or ""
-        private_flag = "True" if publish_config.private else "False"
-        hf_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+        # 强制私有发布，不留公开口子
+        private_flag = "True"
+        hf_endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
 
         sdk_script = f"""
 import os
@@ -1439,7 +1594,7 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
         self._docker_cp_readme_to_container(readme_path, container_upload_dir)
 
         token = publish_config.huggingface_token or ""
-        hf_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+        hf_endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
         token_env = f"HF_TOKEN={token} " if token else ""
         endpoint_env = f"HF_ENDPOINT={hf_endpoint} "
 
@@ -1447,7 +1602,7 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
         print(f"  容器内上传目录: {container_upload_dir}")
 
         if token:
-            login_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}{endpoint_env}huggingface-cli login --token {token}"
+            login_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}{endpoint_env}hf auth login --token {token}"
             success, _, _ = self.run_command(
                 cmd=login_cmd, step_name="HuggingFace 登录",
                 timeout=60, in_container=True
@@ -1455,8 +1610,9 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
             if not success:
                 return False
 
-        private_flag = "--private " if publish_config.private else ""
-        upload_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}{endpoint_env}huggingface-cli upload {private_flag}{repo_id} {container_upload_dir}".strip()
+        # 强制私有发布，不留公开口子
+        private_flag = "--private "
+        upload_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}{endpoint_env}hf upload {private_flag}{repo_id} {container_upload_dir}".strip()
 
         success = False
         current_delay = UPLOAD_RETRY_DELAY
@@ -1531,20 +1687,37 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
             if not self._ensure_container_package("huggingface_hub"):
                 print(f"  x 容器内安装 huggingface_hub 失败")
                 return False
-            hf_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
-            shell_cmd = f"PATH=/opt/conda/bin:$PATH huggingface-cli upload {repo_id} {container_tmp}/README.md README.md"
-            docker_cmd = ["docker", "exec",
-                          "-e", f"HF_TOKEN={token}",
-                          "-e", f"HF_ENDPOINT={hf_endpoint}",
-                          container, "bash", "-c", shell_cmd]
+            shell_cmd = f"PATH=/opt/conda/bin:$PATH hf upload {repo_id} {container_tmp}/README.md README.md"
+            # HuggingFace endpoint fallback：用户指定则只用该 endpoint，否则依次尝试
+            # 直连 huggingface.co 与国内镜像 hf-mirror.com（后者在受限网络中可达且支持上传）
+            user_endpoint = os.environ.get("HF_ENDPOINT", "")
+            hf_endpoints = [user_endpoint] if user_endpoint else self._HF_ENDPOINTS
+            # HuggingFace 需外网访问；从主进程环境注入代理到容器（ModelScope 走 .cn 无需代理）
+            proxy_flags: List[str] = []
+            for env_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+                val = os.environ.get(env_var)
+                if val:
+                    proxy_flags.extend(["-e", f"{env_var}={val}"])
+            docker_cmds = []
+            for ep in hf_endpoints:
+                docker_cmds.append(["docker", "exec",
+                                    "-e", f"HF_TOKEN={token}",
+                                    "-e", f"HF_ENDPOINT={ep}"]
+                                   + proxy_flags
+                                   + [container, "bash", "-c", shell_cmd])
         else:
             print(f"  x 未知平台: {platform}")
             return False
 
-        # 带重试的上传
+        # 带重试的上传（HuggingFace 会在每次尝试轮换 endpoint）
         current_delay = UPLOAD_RETRY_DELAY
         for attempt in range(UPLOAD_MAX_RETRIES):
-            print(f"[{self.name}] 执行: {step_name} (尝试 {attempt+1}/{UPLOAD_MAX_RETRIES})")
+            if platform == "huggingface":
+                ep_idx = attempt % len(docker_cmds)
+                docker_cmd = docker_cmds[ep_idx]
+                print(f"[{self.name}] 执行: {step_name} (尝试 {attempt+1}/{UPLOAD_MAX_RETRIES}, endpoint={hf_endpoints[ep_idx]})")
+            else:
+                print(f"[{self.name}] 执行: {step_name} (尝试 {attempt+1}/{UPLOAD_MAX_RETRIES})")
             try:
                 result = subprocess.run(
                     docker_cmd, capture_output=True, text=True, timeout=300

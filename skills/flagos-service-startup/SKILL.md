@@ -32,23 +32,6 @@ provides:
   - environment.initial_env_verified
 ---
 
-<!--
- Copyright 2026 FlagOS Contributors
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- -->
-
-
 # 服务启动 Skill
 
 支持 default/native/flagos 三种模式，基于 `flaggems_control` 探测结果动态决定启停方式。
@@ -118,7 +101,7 @@ service:
   initial_operator_list: [...]
   max_model_len: <服务实际的 max_model_len>
 runtime:
-  framework: <vllm|sglang>
+  framework: vllm  # 固定值，仅支持 vllm
   gpu_count: <GPU 数量>
   tp_size: <tensor-parallel-size>
   tp_reason: <TP 推算原因>
@@ -140,7 +123,7 @@ sleep 5
 
 备选方式（仅当不能重启容器时）：
 ```bash
-docker exec $CONTAINER bash -c "pkill -f 'vllm\|sglang\|flagscale' 2>/dev/null; sleep 3"
+docker exec $CONTAINER bash -c "pkill -f 'vllm\|flagscale' 2>/dev/null; sleep 3"
 ```
 
 ## 步骤 2 — 切换 FlagGems 状态（按 env_type 分路径）
@@ -704,6 +687,7 @@ ISSUE_EOF"
    - 查看 graph capture 前最后注册/编译的算子
    - 以上均无法定位 → 逐步禁用最近一轮新启用的算子组（二分法排查）
 8. **停止条件**：连续 2 轮重试后服务仍崩溃，且上述所有定位手段均无法识别新的问题算子 → 最后尝试 `--enforce-eager` 一次 → 仍失败 → 判定不可恢复 → 调用 `issue_reporter.py full --type operator-crash`
+8b. **恢复成功也必须提 issue**：禁用算子后服务恢复成功时，同样必须调用 `issue_reporter.py full --type operator-crash --recovered` 记录哪些算子在该硬件/模型组合下会导致崩溃。这是通知 FlagGems 团队修复算子 bug 的唯一途径，不可省略。
 9. 排除操作失误：native 模式也失败 → 环境问题，需人工介入
 10. 确认是 FlagGems 问题（非硬件）→ `workflow.service_ok = false` → 提交 issue 后**停止任务**，不继续步骤4/6/7 的精度性能评测（FlagGems 完全不可用时评测无意义）→ 直接到步骤8发布（私有，附带崩溃原因）
 

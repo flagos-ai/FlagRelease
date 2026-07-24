@@ -68,6 +68,7 @@ model:
   local_path: ""          # 模型在主机上的路径
   container_path: ""      # 模型在容器内的路径
   tokenizer_path: ""      # tokenizer 路径 (通常与 model 路径相同)
+  dtype: ""               # 权重数制 (bfloat16/float16/float32)，由 inspect_env.py 从 config.json 读取
 
 # ============================================================================
 # 容器信息 (由 container-preparation 写入)
@@ -129,7 +130,6 @@ inspection:
   core_packages:            # 核心组件版本
     torch: ""
     vllm: ""
-    sglang: ""
   flag_packages:            # flag 生态组件版本
     flaggems: ""
     flagscale: ""
@@ -210,7 +210,7 @@ flaggems_control:
 # 运行时信息 (由 service-startup 写入)
 # ============================================================================
 runtime:
-  framework: ""           # 框架: vllm|sglang
+  framework: "vllm"       # 框架: 仅支持 vllm（固定值，勿改；下游 start_service.sh 直接消费）
   flaggems_enabled: false # 是否启用 FlagGems
   tp_size: 0              # tensor-parallel-size（由 calc_tp_size.py 推算）
   tp_reason: ""           # TP 推算原因
@@ -252,8 +252,12 @@ eval:
   v1_score: 0               # V1 (Native) GPQA Diamond 分数 (%)
   v2_score: 0               # V2 (Full FlagGems) GPQA Diamond 分数 (%)
   v3_score: 0               # V3 (调优后) GPQA Diamond 分数 (%), 仅步骤5触发时有值
+  nv_score: 0               # NV 参考基线分数 (%), 来自 nv_baseline.yaml（新流程精度基线）
+  nv_source: ""             # NV 基线数据来源
+  accuracy_baseline_mode: "" # 精度基线模式: nv_reference | local_v1
   accuracy_diff: 0          # V1 - V2 精度下降 (%, 正值=V2低于V1)
-  accuracy_aligned: false   # 下降 ≤5% 为 true (V2高于V1也算达标)
+  accuracy_rel_drop_pct: 0  # 相对 NV 的退化百分比（NV 模式）
+  accuracy_aligned: false   # 达标标志（NV 模式: 相对退化≤容差 / 本地模式: 下降≤阈值）
   accuracy_threshold: 5.0   # 精度对齐阈值 (%)
   excluded_ops_accuracy: [] # 因精度问题关闭的算子
 
@@ -349,6 +353,8 @@ timing:
     plugin_accuracy: 0           # 步骤11 Plugin 精度评测
     plugin_performance: 0        # 步骤12 Plugin 性能评测
     plugin_release: 0            # 步骤13 Plugin 发布
+    v5_expansion: 0              # 步骤14 V5 算子扩展
+    v5_release: 0                # 步骤15 V5 发布
 
 # ============================================================================
 # 发布信息 (由步骤8 flagos-release 写入)
@@ -363,12 +369,20 @@ release:
 # ============================================================================
 workflow:
   service_ok: false           # 步骤3 服务启动是否成功
-  accuracy_ok: false          # 步骤4/5 精度是否达标 (下降 ≤5%)
+  accuracy_ok: false          # 步骤4/5 精度是否达标 (相对 NV 退化 ≤5%)
   performance_ok: false       # 步骤6/7 性能是否达标 (ratio ≥80%)
   qualified: false            # 综合判定: service_ok AND accuracy_ok AND performance_ok
   config_persisted: false     # 算子配置是否已固化到镜像（步骤7/8完成后为 true）
   all_done: false             # 全流程是否完成
   last_error: ""              # 最近一次错误信息
+  # ---- 新流程（双 pipeline）字段 ----
+  entry_image_type: ""        # 准入镜像分类: gems_tree | gems_tree_plugin （由 inspect_env.py 输出）
+  pipeline_branch: ""         # 实际走的 pipeline: A(gems_tree) | B(gems_tree_plugin)
+  incompatible: false         # 是否标记为"不适配"（plugin+gems 强依赖且全走不通）
+  incompatible_tag: ""        # 不适配标记名，如 "Qwen3-8B-flagos-metax不适配"
+  error_report_stopped: false # 是否因 error report 提前终止（新流程唯一合法终止点）
+
+# =====================================================================
 
 # ============================================================================
 # 工作流台账 (由编排层维护，每步开始/结束时更新)
@@ -492,6 +506,26 @@ workflow_ledger:
       notes: ""
       fail_reason: ""
       skip_reason: ""
+    - step: "14_v5_expansion"
+      name: "V5算子扩展"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "15_v5_release"
+      name: "V5发布"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+
+# =====================================================================
 
 # ============================================================================
 # Issue 记录 (由 issue_reporter.py 写入)

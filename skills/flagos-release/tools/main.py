@@ -155,9 +155,25 @@ def main():
         help="干运行模式，只打印配置不实际执行"
     )
     parser.add_argument(
+        "--version-tag",
+        choices=["v1", "v2", "v3", "v4"],
+        default="v2",
+        help="发布版本标签：v1=基础版, v2=Pro版(gems+tree), v3=Max版(gems+tree+plugin,交付flagrelease-project), v4=精简版(减算子)"
+    )
+    parser.add_argument(
+        "--also-tag",
+        default="",
+        help="额外的镜像 tag 版本（如 V1.3 场景 V2=V3 同镜像双 tag：--version-tag v2 --also-tag v3）"
+    )
+    parser.add_argument(
+        "--incompatible-tag",
+        default="",
+        help="不适配标记名（如 'Qwen3-8B-flagos-metax不适配'）；设置后只打不适配标签，不发布版本镜像"
+    )
+    parser.add_argument(
         "--plugin-mode",
         action="store_true",
-        help="Plugin 发布模式：镜像 tag 追加 -plugin，仓库名追加 -plugin，发布后更新已发布仓库 README"
+        help="[兼容别名] 等价于 --version-tag v3"
     )
     parser.add_argument(
         "--plugin-qualified",
@@ -201,7 +217,18 @@ def main():
         config.publish.publish_modelscope = False
         config.publish.publish_huggingface = False
 
+    # --plugin-mode 是 --version-tag v3 的兼容别名
     if args.plugin_mode:
+        args.version_tag = "v3"
+
+    # 设置 version_tag 到 config
+    config.version_tag = args.version_tag
+    # 双 tag / 不适配标记（新流程五版本发布）
+    config.also_tag = args.also_tag
+    config.incompatible_tag = args.incompatible_tag
+    # v3=Max(plugin, 交付到 flagrelease-project), v4=Flag-express(在 V3 plugin 镜像上减算子)
+    # 两者均基于 plugin 镜像，走 plugin_image_mode（镜像/仓库名追加 -plugin 语义）
+    if args.version_tag in ("v3", "v4"):
         config.plugin_image_mode = True
         config.publish.existing_harbor_image = ""
         if args.plugin_qualified:

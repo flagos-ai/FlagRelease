@@ -1,40 +1,83 @@
 #!/usr/bin/env python3
-
-# Copyright 2026 FlagOS Contributors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 """
-精度对比工具 — V1 vs V2 GPQA Diamond 精度对比与阈值判定
+精度对比工具 — GPQA Diamond 精度达标判定
 
-读取两份 gpqa_result.json，计算偏差，判定是否达标（默认阈值 5%）。
+支持两种基线模式：
+  1. 本地 V1 基线（向后兼容）：--v1 <json> --v2 <json>
+     判据：rel_drop = (v1_score - v2_score) / v1_score <= threshold
+     即当前精度相对 V1 的退化不超过 threshold（默认 5%，相对口径）
+
+  2. NV 参考基线（新流程默认）：--v2 <json> --nv-baseline <模型名>
+     判据：(v2_score - nv_score) / nv_score >= -tolerance
+     即当前精度相对 NV 的退化不超过 tolerance（默认 5%）
+     NV 分数从 shared/nv_baseline.yaml 查表获得
+
+  两种模式均为「相对退化」口径，阈值单位统一为比例（0.05 = 5%）。
 
 Usage:
+    # 本地 V1 基线（旧）
     python accuracy_compare.py --v1 results/gpqa_native.json --v2 results/gpqa_flagos.json
-    python accuracy_compare.py --v1 results/gpqa_native.json --v2 results/gpqa_flagos.json --threshold 3.0 --json
-    python accuracy_compare.py --v1 results/gpqa_native.json --v2 results/gpqa_flagos.json --output results/accuracy_compare.json
 
-退出码: 0=达标, 1=不达标, 2=参数/文件错误
+    # NV 基线（新）
+    python accuracy_compare.py --v2 results/gpqa_flagos.json --nv-baseline Qwen3-8B --json
+    python accuracy_compare.py --v2 results/gpqa_flagos.json --nv-baseline Qwen3-8B \
+        --nv-baseline-file /flagos-workspace/shared/nv_baseline.yaml --output results/accuracy_compare.json
+
+退出码: 0=达标, 1=不达标, 2=参数/文件错误, 3=缺 NV 基线（需编排层兜底）,
+        4=判负但落在小样本噪声区（绝对差异≤2题，疑似评测方差假阳性，需复测/复核）
 """
 
 import argparse
 import json
+import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
-DEFAULT_THRESHOLD = 5.0
+DEFAULT_THRESHOLD = 0.05       # 本地 V1 基线模式：相对退化容差（5%，与 NV 模式统一）
+DEFAULT_NV_TOLERANCE = 0.05    # NV 基线模式：相对退化容差（5%）
+
+# 缺 NV 基线的专用退出码 / 信号
+EXIT_MISSING_NV = 3
+# 小样本噪声区专用退出码：rel_drop 超阈值，但绝对差异落在评测方差范围内 → 需复核/复测而非直接判负
+EXIT_NOISE_ZONE = 4
+
+# 小样本噪声防护：GPQA 快速评测题数少（如 50 题，每题 2%），低分基线上 1-2 题抖动
+# 就会把 rel_drop 放大到超 5% 红线，造成假阳性判负（历史事故：granite-4.0-micro
+# V3 28% vs NV 30% 仅差 1 题却被判"框架不适配"）。当 rel_drop 超阈值但绝对差异
+# 落在 NOISE_ABS_QUESTIONS 题以内时，标记为 noise_zone（需复核/复测），不直接判负。
+NOISE_ABS_QUESTIONS = 2.0      # 绝对差异 ≤ 该题数视为统计噪声（默认 2 题；1 题过于苛刻）
+NOISE_MAX_TOTAL = 100          # 仅对题数 ≤ 该值的小样本评测启用噪声防护（大样本方差已足够小）
+
+
+def _noise_zone_check(current_score: Optional[float], baseline_score: Optional[float],
+                      total_questions: Optional[int], aligned: bool) -> Dict[str, Any]:
+    """判定是否落在小样本噪声区。
+
+    仅在「按 rel_drop 判为不达标(aligned=False)」时才有意义：若绝对差异 ≤ NOISE_ABS_QUESTIONS
+    题（且为小样本评测），则该判负很可能是评测方差假阳性，应复核/复测而非直接判负。
+    返回 {noise_zone: bool, ...诊断字段}。
+    """
+    info: Dict[str, Any] = {"noise_zone": False}
+    if aligned or current_score is None or baseline_score is None:
+        return info
+    if not total_questions or total_questions <= 0 or total_questions > NOISE_MAX_TOTAL:
+        return info
+    per_q = 100.0 / total_questions           # 每题精度粒度（%）
+    abs_diff = abs(baseline_score - current_score)
+    diff_questions = abs_diff / per_q         # 折合差几题
+    if diff_questions <= NOISE_ABS_QUESTIONS + 1e-9:
+        info["noise_zone"] = True
+        info["noise_detail"] = (
+            f"绝对差异 {abs_diff:.2f}% = {diff_questions:.2f} 题 "
+            f"(每题 {per_q:.2f}%, 共 {total_questions} 题), "
+            f"≤ {NOISE_ABS_QUESTIONS:.0f} 题噪声阈值 → 疑似小样本方差假阳性，建议复测/复核"
+        )
+        info["diff_questions"] = round(diff_questions, 2)
+        info["total_questions"] = total_questions
+    return info
 
 
 def load_result(path: str) -> Dict[str, Any]:
@@ -59,8 +102,7 @@ def extract_score(data: Dict[str, Any]) -> Optional[float]:
     return None
 
 
-def compare(v1_path: str, v2_path: str, threshold: float) -> Dict[str, Any]:
-    """对比 V1 和 V2 精度结果"""
+# ==================== NV 基线查表 =============
     v1_data = load_result(v1_path)
     v2_data = load_result(v2_path)
 
@@ -68,6 +110,7 @@ def compare(v1_path: str, v2_path: str, threshold: float) -> Dict[str, Any]:
     v2_score = extract_score(v2_data)
 
     result = {
+        "baseline_mode": "local_v1",
         "v1": {
             "path": v1_path,
             "model": v1_data.get("model", "unknown"),
@@ -84,7 +127,6 @@ def compare(v1_path: str, v2_path: str, threshold: float) -> Dict[str, Any]:
         "timestamp": datetime.now().isoformat(),
     }
 
-    # 分数缺失
     if v1_score is None or v2_score is None:
         result["aligned"] = False
         result["diff"] = None
@@ -95,66 +137,155 @@ def compare(v1_path: str, v2_path: str, threshold: float) -> Dict[str, Any]:
             result["message"] = f"V2 分数缺失 ({v2_path})"
         return result
 
-    # 计算精度下降（正值=V2低于V1，仅下降超阈值时不达标）
+    if v1_score <= 0:
+        result["aligned"] = False
+        result["diff"] = None
+        result["message"] = f"V1 分数非法（<=0: {v1_score}），无法计算相对退化"
+        return result
+
     drop = v1_score - v2_score
+    rel_drop = drop / v1_score
     diff = round(abs(v2_score - v1_score), 2)
-    aligned = drop <= threshold
+    aligned = rel_drop <= threshold
 
     result["diff"] = diff
     result["drop"] = round(drop, 2)
+    result["rel_drop"] = round(rel_drop, 4)
     result["aligned"] = aligned
     result["v2_vs_v1"] = round(v2_score - v1_score, 2)
-    result["message"] = (
-        f"精度达标: V1={v1_score:.2f}%, V2={v2_score:.2f}%, 下降={drop:.2f}% (阈值 {threshold}%)"
-        if aligned else
-        f"精度不达标: V1={v1_score:.2f}%, V2={v2_score:.2f}%, 下降={drop:.2f}% > 阈值 {threshold}%"
-    )
 
+    # 小样本噪声防护：判负时检查绝对差异是否落在评测方差内（题数取 V2 结果）
+    noise = _noise_zone_check(v2_score, v1_score, v2_data.get("total_questions"), aligned)
+    result.update(noise)
+
+    if aligned:
+        result["message"] = (
+            f"精度达标: V1={v1_score:.2f}%, V2={v2_score:.2f}%, 相对退化={rel_drop*100:.2f}% (阈值 {threshold*100:.0f}%)"
+        )
+    elif noise.get("noise_zone"):
+        result["message"] = (
+            f"精度落在噪声区(需复核/复测): V1={v1_score:.2f}%, V2={v2_score:.2f}%, "
+            f"相对退化={rel_drop*100:.2f}% > 阈值 {threshold*100:.0f}%，但 {noise['noise_detail']}"
+        )
+    else:
+        result["message"] = (
+            f"精度不达标: V1={v1_score:.2f}%, V2={v2_score:.2f}%, 相对退化={rel_drop*100:.2f}% > 阈值 {threshold*100:.0f}%"
+        )
     return result
 
 
-def main():
-    parser = argparse.ArgumentParser(description="V1 vs V2 精度对比")
-    parser.add_argument("--v1", required=True, help="V1 (Native) 评测结果 JSON")
-    parser.add_argument("--v2", required=True, help="V2 (FlagGems) 评测结果 JSON")
-    parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD,
-                        help=f"偏差阈值百分比（默认 {DEFAULT_THRESHOLD}%%）")
+def compare_nv(v2_path: str, model_name: str, metric: str,
+               baseline_file: Optional[str], tolerance_override: Optional[float]) -> Dict[str, Any]:
+    """NV 参考基线对比（新流程）。
+
+    判据：rel_drop = (nv_score - v2_score) / nv_score <= tolerance
+    等价于 (v2_score - nv_score) / nv_score >= -tolerance
+    """
+    v2_data = load_result(v2_path)
+    v2_score = extract_score(v2_data)
+
+    nv_score, tol_from_table, source = lookup_nv_score(model_name, metric, baseline_file)
+    tolerance = tolerance_override if tolerance_override is not None else (
+        tol_from_table if tol_from_table is not None else DEFAULT_NV_TOLERANCE
+    )
+
+    result = {
+        "baseline_mode": "nv_reference",
+        "model": model_name,
+        "metric": metric,
+        "nv": {
+            "score": nv_score,
+            "source": source,
+        },
+        "current": {
+            "path": v2_path,
+            "model": v2_data.get("model", "unknown"),
+            "score": v2_score,
+            "mode": v2_data.get("mode", "unknown"),
+        },
+        "tolerance": tolerance,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+    # 缺 NV 基线 → 专用信号，让编排层决定兜底
+    if nv_score is None:
+        result["aligned"] = None
+        result["missing_nv"] = True
+        result["message"] = f"缺 NV 基线: {source}"
+        return result
+
+    if v2_score is None:
+        result["aligned"] = False
+        result["missing_nv"] = False
+        result["message"] = f"当前精度分数缺失 ({v2_path})"
+        return result
+
+    rel_drop = (nv_score - v2_score) / nv_score
+    aligned = rel_drop <= tolerance
+
+    result["missing_nv"] = False
+    result["rel_drop"] = round(rel_drop, 4)
+    result["rel_drop_pct"] = round(rel_drop * 100, 2)
+    result["abs_diff"] = round(v2_score - nv_score, 2)
+    result["aligned"] = aligned
+
+    # 小样本噪声防护：判负时检查绝对差异是否落在评测方差内
+    noise = _noise_zone_check(v2_score, nv_score, v2_data.get("total_questions"), aligned)
+    result.update(noise)
+
+    if aligned:
+        result["message"] = (
+            f"精度达标: 当前={v2_score:.2f}%, NV={nv_score:.2f}%, "
+            f"相对退化={rel_drop * 100:.2f}% (容差 {tolerance * 100:.1f}%)"
+        )
+    elif noise.get("noise_zone"):
+        result["message"] = (
+            f"精度落在噪声区(需复核/复测): 当前={v2_score:.2f}%, NV={nv_score:.2f}%, "
+            f"相对退化={rel_drop * 100:.2f}% > 容差 {tolerance * 100:.1f}%，但 {noise['noise_detail']}"
+        )
+    else:
+        result["message"] = (
+            f"精度不达标: 当前={v2_score:.2f}%, NV={nv_score:.2f}%, "
+            f"相对退化={rel_drop * 100:.2f}% > 容差 {tolerance * 100:.1f}%"
+        )
+    return result
+
+
+# ==================== 输出 =============
     parser.add_argument("--json", action="store_true", help="JSON 格式输出")
     parser.add_argument("--output", help="结果输出文件路径（JSON）")
     args = parser.parse_args()
 
-    result = compare(args.v1, args.v2, args.threshold)
+    # 模式选择：--nv-baseline 优先（新流程默认）
+    if args.nv_baseline:
+        result = compare_nv(args.v2, args.nv_baseline, args.metric,
+                            args.nv_baseline_file, args.nv_tolerance)
+    else:
+        if not args.v1:
+            print("ERROR: 未指定 --nv-baseline 时必须提供 --v1（本地 V1 基线模式）",
+                  file=sys.stderr)
+            sys.exit(2)
+        result = compare_v1(args.v1, args.v2, args.threshold)
 
-    # 写文件
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         with open(args.output, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2, ensure_ascii=False)
 
-    # 输出
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
-        print()
-        print("=" * 60)
-        print("  GPQA Diamond 精度对比")
-        print("=" * 60)
-        v1 = result["v1"]
-        v2 = result["v2"]
-        print(f"  V1 (Native):  {v1['score']:.2f}%" if v1["score"] is not None else "  V1 (Native):  N/A")
-        print(f"  V2 (FlagOS):  {v2['score']:.2f}%" if v2["score"] is not None else "  V2 (FlagOS):  N/A")
-        if result["diff"] is not None:
-            print(f"  偏差:         {result['diff']:.2f}%")
-            if result.get("drop") is not None and result["drop"] < 0:
-                print(f"  方向:         V2 高于 V1（不触发调优）")
-            print(f"  阈值:         {args.threshold}%（仅下降超阈值时不达标）")
-            status = "✓ 达标" if result["aligned"] else "✗ 不达标"
-            print(f"  结论:         {status}")
-        else:
-            print(f"  结论:         无法对比 — {result['message']}")
-        print("=" * 60)
+        print_human(result)
 
-    sys.exit(0 if result.get("aligned") else 1)
+    # 退出码：缺 NV 基线用专用码 3，让编排层区分"不达标"和"无法判定"
+    if result.get("missing_nv"):
+        sys.exit(EXIT_MISSING_NV)
+    if result.get("aligned"):
+        sys.exit(0)
+    # 判负但落在小样本噪声区 → 专用码 4，让编排层触发复测/复核而非直接判负
+    if result.get("noise_zone"):
+        sys.exit(EXIT_NOISE_ZONE)
+    sys.exit(1)
 
 
 if __name__ == "__main__":

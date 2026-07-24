@@ -1,19 +1,3 @@
-<!--
- Copyright 2026 FlagOS Contributors
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- -->
-
 # FlagOS 产出文件字段参考
 
 > 所有产出文件的字段含义集中索引。各文件内部也包含 `_meta` 或 `#` 注释。
@@ -57,7 +41,7 @@ Skill 间共享状态，每步读写各自负责的字段。YAML 文件内已有
 | `performance` | `min_ratio` | V2/V1 最小吞吐比 (%)，达标判定依据 |
 | | `target_ratio` | 达标阈值 (%)，默认 80.0 |
 | | `pass` | 是否达标（min_ratio >= target_ratio） |
-| `runtime` | `framework` | 推理框架: vllm / sglang |
+| `runtime` | `framework` | 推理框架: vllm（固定，仅支持 vllm）|
 | | `tp_size` | 张量并行度 |
 | | `flaggems_enabled` | FlagGems 当前是否启用 |
 | | `thinking_model` | 是否为 thinking 模型 |

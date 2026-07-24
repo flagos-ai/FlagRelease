@@ -44,7 +44,11 @@ except ImportError:
 
 DEFAULT_REPO = "https://github.com/flagos-ai/vllm-plugin-FL"
 PACKAGE_NAME = "vllm-plugin-FL"
-IMPORT_NAME = "vllm_plugin_fl"
+# 真实导入名候选：镜像自带的 plugin 实际模块名是 vllm_fl（entry point fl），
+# 旧版硬编码 vllm_plugin_fl 已过期，会导致 verify 误报 importable=false。
+# 按顺序探测，任一可导入即视为可用。
+IMPORT_NAME = "vllm_plugin_fl"          # 兼容保留（历史包名）
+IMPORT_NAME_CANDIDATES = ["vllm_fl", "vllm_plugin_fl"]
 CLONE_DIR = "/tmp/vllm-plugin-FL"
 
 
@@ -88,8 +92,62 @@ def _load_proxy_list():
     return [current] if current else []
 
 
-def install_plugin(repo_url=DEFAULT_REPO, branch="main", proxy=None, editable=False):
-    """git clone + pip install --no-build-isolation"""
+DEFAULT_CONTEXT_PATH = "/flagos-workspace/shared/context.yaml"
+
+
+def _is_branch_b(context_path=DEFAULT_CONTEXT_PATH):
+    """判断当前是否为分支 B（准入镜像自带 plugin）。
+
+    分支 B 的物理本质是"准入镜像本就带 plugin"（inspect_env.classify_entry_image_type：
+    has_plugin=True → gems_tree_plugin）。此处用双信号做"或"判断，任一命中即视为分支 B：
+      1. workflow.entry_image_type == "gems_tree_plugin"（段1路由的确定性分类）
+      2. workflow.pipeline_branch == "B"
+
+    读不到 context 或字段缺失 → 返回 None（表示"无法判定"，由调用方保守放行，
+    不误伤分支 A）。
+    """
+    try:
+        import yaml
+    except ImportError:
+        return None
+    try:
+        with open(context_path) as f:
+            ctx = yaml.safe_load(f) or {}
+    except Exception:
+        return None
+    wf = ctx.get("workflow", {}) or {}
+    entry = str(wf.get("entry_image_type", "") or "")
+    branch = str(wf.get("pipeline_branch", "") or "")
+    if entry == "gems_tree_plugin" or branch == "B":
+        return True
+    if entry or branch:
+        # 有明确的分支信息但不是 B → 分支 A / native
+        return False
+    # 两个字段都缺失 → 无法判定
+    return None
+
+
+def install_plugin(repo_url=DEFAULT_REPO, branch="main", proxy=None, editable=False,
+                   force=False, context_path=DEFAULT_CONTEXT_PATH):
+    """git clone + pip install --no-build-isolation
+
+    分支 B 硬闸门：准入镜像自带 plugin，禁止重装（重装会 rm -rf + 重新 clone/pip，
+    覆盖镜像里厂商适配好的 plugin）。命中"(分支 B) 且 (plugin 已安装)"时拒绝重装、
+    返回 skipped，不执行任何安装动作。--force 可绕过（应急逃生口）。
+    """
+    if not force:
+        is_b = _is_branch_b(context_path)
+        existing_version = get_current_version()
+        if is_b is True and existing_version:
+            return {
+                "success": True,
+                "action": "install",
+                "skipped": True,
+                "version": existing_version,
+                "reason": "分支 B（准入镜像自带 plugin），plugin 已安装，禁止重装（避免覆盖镜像厂商适配的 plugin）。如确需重装请加 --force。",
+                "timestamp": datetime.now().isoformat(),
+            }
+
     env = {}
     if proxy:
         env["http_proxy"] = proxy
@@ -176,11 +234,20 @@ def verify_plugin():
             "error": f"{PACKAGE_NAME} 未安装",
         }
 
-    # 尝试 import
-    code, out, err = run_cmd(
-        f'python3 -c "import {IMPORT_NAME}; print({IMPORT_NAME}.__version__)"'
-    )
-    importable = code == 0
+    # 尝试 import：按候选模块名依次探测，任一可导入即视为可用。
+    # （镜像自带 plugin 的真实模块名是 vllm_fl，旧硬编码 vllm_plugin_fl 会误报未安装）
+    importable = False
+    imported_name = ""
+    last_err = ""
+    for cand in IMPORT_NAME_CANDIDATES:
+        code, out, err = run_cmd(
+            f'python3 -c "import {cand}; print(getattr({cand}, \'__version__\', \'\'))"'
+        )
+        if code == 0:
+            importable = True
+            imported_name = cand
+            break
+        last_err = err
 
     return {
         "success": importable,
@@ -188,7 +255,8 @@ def verify_plugin():
         "installed": True,
         "version": version,
         "importable": importable,
-        "import_error": err if not importable else "",
+        "import_name": imported_name,
+        "import_error": last_err if not importable else "",
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -230,6 +298,10 @@ def main():
     parser.add_argument("--branch", default="main", help="分支")
     parser.add_argument("--proxy", default=None, help="代理地址")
     parser.add_argument("--editable", action="store_true", help="editable install (-e)")
+    parser.add_argument("--force", action="store_true",
+                        help="绕过分支 B 禁重装闸门（应急逃生口，会覆盖镜像自带 plugin）")
+    parser.add_argument("--context-path", default=DEFAULT_CONTEXT_PATH,
+                        help="context.yaml 路径（分支判定用）")
     parser.add_argument("--json", action="store_true", help="JSON 输出")
     args = parser.parse_args()
 
@@ -240,6 +312,8 @@ def main():
                 branch=args.branch,
                 proxy=args.proxy,
                 editable=args.editable,
+                force=args.force,
+                context_path=args.context_path,
             )
         elif args.action == "verify":
             result = verify_plugin()
@@ -254,7 +328,11 @@ def main():
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
-        if result.get("success"):
+        if result.get("skipped"):
+            print(f"⊘ {args.action} 跳过: {result.get('reason', '')}")
+            if result.get("version"):
+                print(f"  当前版本: {result['version']}")
+        elif result.get("success"):
             print(f"✓ {args.action} 成功")
             if result.get("version"):
                 print(f"  版本: {result['version']}")

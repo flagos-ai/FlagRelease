@@ -28,7 +28,7 @@
   python3 eval_wrapper.py --eval-cmd "python3 fast_gpqa.py --config fast_gpqa_config.yaml --output /flagos-workspace/results/gpqa_native.json" \
       --service-log /flagos-workspace/logs/startup_native.log \
       --stall-timeout 300 \
-      --max-timeout 3600
+      --max-timeout 7200
 
 输出约定:
   正常: 最后一行为 JSON (结果文件内容)，退出码 0
@@ -50,12 +50,12 @@ FATAL_LOG_PATTERNS = [
     (re.compile(r"(?:CUDA\s+)?out\s+of\s+memory|torch\.cuda\.OutOfMemoryError|\bOOM\b", re.I), "oom"),
     (re.compile(r"CUDA\s*(?:error|Error|ERROR)\s*:|CUDAError|no kernel image", re.I), "cuda_error"),
     (re.compile(r"Segmentation fault|SIGSEGV|SIGKILL", re.I), "segfault"),
-    (re.compile(r"Killed\s+.*(?:vllm|sglang)|killed by signal", re.I), "process_killed"),
+    (re.compile(r"Killed\s+.*(?:vllm)|killed by signal", re.I), "process_killed"),
     (re.compile(r"Address already in use", re.I), "port_conflict"),
     (re.compile(r"Connection refused", re.I), "connection_refused"),
 ]
 
-SERVICE_PROCESS_PATTERNS = ("vllm", "sglang", "flagscale")
+SERVICE_PROCESS_PATTERNS = ("vllm", "flagscale")
 
 
 def check_service_alive() -> bool:
@@ -67,25 +67,6 @@ def check_service_alive() -> bool:
                     return True
     except Exception:
         return True
-    return False
-
-
-def check_service_healthy(api_base: str) -> bool:
-    """检查推理服务是否仍在正常响应（进程存活 + API 可达）"""
-    if not check_service_alive():
-        return False
-    import urllib.request
-    import urllib.error
-    base = api_base.rstrip("/")
-    if not base.endswith("/v1"):
-        base += "/v1"
-    try:
-        req = urllib.request.Request(f"{base}/models", headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            if resp.status == 200:
-                return True
-    except Exception:
-        pass
     return False
 
 
@@ -169,6 +150,57 @@ def inject_model_name(eval_cmd: str, api_base: str = "http://localhost:8000/v1")
     return eval_cmd
 
 
+def list_served_models(api_base: str) -> Optional[list]:
+    """查询 /v1/models，返回服务端实际提供的模型 id 列表。
+
+    返回 None 表示探测失败（服务未就绪/网络异常）——调用方据此区分
+    "探测不到（无法判断）" 与 "探到了但不含目标模型（确定不匹配）"。
+    """
+    import urllib.request
+    base = api_base.rstrip("/")
+    if not base.endswith("/v1"):
+        base += "/v1"
+    try:
+        req = urllib.request.Request(f"{base}/models", headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+    except Exception:
+        return None
+
+
+def extract_model_name(eval_cmd: str) -> Optional[str]:
+    """从 eval_cmd 中提取 --model-name 的值（支持单引号/双引号/无引号）。"""
+    m = re.search(r"--model-name\s+(?:'([^']*)'|\"([^\"]*)\"|(\S+))", eval_cmd)
+    if not m:
+        return None
+    return m.group(1) or m.group(2) or m.group(3)
+
+
+def assert_model_available(eval_cmd: str, api_base: str) -> Optional[str]:
+    """开跑前一致性断言：确认最终要测的 model_name 确实由服务端提供。
+
+    返回 None 表示校验通过（或无法探测服务端、跳过校验，交由后续监控兜底）；
+    返回非空字符串表示确定不匹配的错误信息（调用方据此 fail-fast）。
+
+    仅在"探到了服务端模型列表、但其中不含目标模型"时判为错误——避免服务
+    尚未就绪导致的误杀（那种情况探测返回 None，走既有的服务健康/超时逻辑）。
+    """
+    target = extract_model_name(eval_cmd)
+    if not target:
+        # 没有 --model-name（自动注入也失败）：无从校验，交由评测脚本自身处理
+        return None
+    served = list_served_models(api_base)
+    if served is None:
+        print(f"[WRAPPER] 模型名校验跳过：/v1/models 暂不可达（服务可能未就绪），交由后续监控兜底")
+        return None
+    if target in served:
+        print(f"[WRAPPER] 模型名校验通过：'{target}' 已由服务端提供")
+        return None
+    return (f"context/命令中的模型名 '{target}' 与服务端不匹配。"
+            f"服务端 /v1/models 实际提供: {served}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="评测包装器")
     parser.add_argument("--eval-cmd", required=True, help="评测命令（在当前目录执行）")
@@ -179,8 +211,8 @@ def main():
                         help="API 地址（显式指定时优先级最高，否则从 context-yaml 读取 port）")
     parser.add_argument("--stall-timeout", type=int, default=300,
                         help="评测进程无新输出超过此秒数视为卡死 (默认 300s)")
-    parser.add_argument("--max-timeout", type=int, default=3600,
-                        help="评测最大允许时间 (默认 3600s)")
+    parser.add_argument("--max-timeout", type=int, default=7200,
+                        help="评测最大允许时间 (默认 7200s = 2h)")
     parser.add_argument("--check-interval", type=int, default=15,
                         help="监控检查间隔 (默认 15s)")
     args = parser.parse_args()
@@ -203,6 +235,18 @@ def main():
 
     # 自动注入模型名（防止使用模板默认值或遗漏）
     eval_cmd = inject_model_name(eval_cmd, api_base)
+
+    # 自动注入 --api-base（防止 fast_gpqa.py 使用默认端口而非实际端口）
+    if "--api-base" not in eval_cmd and "fast_gpqa.py" in eval_cmd:
+        eval_cmd = eval_cmd.replace("fast_gpqa.py", f"fast_gpqa.py --api-base '{api_base}'", 1)
+        print(f"[WRAPPER] 自动注入 api_base: {api_base}")
+
+    # 开跑前一致性断言：模型名写错/服务端没有该模型 → 每题必失败、白跑数十分钟。
+    # 在发第一道题前 fail-fast，几秒内暴露问题，并打出服务端实际模型名便于定位根因。
+    mismatch = assert_model_available(eval_cmd, api_base)
+    if mismatch:
+        emit_error("model_mismatch", mismatch, "")
+        return 1
 
     output_file = get_eval_output_file(eval_cmd)
 
@@ -256,7 +300,15 @@ def main():
                 emit_error("timeout", f"评测超时 ({int(elapsed)}s > {max_timeout}s)", get_tail(eval_log))
                 return 1
 
-            # 3. 输出停滞检测
+            # 3. 输出停滞——仅作信息提示，不作为查杀依据
+            # 设计原则："慢"不等于"死"。评测慢的模型（大模型/thinking）在 evalscope
+            # 黑盒里长时间无 stdout 属正常现象；只要服务没报错、进程还活着，就让它跑。
+            # 真正的生死判定交给下面三条真实证据：
+            #   ④ 服务日志致命信号（OOM/CUDA/segfault）→ 报错快速失败
+            #   ⑤ 服务进程已退出 → 终止
+            #   ② max_timeout 总闸 → 兜底
+            # 停滞本身不再主动探测 /v1/models（服务满负荷推理时该端点常超时，会把
+            # "在忙"误判成"死了"），也不再杀进程。
             try:
                 current_size = os.path.getsize(eval_log)
             except OSError:
@@ -268,20 +320,11 @@ def main():
             else:
                 stall_duration = time.time() - last_output_time
                 if stall_duration > stall_timeout:
-                    # 先检查服务是否仍在正常运行
-                    if check_service_healthy(api_base):
-                        stall_extensions += 1
-                        print(f"[WRAPPER] 输出停滞 {int(stall_duration)}s，但服务仍正常响应，延长等待 600s（第 {stall_extensions} 次延长）")
-                        last_output_time = time.time()
-                    else:
-                        print(f"[WRAPPER] 评测输出停滞 ({int(stall_duration)}s)，服务无响应，终止进程")
-                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                        time.sleep(3)
-                        if proc.poll() is None:
-                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                        proc.wait()
-                        emit_error("stall", f"评测输出停滞 {int(stall_duration)}s，服务无响应，进程已终止", get_tail(eval_log))
-                        return 1
+                    stall_extensions += 1
+                    print(f"[WRAPPER] 评测输出已停滞 {int(stall_duration)}s（评测慢属正常，未报错、进程存活即继续等待；"
+                          f"第 {stall_extensions} 次提示，总耗时 {int(elapsed)}s / 上限 {max_timeout}s）")
+                    sys.stdout.flush()
+                    last_output_time = time.time()
 
             # 4. 服务日志致命信号
             if service_log and elapsed > grace_period:

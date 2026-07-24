@@ -213,7 +213,7 @@ print("\n=== Test 10: 无日志路径时只做进程检测 ===")
 m = ServiceMonitor(log_path=None, check_interval=1, grace_period=0)
 m.start()
 time.sleep(2.5)
-# 当前机器上应该没有 vllm/sglang 进程，但进程检测需要连续 10s 无进程才判死
+# 当前机器上应该没有 vllm 进程，但进程检测需要连续 10s 无进程才判死
 # 所以 2.5s 内不应该触发
 # 实际上：check_interval=1, grace_period=0, 第一次检测在 1s 后
 # 如果无进程，no_process_since 设置，再过 10s 才判死

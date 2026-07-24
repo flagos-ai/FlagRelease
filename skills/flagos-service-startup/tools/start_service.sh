@@ -1,20 +1,5 @@
 #!/bin/bash
-
-# Copyright 2026 FlagOS Contributors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-# start_service.sh — 从 context.yaml 读取配置并启动 vllm/sglang 服务
+# start_service.sh — 从 context.yaml 读取配置并启动 vllm 服务
 #
 # 供 operator_search.py 的 --service-startup-cmd 调用。
 # 在容器内执行，读取 /flagos-workspace/shared/context.yaml 获取启动参数。
@@ -26,14 +11,28 @@
 
 set -euo pipefail
 
+# Source DTK env (set +eu needed: env.sh uses unbound vars)
+set +eu; [ -f /opt/dtk/env.sh ] && source /opt/dtk/env.sh 2>/dev/null; set -eu
+
 CONTEXT_YAML="/flagos-workspace/shared/context.yaml"
 MODE=""
+# VLLM_PLUGINS 覆盖：未设=沿用旧自动行为；显式设置（含空串）=强制覆盖
+# 取值: "" (禁用所有 plugin) | "fl" | 厂商插件名(如 metax) | 逗号分隔多值
+VLLM_PLUGINS_OVERRIDE_SET=0
+VLLM_PLUGINS_OVERRIDE=""
+# 显式指定日志文件（调用方需要监控与写入落到同一文件时使用，如 baseline_selector 三选各 variant 独立日志）
+# 不传时回退到默认 startup_${MODE}.log，保持所有现存调用行为不变。
+LOG_FILE_OVERRIDE=""
 
 # 解析参数（支持 --mode flagos / --mode=flagos / 裸值）
 while [[ $# -gt 0 ]]; do
     case $1 in
         --mode=*) MODE="${1#--mode=}"; shift ;;
         --mode)   MODE="${2:-}"; shift; shift 2>/dev/null || true ;;
+        --vllm-plugins=*) VLLM_PLUGINS_OVERRIDE="${1#--vllm-plugins=}"; VLLM_PLUGINS_OVERRIDE_SET=1; shift ;;
+        --vllm-plugins)   VLLM_PLUGINS_OVERRIDE="${2:-}"; VLLM_PLUGINS_OVERRIDE_SET=1; shift; shift 2>/dev/null || true ;;
+        --log-file=*) LOG_FILE_OVERRIDE="${1#--log-file=}"; shift ;;
+        --log-file)   LOG_FILE_OVERRIDE="${2:-}"; shift; shift 2>/dev/null || true ;;
         *)        shift ;;
     esac
 done
@@ -70,7 +69,7 @@ port = ctx.get('service', {}).get('port', 8000)
 tp_size = ctx.get('runtime', {}).get('tp_size', 0)
 gpu_count = ctx.get('runtime', {}).get('gpu_count', ctx.get('gpu', {}).get('count', 0))
 max_model_len = ctx.get('service', {}).get('max_model_len', 32768)
-framework = ctx.get('runtime', {}).get('framework', 'vllm')
+framework = ctx.get('runtime', {}).get('framework') or 'vllm'  # 仅支持 vllm；空值/缺失均兜底为 vllm
 cuda_visible = ctx.get('runtime', {}).get('cuda_visible_devices', '')
 visible_devices_env = ctx.get('gpu', {}).get('visible_devices_env', 'CUDA_VISIBLE_DEVICES')
 thinking = ctx.get('runtime', {}).get('thinking_model', False)
@@ -110,6 +109,15 @@ if [ -z "$MODEL_PATH" ]; then
     exit 1
 fi
 
+# 强制清理残留进程和编译缓存（每次启动前无条件执行）
+pkill -9 -f 'vllm.entrypoints|vllm serve|vllm.serve' 2>/dev/null || true
+for _i in $(seq 1 15); do
+    if ! ss -tlnp 2>/dev/null | grep -qE ":${PORT}\b"; then break; fi
+    sleep 1
+done
+rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/ 2>/dev/null || true
+echo "[start_service.sh] 已清理残留进程和编译缓存"
+
 # 端口占用检测与自动递增（最多尝试 +10）
 ORIGINAL_PORT="$PORT"
 for i in $(seq 0 10); do
@@ -146,7 +154,7 @@ if [ -f /etc/environment ]; then
     while IFS='=' read -r key val; do
         [[ -z "$key" || "$key" == \#* ]] && continue
         case "$key" in
-            USE_FLAGGEMS|FLAGGEMS_*|VLLM_FL_*)
+            USE_FLAGGEMS|FLAGGEMS_*|VLLM_FL_*|VLLM_PLUGINS)
                 val="${val%\"}" ; val="${val#\"}"
                 val="${val%\'}" ; val="${val#\'}"
                 export "$key=$val"
@@ -178,8 +186,24 @@ if [ "$MODE" = "native" ]; then
     unset FLAGGEMS_CONTROL_MODE 2>/dev/null || true
 fi
 
-# plugin 场景：显式指定 VLLM_PLUGINS 避免多 platform plugin 冲突（ascend vs fl）
-if [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
+# VLLM_PLUGINS 决策（优先级从高到低）：
+#   1. 显式 --vllm-plugins（含空串）→ 强制覆盖（V1 三选场景：''/厂商插件/fl）
+#   2. 持久化/继承值（含空串）→ 沿用。V1 三选定案后由 baseline_selector.py 固化到
+#      /etc/environment；V3 起由 persist_op_config.py 固化为 fl。V2 由此继承 V1 的
+#      plugin（如 metax），修复"USE_FLAGGEMS=1 即强制 fl 覆盖厂商插件"的归因混淆
+#   3. 均未设置 → 旧自动兜底（USE_FLAGGEMS=1 且 vllm_fl 存在 → fl）
+if [ "$VLLM_PLUGINS_OVERRIDE_SET" = "1" ]; then
+    export VLLM_PLUGINS="$VLLM_PLUGINS_OVERRIDE"
+    if [ -z "$VLLM_PLUGINS_OVERRIDE" ]; then
+        echo "[start_service.sh] 显式覆盖：VLLM_PLUGINS=（空，禁用所有 vllm plugin）"
+    else
+        echo "[start_service.sh] 显式覆盖：VLLM_PLUGINS=${VLLM_PLUGINS_OVERRIDE}"
+    fi
+elif [ -n "${VLLM_PLUGINS+x}" ]; then
+    export VLLM_PLUGINS
+    echo "[start_service.sh] 继承持久化 plugin 配置：VLLM_PLUGINS='${VLLM_PLUGINS}'"
+# 旧自动兜底：显式指定 VLLM_PLUGINS 避免多 platform plugin 冲突（ascend vs fl）
+elif [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
     HAS_PLUGIN=$(PATH=/opt/conda/bin:$PATH python3 -c "
 import importlib.util
 print('yes' if importlib.util.find_spec('vllm_fl') else 'no')
@@ -190,46 +214,42 @@ print('yes' if importlib.util.find_spec('vllm_fl') else 'no')
     fi
 fi
 
-LOG_FILE="/flagos-workspace/logs/startup_${MODE}.log"
+# 日志文件：优先用 --log-file 显式指定，否则回退默认 startup_${MODE}.log（保持现存调用不变）
+LOG_FILE="${LOG_FILE_OVERRIDE:-/flagos-workspace/logs/startup_${MODE}.log}"
 
-# 创建 startup_default.log 符号链接指向当前 mode 的日志
-# 崩溃诊断脚本统一引用 startup_default.log，确保路径一致
-ln -sf "startup_${MODE}.log" /flagos-workspace/logs/startup_default.log
+# 创建 startup_default.log 符号链接指向当前实际日志
+# 崩溃诊断脚本统一引用 startup_default.log，确保路径一致；软链须跟随 LOG_FILE（含 --log-file 覆盖）
+if [ "$MODE" != "default" ]; then
+    ln -sf "$(basename "$LOG_FILE")" /flagos-workspace/logs/startup_default.log
+fi
 
 # FlagGems 模式启动前清理 Triton/FlagGems 编译缓存（约束39：避免旧缓存隐藏问题算子）
 if [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
     rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/ 2>/dev/null || true
 fi
 
-# 构建启动命令
-if [ "$FRAMEWORK" = "vllm" ]; then
-    CMD="vllm serve '${MODEL_PATH}' \
-        --host 0.0.0.0 \
-        --port ${PORT} \
-        --served-model-name '${MODEL_NAME}' \
-        --tensor-parallel-size ${TP_SIZE} \
-        --max-model-len ${MAX_MODEL_LEN} \
-        --trust-remote-code"
+# 构建启动命令（仅支持 vllm）
+if [ "$FRAMEWORK" != "vllm" ]; then
+    echo "ERROR: 仅支持 vllm 框架，但 runtime.framework='${FRAMEWORK}'。请检查 context.yaml。" >&2
+    exit 1
+fi
+CMD="vllm serve '${MODEL_PATH}' \
+    --host 0.0.0.0 \
+    --port ${PORT} \
+    --served-model-name '${MODEL_NAME}' \
+    --tensor-parallel-size ${TP_SIZE} \
+    --max-model-len ${MAX_MODEL_LEN} \
+    --trust-remote-code"
 
-    # Thinking model 添加 reasoning parser
-    if [ "$THINKING" = "true" ]; then
-        # 根据模型名推断 parser
-        MODEL_LOWER=$(echo "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')
-        if echo "$MODEL_LOWER" | grep -qE 'qwen3|qwq'; then
-            CMD="$CMD --reasoning-parser qwen3"
-        elif echo "$MODEL_LOWER" | grep -qE 'deepseek'; then
-            CMD="$CMD --reasoning-parser deepseek_r1"
-        fi
+# Thinking model 添加 reasoning parser
+if [ "$THINKING" = "true" ]; then
+    # 根据模型名推断 parser
+    MODEL_LOWER=$(echo "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')
+    if echo "$MODEL_LOWER" | grep -qE 'qwen3|qwq'; then
+        CMD="$CMD --reasoning-parser qwen3"
+    elif echo "$MODEL_LOWER" | grep -qE 'deepseek'; then
+        CMD="$CMD --reasoning-parser deepseek_r1"
     fi
-else
-    # sglang
-    CMD="python3 -m sglang.launch_server \
-        --model-path '${MODEL_PATH}' \
-        --host 0.0.0.0 \
-        --port ${PORT} \
-        --tp ${TP_SIZE} \
-        --context-length ${MAX_MODEL_LEN} \
-        --trust-remote-code"
 fi
 
 echo "[start_service.sh] mode=${MODE}, framework=${FRAMEWORK}, port=${PORT}, tp=${TP_SIZE}"
@@ -239,7 +259,11 @@ echo "[start_service.sh] CMD: ${CMD}"
 nohup bash -c "cd /flagos-workspace && ${CMD}" > "${LOG_FILE}" 2>&1 &
 SVC_PID=$!
 echo "${SVC_PID}" > /flagos-workspace/logs/service.pid
-echo "[start_service.sh] PID=${SVC_PID}, log=${LOG_FILE}"
+echo "${LOG_FILE}" > /flagos-workspace/logs/service_log_path
+# 回写服务实际监听端口：PORT 可能因端口占用被自动递增（见上方递增逻辑），
+# 下游冒烟/评测必须读此文件而非假设 8000，否则会连错端口或连到别的服务导致误判。
+echo "${PORT}" > /flagos-workspace/logs/service_port
+echo "[start_service.sh] PID=${SVC_PID}, log=${LOG_FILE}, port=${PORT}"
 
 # 保存控制文件副本到 results/（供报告对比配置 vs 运行时算子，仅首次启动时保存）
 if [ "$USE_FLAGGEMS_FLAG" = "1" ] && [ -f /root/flaggems_ops_control.json ] && [ ! -f /flagos-workspace/results/ops_control_initial.json ]; then

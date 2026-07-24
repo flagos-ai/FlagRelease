@@ -129,16 +129,13 @@ def read_context(workspace: str) -> Optional[dict]:
 
 def check_processes() -> Dict[str, Any]:
     """检查关键进程是否在运行。"""
-    result = {"vllm": False, "sglang": False, "eval": False, "benchmark": False, "details": []}
+    result = {"vllm": False, "eval": False, "benchmark": False, "details": []}
     try:
         ps = subprocess.run(["ps", "-eo", "pid,comm,args"], capture_output=True, text=True, timeout=5)
         for line in ps.stdout.splitlines():
             lower = line.lower()
             if "vllm" in lower and "serve" in lower:
                 result["vllm"] = True
-                result["details"].append(line.strip())
-            elif "sglang" in lower:
-                result["sglang"] = True
                 result["details"].append(line.strip())
             elif any(k in lower for k in ["fast_gpqa", "eval_monitor", "eval_aime", "eval_erqa"]):
                 result["eval"] = True
@@ -236,8 +233,28 @@ def infer_root_cause(
     gpu: dict,
     service: dict,
     log_errors: list,
+    gated: Optional[dict] = None,
 ) -> Tuple[str, str]:
     """综合推理根因和恢复建议。"""
+    # 闸门未过正常终止：不按「中断」推理，直接报真实终止原因
+    if gated:
+        cause = f"流程未中断，而是闸门未达标正常终止：{gated['reason']}"
+        cp_step = gated.get("checkpoint_step", "")
+        _, cp_name = STEP_NAMES.get(cp_step, ("", cp_step))
+        if cp_name:
+            cause += f"（checkpoint 停留在已完成的「{cp_name}」，收尾时服务已正常停止，非崩溃）"
+        if gated.get("service_ok") is False:
+            suggestion = "服务启动失败：检查步骤3服务日志"
+        elif gated.get("accuracy_ok") is False:
+            suggestion = "精度问题：复核 GPQA 小样本方差 / 逐组消融结论，或提精度重测后再判定；无有害算子可归因时按框架不适配处理"
+        elif gated.get("performance_ok") is False:
+            suggestion = "性能问题：查看性能算子调优（步骤7）结果，或复核基线"
+        elif gated.get("incompatible") is True:
+            suggestion = "Plugin/框架不适配：主流程已合格并发 V2，V3 按 incompatible 标记发布，无需按中断恢复"
+        else:
+            suggestion = "查看 context.yaml 的 workflow 判定字段确认终止原因"
+        return cause, suggestion
+
     causes = []
     suggestions = []
 
@@ -259,7 +276,7 @@ def infer_root_cause(
         action = checkpoint.get("action", "")
         if any(k in action for k in ["gpqa", "eval", "benchmark", "perf"]):
             service_expected = True
-    if service_expected and not service["running"] and not processes["vllm"] and not processes["sglang"]:
+    if service_expected and not service["running"] and not processes["vllm"]:
         causes.append("推理服务未运行（进程不存在，端口无监听）")
         suggestions.append("重启推理服务")
 
@@ -289,16 +306,122 @@ def infer_root_cause(
     return root_cause, suggested_action
 
 
+def _ledger_items(context: Optional[dict]) -> List[dict]:
+    """归一化 workflow_ledger.steps 为 [{step, status, ...}] 列表。"""
+    if not context:
+        return []
+    ledger = context.get("workflow_ledger", {}).get("steps", [])
+    if isinstance(ledger, dict):
+        # dict 形式：key 即步骤 id
+        return [{"step": k, **(v if isinstance(v, dict) else {})} for k, v in ledger.items()]
+    if isinstance(ledger, list):
+        return ledger
+    return []
+
+
+def ledger_step_status(context: Optional[dict], step_id: str) -> str:
+    """查某步骤在 ledger 里的 status（找不到返回空串）。"""
+    if not step_id:
+        return ""
+    for step in _ledger_items(context):
+        # ledger 用 step 字段存 id，历史数据可能用 id，两者都兼容
+        sid = step.get("step") or step.get("id") or ""
+        if sid == step_id:
+            return step.get("status", "")
+    return ""
+
+
+def detect_gated_termination(
+    context: Optional[dict], checkpoint: Optional[dict]
+) -> Optional[dict]:
+    """识别「非中断，而是闸门未过正常终止」的场景。
+
+    典型：精度/性能硬闸门未达标 → 后续 Plugin/V4/V5 按设计 skip，流程收尾停服。
+    此时 checkpoint 停留在某已 success 的步骤（如 06_quick_performance），
+    若直接按 checkpoint 报「中断 + 服务未运行」会误导。
+
+    返回 dict（含真实终止原因）表示命中该场景；返回 None 表示确为中断或数据不足。
+    """
+    if not context:
+        return None
+    wf = context.get("workflow", {}) or {}
+
+    # checkpoint 指向的步骤若在 ledger 里已 success，说明该步并未卡死中断
+    cp_step = checkpoint.get("step", "") if checkpoint else ""
+    cp_status = ledger_step_status(context, cp_step) if cp_step else ""
+    cp_done = cp_status == "success"
+
+    # checkpoint 步骤自身若是 failed，才是真中断/崩溃在该步 → 不当作闸门终止
+    if cp_status == "failed":
+        return None
+
+    # 注意：精度/性能步骤（04/05/06/07）的 failed 是「闸门未过」的正常信号，
+    # 不代表崩溃中断，因此不能因为存在这类 failed 就否决闸门终止判定。
+    # 只有「非闸门类」步骤 failed（服务启动/发布/plugin 安装等）才视为真故障。
+    gate_fail_steps = {
+        "04_quick_accuracy", "05_accuracy_tuning",
+        "06_quick_performance", "07_performance_tuning",
+        "11_plugin_accuracy", "12_plugin_performance",
+    }
+    for s in _ledger_items(context):
+        sid = s.get("step") or s.get("id") or ""
+        if s.get("status") == "failed" and sid not in gate_fail_steps:
+            return None
+
+    # 判定依据：checkpoint 步骤已完成，或流程已标记 all_done
+    if not (cp_done or wf.get("all_done") is True):
+        return None
+
+    acc_ok = wf.get("accuracy_ok")
+    perf_ok = wf.get("performance_ok")
+    svc_ok = wf.get("service_ok")
+    qualified = wf.get("qualified")
+    incompatible = wf.get("incompatible")
+    plugin_acc_failed = ledger_step_status(context, "11_plugin_accuracy") == "failed"
+    plugin_perf_failed = ledger_step_status(context, "12_plugin_performance") == "failed"
+
+    # 至少要有一项闸门明确不达标 / 标记 incompatible，才算「闸门未过终止」
+    gate_failed = (
+        (acc_ok is False) or (perf_ok is False) or (svc_ok is False)
+        or incompatible is True or plugin_acc_failed or plugin_perf_failed
+    )
+    if not gate_failed and qualified is not False:
+        return None
+
+    reasons = []
+    if svc_ok is False:
+        reasons.append("服务启动失败")
+    if acc_ok is False:
+        reasons.append("精度未达标（rel_drop 超阈值）")
+    if perf_ok is False:
+        reasons.append("性能未达标")
+    if plugin_acc_failed:
+        reasons.append("Plugin 精度不适配（fl plugin dispatch 路径退化）")
+    if plugin_perf_failed:
+        reasons.append("Plugin 性能未达标")
+    if incompatible is True and not reasons:
+        reasons.append("已标记框架不适配（incompatible）")
+    reason_str = "、".join(reasons) if reasons else "综合判定未达标"
+
+    return {
+        "gated": True,
+        "checkpoint_step": cp_step,
+        "accuracy_ok": acc_ok,
+        "performance_ok": perf_ok,
+        "service_ok": svc_ok,
+        "qualified": qualified,
+        "incompatible": incompatible,
+        "reason": reason_str,
+    }
+
+
 def get_step_status(context: Optional[dict]) -> Tuple[List[str], List[str]]:
     """从 context 提取已完成和待恢复步骤。"""
     completed = []
     pending = []
-    if not context:
-        return completed, pending
-
-    ledger = context.get("workflow_ledger", {}).get("steps", [])
-    for step in ledger:
-        sid = step.get("id", "")
+    for step in _ledger_items(context):
+        # ledger 用 step 字段存 id（历史数据兼容 id）
+        sid = step.get("step") or step.get("id") or ""
         status = step.get("status", "")
         if status == "success":
             completed.append(sid)
@@ -319,18 +442,35 @@ def format_human(diag: dict) -> str:
     lines.append("  FlagOS 故障诊断")
     lines.append("=" * 50)
 
-    # 中断位置
-    ia = diag.get("interrupted_at", {})
-    if ia:
-        step = ia.get("step", "未知")
-        num, name = STEP_NAMES.get(step, ("?", step))
-        action = ia.get("action", "")
-        pid_info = ""
-        if ia.get("pid"):
-            pid_info = f" (PID {ia['pid']}, {'运行中' if ia.get('pid_alive') else '已退出'})"
-        lines.append(f"中断位置: [步骤{num}] {name} — {action}{pid_info}")
+    # 中断位置 / 终止状态
+    gated = diag.get("gated_termination")
+    if gated:
+        # 非中断：闸门未过正常终止
+        num, name = STEP_NAMES.get(gated.get("checkpoint_step", ""), ("?", ""))
+        step_hint = f"（最后完成：步骤{num} {name}）" if name else ""
+        lines.append(f"终止类型: 闸门未达标正常终止（非中断）{step_hint}")
+        acc = gated.get("accuracy_ok")
+        perf = gated.get("performance_ok")
+        svc = gated.get("service_ok")
+
+        def _mark(v):
+            return "✓" if v is True else ("✗" if v is False else "?")
+        lines.append(
+            f"闸门判定: 服务{_mark(svc)} 精度{_mark(acc)} 性能{_mark(perf)} "
+            f"→ qualified={gated.get('qualified')}"
+        )
     else:
-        lines.append("中断位置: 未知（无检查点）")
+        ia = diag.get("interrupted_at", {})
+        if ia:
+            step = ia.get("step", "未知")
+            num, name = STEP_NAMES.get(step, ("?", step))
+            action = ia.get("action", "")
+            pid_info = ""
+            if ia.get("pid"):
+                pid_info = f" (PID {ia['pid']}, {'运行中' if ia.get('pid_alive') else '已退出'})"
+            lines.append(f"中断位置: [步骤{num}] {name} — {action}{pid_info}")
+        else:
+            lines.append("中断位置: 未知（无检查点）")
 
     # 最后错误
     le = diag.get("last_error")
@@ -350,11 +490,14 @@ def format_human(diag: dict) -> str:
     svc = diag.get("service_status", {})
     if svc.get("running"):
         lines.append(f"  服务: 运行中 (端口 {svc.get('port')}, 模型 {svc.get('model_id', '?')})")
+    elif gated:
+        # 闸门终止场景：收尾停服属正常，不作为异常信号
+        lines.append(f"  服务: 未运行 (端口 {svc.get('port', '?')} 无监听；流程已收尾，属正常)")
     else:
         lines.append(f"  服务: 未运行 (端口 {svc.get('port', '?')} 无监听)")
 
     procs = diag.get("process_status", {})
-    running = [k for k in ["vllm", "sglang", "eval", "benchmark"] if procs.get(k)]
+    running = [k for k in ["vllm", "eval", "benchmark"] if procs.get(k)]
     if running:
         lines.append(f"  活跃进程: {', '.join(running)}")
     lines.append("")
@@ -412,9 +555,10 @@ def diagnose(workspace: str) -> dict:
 
     log_errors = scan_logs(workspace)
     completed, pending = get_step_status(context)
+    gated = detect_gated_termination(context, checkpoint)
 
     root_cause, suggested_action = infer_root_cause(
-        checkpoint, last_error, context, processes, gpu, service, log_errors,
+        checkpoint, last_error, context, processes, gpu, service, log_errors, gated,
     )
 
     # 检查 checkpoint PID 是否存活
@@ -438,6 +582,7 @@ def diagnose(workspace: str) -> dict:
             "updated_at": checkpoint.get("updated_at", "") if checkpoint else "",
         } if checkpoint else {},
         "last_error": last_error,
+        "gated_termination": gated,
         "process_status": processes,
         "gpu_status": {
             "available": gpu["available"],

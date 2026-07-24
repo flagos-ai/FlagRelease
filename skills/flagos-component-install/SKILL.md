@@ -22,23 +22,6 @@ provides:
   - flagtree.version
 ---
 
-<!--
- Copyright 2026 FlagOS Contributors
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- -->
-
-
 # 组件安装 Skill
 
 通过 `install_component.py` 统一管理 FlagOS 生态组件的安装/升级/卸载。
@@ -112,7 +95,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 ## 步骤 2 — 停止服务（如在运行）
 
 ```bash
-docker exec $CONTAINER bash -c "pkill -f 'vllm\|sglang\|flagscale' 2>/dev/null; sleep 3"
+docker exec $CONTAINER bash -c "pkill -f 'vllm\|flagscale' 2>/dev/null; sleep 3"
 ```
 
 ## 步骤 3 — 执行安装/升级
