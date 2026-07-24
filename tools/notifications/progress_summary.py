@@ -369,6 +369,15 @@ def delivery_display_label(model: Dict[str, Any]) -> str:
 
 def compact_model_result(model: Dict[str, Any]) -> str:
     outcome = model.get("outcome")
+    delivery = str(model.get("delivery_label") or "").strip()
+    # 达标优先：V3/V4 已达标上传 Harbor 时先标达标，再附带流程异常标注。
+    if model.get("qualified_uploaded") is True:
+        base = f"✅ {delivery} 达标" if delivery else "✅ 达标"
+        if outcome == "timeout":
+            return f"{base}⚠超时"
+        if outcome in {"failed", "skipped"} or model.get("analysis_status") == "failed":
+            return f"{base}⚠异常"
+        return base
     if outcome == "timeout":
         return "⏱️ 超时"
     if outcome == "failed":
@@ -377,9 +386,6 @@ def compact_model_result(model: Dict[str, Any]) -> str:
         return "⏭️ 跳过"
     if model.get("analysis_status") == "failed":
         return "⚠️ 分析失败"
-    delivery = str(model.get("delivery_label") or "").strip()
-    if model.get("qualified_uploaded") is True:
-        return f"✅ {delivery} 达标" if delivery else "✅ 达标"
     if model.get("accuracy_ok") is None:
         return f"❔ {delivery} 待确认" if delivery else "❔ 待确认"
     if model.get("accuracy_ok") is True and model.get("uploaded") is not True:
@@ -531,6 +537,15 @@ def build_models_markdown_table(
 
 def model_result_label(model: Dict[str, Any]) -> str:
     outcome = model.get("outcome")
+    # 达标优先：只要 V3/V4 实际已达标并推上 Harbor（qualified_uploaded），
+    # 即使 pipeline 后段 outcome 失败/超时，也先标记达标上传，再附带流程异常标注。
+    if model.get("qualified_uploaded") is True:
+        base = f"✅ {model.get('delivery_label', '-')} 达标上传"
+        if outcome == "timeout":
+            return f"{base}（流程超时）"
+        if outcome in {"failed", "skipped"} or model.get("analysis_status") == "failed":
+            return f"{base}（流程异常）"
+        return base
     if outcome == "timeout":
         return "⏱️ 超时"
     if outcome == "failed":
@@ -539,8 +554,6 @@ def model_result_label(model: Dict[str, Any]) -> str:
         return "⏭️ 已跳过"
     if model.get("analysis_status") == "failed":
         return "⚠️ 结果分析失败"
-    if model.get("qualified_uploaded") is True:
-        return f"✅ {model.get('delivery_label', '-')} 达标上传"
     if model.get("accuracy_ok") is None:
         delivery = str(model.get("delivery_label") or "").strip()
         return f"❔ {delivery} 待确认" if delivery else "❔ 待确认"
@@ -551,10 +564,12 @@ def model_result_label(model: Dict[str, Any]) -> str:
 
 
 def status_for_model(model: Dict[str, Any]) -> str:
-    if model.get("outcome") in {"failed", "timeout"}:
-        return "failed"
+    # 达标优先：已达标上传即视为 success，即使 pipeline 后段失败/超时
+    # （交付事实已成立，异常细节由 model_result_label 的标注体现）。
     if model.get("qualified_uploaded") is True:
         return "success"
+    if model.get("outcome") in {"failed", "timeout"}:
+        return "failed"
     if model.get("outcome") == "skipped":
         return "skipped"
     return "warning"
