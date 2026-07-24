@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # ============================================================================
 # context.template.yaml — 模板文件，仅用于初始化
 # ============================================================================
@@ -368,77 +382,7 @@ workflow:
   incompatible_tag: ""        # 不适配标记名，如 "Qwen3-8B-flagos-metax不适配"
   error_report_stopped: false # 是否因 error report 提前终止（新流程唯一合法终止点）
 
-# ============================================================================
-# V1 基线确认 (分支 B 三选判断 / 分支 A 裸启动，由 baseline_selector 脚本写入)
-# ============================================================================
-baseline:
-  v1_variant: ""              # V1 变体: v1.1(VLLM_PLUGINS='') | v1.2(厂商插件) | v1.3(fl不开aten) | native(分支A裸启动) | none(无V1)
-  vllm_plugins: ""            # V1 实际使用的 VLLM_PLUGINS 值（''/metax/fl）
-  vendor_plugin: ""           # 分支B V1.2 使用的厂商插件名（如 metax）
-  smoke_passed: false         # "中国首都测例"冒烟是否通过
-  v1_available: false         # 是否存在可用 V1 基线（false=强依赖，精度用 NV 兜底）
-  nv_baseline_used: false     # 精度基线是否回退到 NV（无 V1 或始终用 NV）
-  v1_score: 0                 # V1 GPQA 分数（有 V1 时）
-  variant_attempts: []        # 三选尝试记录: [{variant, vllm_plugins, passed, reason}]
-
-# ============================================================================
-# 五版本状态汇总 (由各版本段写入，发布段消费)
-# ============================================================================
-versions:
-  v1:
-    built: false
-    variant: ""               # 复制自 baseline.v1_variant
-    score: 0
-    harbor_image: ""
-  v2:
-    built: false
-    branch: ""                # v2.1(代码注入) | v2.2(plugin，=v3)
-    enabled_ops: []           # V2 最终产出的启用算子列表（V3 继承）
-    disabled_ops: []
-    score: 0
-    perf_ratio_pct: 0
-    accuracy_ok: false
-    performance_ok: false
-    harbor_image: ""
-  v3:
-    built: false
-    branch: ""                # v3.1(切plugin白名单) | v3.2(=v2同镜像双tag)
-    equals_v2: false          # V1.3 场景 V2=V3 本质同镜像
-    enabled_ops: []
-    score: 0
-    perf_ratio_pct: 0
-    accuracy_ok: false
-    performance_ok: false
-    harbor_image: ""
-  v4:
-    built: false
-    enabled_ops: []           # 减算子后的最终算子集（至少 1 个）
-    reduced_ops: []           # 相对 V3 移除的算子
-    score: 0
-    perf_ratio_pct: 0         # 相对 V1 的性能比
-    beats_v3: false           # 性能是否超过 V3
-    harbor_image: ""          # V1-V4 → 默认 Harbor
-    readme_selected: false    # ModelScope/HF README 是否选用此版本（默认 true）
-  v5:
-    built: false
-    enabled_ops: []           # 应开尽开的最终算子集
-    score: 0
-    accuracy_ok: false        # 仅需精度对齐（无性能要求）
-    harbor_image: ""          # V5 → flagrelease-project 仓库（交付 SVT）
-
-# ============================================================================
-# V4 减算子优化 (由 operator_reduction.py 写入)
-# ============================================================================
-v4_reduction:
-  reduced_ops: []             # 成功移除且性能提升的算子
-  kept_ops: []                # 保留的算子（至少 1 个）
-  final_enabled_count: 0      # 最终启用算子数
-  v3_ratio_pct: 0             # V3 相对 V1 性能比（起点）
-  v4_ratio_pct: 0             # V4 相对 V1 性能比（终点）
-  beats_v3: false             # V4 性能 > V3
-  beats_v1: false             # V4 性能 ≥ V1
-  reduction_rounds: 0         # 总探测轮数
-  completed: false
+# =====================================================================
 
 # ============================================================================
 # 工作流台账 (由编排层维护，每步开始/结束时更新)
@@ -581,17 +525,7 @@ workflow_ledger:
       fail_reason: ""
       skip_reason: ""
 
-# ============================================================================
-# V5 算子扩展信息 (由 operator_expansion.py 写入)
-# ============================================================================
-v5_expansion:
-  expanded_ops: []              # 成功重新开启的算子
-  incompatible_ops: []          # 服务启动失败的算子
-  accuracy_harmful_ops: []      # 精度不达标的算子
-  final_enabled_count: 0        # 最终启用算子总数
-  v5_score: 0                   # V5 最终精度分数
-  expansion_rounds: 0           # 总探测轮数
-  completed: false
+# =====================================================================
 
 # ============================================================================
 # Issue 记录 (由 issue_reporter.py 写入)

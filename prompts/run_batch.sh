@@ -97,43 +97,7 @@ sys.exit(0 if ctx.get('workflow',{}).get('all_done') is True else 1)
 " "$ctx" 2>/dev/null
 }
 
-# ========== 分支/版本信息提取（用于汇总列，读 context_snapshot.yaml）==========
-# 输出单行 "分支|已产出版本列表"，如 "B|V1(v1.3),V2,V3,V4,V5" 或 "A|V1,V2,V3" 或 "-|-"
-task_branch_versions() {
-    local model="$1"
-    local ctx="/data/flagos-workspace/${model}/config/context_snapshot.yaml"
-    [ -f "$ctx" ] || { echo "-|-"; return; }
-    python3 -c "
-import yaml, sys
-try:
-    with open(sys.argv[1]) as f:
-        ctx = yaml.safe_load(f) or {}
-except Exception:
-    print('-|-'); sys.exit(0)
-wf = ctx.get('workflow', {}) or {}
-branch = wf.get('pipeline_branch') or '-'
-# 不适配任务优先标注
-if wf.get('incompatible'):
-    print(f'{branch}|不适配'); sys.exit(0)
-versions = ctx.get('versions', {}) or {}
-baseline = ctx.get('baseline', {}) or {}
-built = []
-for v in ('v1','v2','v3','v4','v5'):
-    node = versions.get(v, {}) or {}
-    if node.get('built'):
-        label = v.upper()
-        # V1 附带变体，V3 附带 =V2 标记
-        if v == 'v1':
-            variant = baseline.get('v1_variant') or ''
-            if variant and variant not in ('native',):
-                label += f'({variant})'
-        if v == 'v3' and (node.get('equals_v2') or node.get('branch') == 'v3.2'):
-            label += '(=V2)'
-        built.append(label)
-print(f'{branch}|{\",\".join(built) if built else \"-\"}')
-" "$ctx" 2>/dev/null || echo "-|-"
-}
-
+# ========== 分支/版本信息提取（用于汇总列，读 context_snapshot.yaml）===
 # ========== 预扫描任务数 ==========
 TOTAL=0
 while IFS='|' read -r T M || [ -n "$T" ]; do
@@ -371,60 +335,4 @@ SUMMARY_FILE="/data/flagos-workspace/batch_summary_${BATCH_TIMESTAMP}.txt"
     for r in "${RESULTS[@]}"; do echo "$r"; done
 } > "$SUMMARY_FILE" 2>/dev/null && echo "汇总文件: ${SUMMARY_FILE}" || true
 
-# ========== 批量执行退出码 ==========
-if $STOP_ON_ERROR && [ "$FAIL" -gt 0 ]; then
-    BATCH_EXIT=1
-else
-    BATCH_EXIT=0
-fi
-
-# ========== 自动汇总报告 ==========
-SUMMARIZE_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tools/batch_summarize/summarize.sh"
-REPORT_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/batch_report_${BATCH_TIMESTAMP}.md"
-
-echo ""
-echo "════════════════════════════════════════"
-echo "  自动汇总分析"
-echo "════════════════════════════════════════"
-echo "  批次日志: ${BATCH_LOG}"
-echo "  报告输出: ${REPORT_FILE}"
-echo ""
-
-if [ ! -f "$SUMMARIZE_SCRIPT" ]; then
-    echo "⚠ 汇总脚本不存在: $SUMMARIZE_SCRIPT，跳过自动汇总"
-elif ! command -v claude &>/dev/null; then
-    echo "⚠ claude CLI 未安装，跳过自动汇总"
-    echo "  可稍后手动执行: bash ${SUMMARIZE_SCRIPT} ${BATCH_LOG} --task-file ${TASK_FILE} --print --output ${REPORT_FILE}"
-else
-    SUMMARIZE_START=$(date +%s)
-    if timeout --signal=TERM --kill-after=30 1800 \
-        bash "$SUMMARIZE_SCRIPT" "$BATCH_LOG" --task-file "$TASK_FILE" --print --output "$REPORT_FILE" --workspace /data/flagos-workspace; then
-        SUMMARIZE_ELAPSED=$(( $(date +%s) - SUMMARIZE_START ))
-        echo ""
-        echo "✓ 汇总报告已生成: ${REPORT_FILE} (耗时 $(( SUMMARIZE_ELAPSED / 60 ))m$(( SUMMARIZE_ELAPSED % 60 ))s)"
-    else
-        SUMMARIZE_EXIT=$?
-        echo ""
-        echo "⚠ 自动汇总分析失败 (exit=${SUMMARIZE_EXIT})，批次结果不受影响"
-        echo "  可手动执行: bash ${SUMMARIZE_SCRIPT} ${BATCH_LOG} --task-file ${TASK_FILE} --print --output ${REPORT_FILE}"
-    fi
-fi
-
-# 正常路径在所有原有批次工作结束后才投递；默认 after-batch worker
-# 因而不会与下一模型或原有详细报告竞争资源。
-BATCH_END_TS=$(date +%s)
-# 标记在投递之前设置，防止 SIGTERM 在投递后、标记前到达导致 EXIT trap 重复投递。
-# 旁路事件允许丢失，标记提前设置不影响可靠性，反而消除竞态窗口。
-BATCH_END_EVENT_EMITTED=true
-progress_emit_detached batch-end \
-    --batch-id "${BATCH_TIMESTAMP}" \
-    --workspace /data/flagos-workspace \
-    --exit-code "${BATCH_EXIT}" \
-    --elapsed-seconds "${BATCH_ELAPSED}" \
-    --run-ended-at "${BATCH_END_TS}" \
-    --processed "$(( PASS + FAIL + SKIP ))" \
-    --passed "${PASS}" \
-    --failed "${FAIL}" \
-    --skipped "${SKIP}" || :
-
-exit $BATCH_EXIT
+# ========== 批量执行退出码 ===
