@@ -185,7 +185,8 @@ def model_from_result_file(
     if raw_version is not None and not isinstance(raw_version, str):
         raise RuntimeError(f"单模型分析结果 delivery.version 无效: {result_file}")
     version = str(raw_version or "").lower() or None
-    if version not in {None, "v3", "v5"}:
+    # 新流程 v3.1：交付版本为 V3 Max，或其上的 V4 Express 减算子优化；已无 V5。
+    if version not in {None, "v3", "v4"}:
         raise RuntimeError(f"单模型分析结果 delivery.version 无效: {result_file}")
     accuracy_ok = delivery.get("accuracy_ok") if isinstance(delivery.get("accuracy_ok"), bool) else None
     uploaded = delivery.get("uploaded") if isinstance(delivery.get("uploaded"), bool) else None
@@ -215,7 +216,7 @@ def model_from_result_file(
         "cost_usd": migration_cost,
         "cost_components": list(evidence.get("cost") or []),
         "delivery_version": version,
-        "delivery_label": str(delivery.get("label") or ("V5" if version == "v5" else "V3 Max" if version == "v3" else "")),
+        "delivery_label": str(delivery.get("label") or ("V4 Express" if version == "v4" else "V3 Max" if version == "v3" else "")),
         "accuracy_ok": accuracy_ok,
         "uploaded": uploaded,
         "qualified_uploaded": qualified,
@@ -286,14 +287,14 @@ def batch_metrics(state: Dict[str, Any]) -> Dict[str, Any]:
     cost_values = [float(item["cost_usd"]) for item in successful if as_float(item.get("cost_usd")) is not None]
     all_cost_values = [float(item["cost_usd"]) for item in models if as_float(item.get("cost_usd")) is not None]
     qualified = [item for item in models if item.get("qualified_uploaded") is True]
-    v5_count = sum(1 for item in qualified if item.get("delivery_version") == "v5")
+    v4_count = sum(1 for item in qualified if item.get("delivery_version") == "v4")
     v3_count = sum(1 for item in qualified if item.get("delivery_version") == "v3")
     processed = len(models)
     return {
         "processed_models": processed,
         "total_models": int(state.get("total_models") or 0),
         "qualified_uploaded": len(qualified),
-        "v5_qualified_uploaded": v5_count,
+        "v4_qualified_uploaded": v4_count,
         "v3_qualified_uploaded": v3_count,
         "success_rate_pct": round(len(qualified) / processed * 100.0, 1) if processed else 0.0,
         "average_elapsed_seconds": sum(elapsed_values) / len(elapsed_values) if elapsed_values else None,
@@ -584,7 +585,7 @@ def summary_fields(state: Dict[str, Any], latest: Optional[Dict[str, Any]]) -> L
             (
                 "达标上传",
                 f"{metrics['qualified_uploaded']} / {metrics['processed_models']} · {metrics['success_rate_pct']:.1f}%"
-                f"<br>V5 {metrics['v5_qualified_uploaded']} · V3 Max {metrics['v3_qualified_uploaded']}",
+                f"<br>V3 Max {metrics['v3_qualified_uploaded']} · V4 Express {metrics['v4_qualified_uploaded']}",
             ),
             ("成功模型均值", success_average_label(metrics)),
         ]
@@ -607,7 +608,7 @@ def batch_end_fields(state: Dict[str, Any], metrics: Dict[str, Any]) -> List[Tup
         (
             "达标上传",
             f"{metrics['qualified_uploaded']} / {metrics['processed_models']} · {metrics['success_rate_pct']:.1f}%"
-            f"<br>V5 {metrics['v5_qualified_uploaded']} · V3 Max {metrics['v3_qualified_uploaded']}",
+            f"<br>V3 Max {metrics['v3_qualified_uploaded']} · V4 Express {metrics['v4_qualified_uploaded']}",
         ),
         ("成功模型均值", success_average_label(metrics)),
     ]
@@ -644,7 +645,7 @@ def single_start_fields(args: argparse.Namespace, hardware: Dict[str, Any]) -> L
     if device != "未识别":
         fields.append(("设备", device))
     if args.target:
-        fields.append(("任务", args.target))
+        fields.append(("镜像", args.target))
     return fields
 
 
@@ -790,7 +791,7 @@ def command_model_start(args: argparse.Namespace) -> int:
     position = int(task_index or metrics["processed_models"] + 1)
     fields: List[Tuple[str, str]] = [("当前进度", f"第 {position} / {total} 个")]
     if args.target:
-        fields.append(("任务", args.target))
+        fields.append(("镜像", args.target))
     title = f"{state.get('vendor', 'unknown')}｜{position} / {total}"
     lead = f"🚀 开始迁移 · {args.model}"
     note = batch_progress_note(state)

@@ -225,14 +225,15 @@ HEADER="${HEADER}
 板块B需要逐模型读取 traces/*.json 和 logs/claude_full_*.log 分析流程和根因。
 
 格式要求：
-- A2/A3 的 V5 列必须包含：V5配置来源（V5=V2/V5=V2+N个扩展/跳过）+ V5精度（分数和rel_drop%）
-- A2/A3 V5精度取数优先级：results/gpqa_v5.json > eval.v5_score > operator_config_v5.json.v5_score > fallback推断（无禁用算子或扩展0个时V5精度=V2精度）
-- A3 逐模型列出 V1~V5 各阶段状态，标明是否由网络问题导致失败
-- A3.1 Harbor镜像发布验证：读取各模型 traces/08_release.json、traces/13_plugin_publish.json（或13_v3_release.json）、traces/15_v5_publish.json 中的 harbor_push action，逐模型验证每个成功V阶段是否正确上传镜像，标注异常
-- A4 耗时按真实步骤名逐列统计（容器准备/环境检测/服务启动/精度评测/精度调优/性能评测/性能调优/打包发布/Plugin安装/Plugin服务/Plugin精度/Plugin性能/Plugin发布/V4减算子/V5扩展/V5发布）
+- 【达标口径】新流程 v3.1 已无 V5：A2/A3 达标列 = V3 镜像已上传 Harbor 且 V3 精度 rel_drop ≤ 5%；V4 减算子为 V3 之上的可选性能优化，不影响达标
+- A2/A3 的 V3 列必须包含：V3精度（分数和rel_drop%）+ Harbor 是否已上传（V3 为最终交付版本）
+- A2/A3 V3精度取数优先级：results/gpqa_v3.json(或gpqa_plugin.json).score 对比 NV/V1 基线算 rel_drop > context.yaml versions.v3.accuracy_ok + eval.v3_score > results/accuracy_compare.json 的 aligned(bool)/rel_drop(0~1小数，×100 得百分比)
+- A3 逐模型列出 V1~V4 各阶段状态，标明是否由网络问题导致失败
+- A3.1 Harbor镜像发布验证：V2/V3 读 traces/08_release.json、traces/13_plugin_release.json 的 harbor_push action；V4 无独立 release trace，读 context.yaml versions.v4.harbor_image（或 v4_reduction 字段）判断是否产出优化镜像，逐模型验证每个成功V阶段是否正确上传镜像，标注异常
+- A4 耗时按真实步骤名逐列统计（容器准备/环境检测/服务启动/精度评测/精度调优/性能评测/性能调优/打包发布/Plugin安装/Plugin服务/Plugin精度/Plugin性能/Plugin发布/V4减算子/V4发布）
 - A6 Issue产出汇总：读取 results/issue_data_*.json 和 results/issue_*_flagos-ai_*.md，列出每个issue的类型、目标组件(FlagGems/vllm-plugin-FL)、问题摘要、涉及算子、产出阶段
-- 板块B每个模型必须列出 V1~V5 全部五个阶段，跳过的写明原因（如「V3精度不达标，V4被跳过」）
-- 板块B V5阶段必须写明配置来源、精度分数及数据来源（实测/继承V2）
+- 板块B每个模型必须列出 V1~V4 全部四个阶段，跳过的写明原因（如「V3精度不达标，V4被跳过」）；V3 Max 标注为最终交付版本
+- 板块B V3阶段必须写明精度分数、rel_drop、Harbor是否已上传及最终达标结论；V4阶段写明减算子优化结果（不影响达标）
 "
 
 FULL_PROMPT="${HEADER}
