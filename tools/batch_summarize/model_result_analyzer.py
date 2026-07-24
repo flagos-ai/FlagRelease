@@ -18,7 +18,8 @@ from typing import Any, Dict, Optional
 
 SCHEMA_VERSION = 1
 TERMINAL_OUTCOMES = {"success", "failed", "timeout", "skipped"}
-DELIVERY_VERSIONS = {"v3", "v5"}
+# 新流程 v3.1：V3 Max 为最终交付版本，V4 为其上的可选性能优化；已无 V5。
+DELIVERY_VERSIONS = {"v3", "v4"}
 
 CLAUDE_RESULT_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -39,7 +40,7 @@ CLAUDE_RESULT_SCHEMA: Dict[str, Any] = {
             "properties": {
                 "version": {
                     "anyOf": [
-                        {"type": "string", "enum": ["v3", "v5"]},
+                        {"type": "string", "enum": ["v3", "v4"]},
                         {"type": "null"},
                     ]
                 },
@@ -190,7 +191,11 @@ def normalize_success(args: argparse.Namespace, raw: Dict[str, Any], analysis_el
         version = None
     accuracy_ok = delivery_raw.get("accuracy_ok") if isinstance(delivery_raw.get("accuracy_ok"), bool) else None
     uploaded = delivery_raw.get("uploaded") if isinstance(delivery_raw.get("uploaded"), bool) else None
-    label = "V5" if version == "v5" else ("V3 Max" if version == "v3" else None)
+    # version 仅用于展示最终交付了哪个版本（V4 Express 减算子优化镜像 / V3 Max）；已无 V5。
+    label = "V4 Express" if version == "v4" else ("V3 Max" if version == "v3" else None)
+    # 达标判定一律以 V3 为准：accuracy_ok / uploaded 由 prompt 明确填为 V3 的精度与上传结论，
+    # version 是否为 v4 不改变达标口径（V4 仅为 V3 之上的性能优化）。这里的 version is not None
+    # 只是确认确有交付版本产出（V3 是最终交付版，无 V3 即无交付）。
     qualified = version is not None and accuracy_ok is True and uploaded is True
 
     # 状态标签由可信的执行事实和结构化交付结论确定；Claude 只提供简短说明。

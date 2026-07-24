@@ -39,7 +39,7 @@ class ProgressSummaryTests(unittest.TestCase):
     ):
         path = self.workspace / "progress-results" / f"{model}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        label = "V5" if version == "v5" else "V3 Max" if version == "v3" else None
+        label = "V4 Express" if version == "v4" else "V3 Max" if version == "v3" else None
         data = {
             "schema_version": 1,
             "analysis_status": analysis_status,
@@ -134,7 +134,7 @@ class ProgressSummaryTests(unittest.TestCase):
         state = {
             "total_models": 5,
             "models": [
-                {"outcome": "success", "elapsed_seconds": 100, "cost_usd": 2, "qualified_uploaded": True, "delivery_version": "v5"},
+                {"outcome": "success", "elapsed_seconds": 100, "cost_usd": 2, "qualified_uploaded": True, "delivery_version": "v4"},
                 {"outcome": "success", "elapsed_seconds": 300, "cost_usd": None, "qualified_uploaded": False, "delivery_version": "v3"},
                 {"outcome": "failed", "elapsed_seconds": 1000, "cost_usd": 20, "qualified_uploaded": False, "delivery_version": "v3"},
                 {"outcome": "timeout", "elapsed_seconds": 2000, "cost_usd": 30, "qualified_uploaded": True, "delivery_version": "v3"},
@@ -189,12 +189,33 @@ class ProgressSummaryTests(unittest.TestCase):
             with self.subTest(target=target):
                 self.assertEqual(ps.vendor_from_target(target), expected)
 
+    def test_model_start_card_shows_full_image_target(self):
+        task_file = self.workspace / "tasks.txt"
+        task_file.write_text(
+            "harbor.baai.ac.cn/flagrelease-public/flagrelease_nvidia_base:0701 | model-a\n",
+            encoding="utf-8",
+        )
+        state_file = self.workspace / "batch_ct_progress.json"
+        self.run_cli(
+            "batch-start", "--workspace", self.workspace, "--state-file", state_file,
+            "--batch-id", "ct", "--task-file", task_file, "--vendor", "nvidia", "--dry-run",
+        )
+        started = self.run_cli(
+            "model-start", "--workspace", self.workspace, "--state-file", state_file,
+            "--batch-id", "ct", "--model", "model-a",
+            "--target", "harbor.baai.ac.cn/flagrelease-public/flagrelease_nvidia_base:0701",
+            "--task-index", "1", "--vendor", "nvidia", "--dry-run",
+        )
+        text = self.card_text(started)
+        self.assertIn("harbor.baai.ac.cn/flagrelease-public/flagrelease_nvidia_base:0701", text)
+
     def test_result_validation_rejects_unknown_delivery_version(self):
+        # 新流程 v3.1 已无 V5：v5 应被拒绝，合法交付版本仅 v3/v4。
         result_file = self.write_result(
             "bad-version",
             target="registry/hygon/model:latest",
             vendor="hygon",
-            version="v4",
+            version="v5",
             accuracy_ok=True,
             uploaded=True,
         )
