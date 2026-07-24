@@ -1,3 +1,0 @@
-harbor.baai.ac.cn/flagrelease-public/flagrelease_hygon_vllm020plugin_base_0702 | google/gemma-3-1b-it
-harbor.baai.ac.cn/flagrelease-public/flagrelease_hygon_vllm020plugin_base_0702 | THUDM/glm-4-9b-chat
-harbor.baai.ac.cn/flagrelease-public/flagrelease_hygon_vllm020plugin_base_0702 | tencent/Hunyuan-7B-Instruct
