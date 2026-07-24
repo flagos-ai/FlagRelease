@@ -260,7 +260,10 @@ nohup bash -c "cd /flagos-workspace && ${CMD}" > "${LOG_FILE}" 2>&1 &
 SVC_PID=$!
 echo "${SVC_PID}" > /flagos-workspace/logs/service.pid
 echo "${LOG_FILE}" > /flagos-workspace/logs/service_log_path
-echo "[start_service.sh] PID=${SVC_PID}, log=${LOG_FILE}"
+# 回写服务实际监听端口：PORT 可能因端口占用被自动递增（见上方递增逻辑），
+# 下游冒烟/评测必须读此文件而非假设 8000，否则会连错端口或连到别的服务导致误判。
+echo "${PORT}" > /flagos-workspace/logs/service_port
+echo "[start_service.sh] PID=${SVC_PID}, log=${LOG_FILE}, port=${PORT}"
 
 # 保存控制文件副本到 results/（供报告对比配置 vs 运行时算子，仅首次启动时保存）
 if [ "$USE_FLAGGEMS_FLAG" = "1" ] && [ -f /root/flaggems_ops_control.json ] && [ ! -f /flagos-workspace/results/ops_control_initial.json ]; then

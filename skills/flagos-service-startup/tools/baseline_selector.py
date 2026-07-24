@@ -169,6 +169,13 @@ def start_variant(service_cmd: str, vllm_plugins: str, use_flaggems: bool,
     stop_service()
     clear_caches()
 
+    # 清除上一个 variant 的端口回写文件，避免本次启动尚未写入时读到残留端口，
+    # 导致 wait/冒烟连到旧端口。start_service.sh 启动后会重新写入实际端口。
+    try:
+        os.remove(os.path.join(DEFAULT_LOG_DIR, "service_port"))
+    except OSError:
+        pass
+
     # 组装启动命令：显式传 --vllm-plugins（含空串），USE_FLAGGEMS 通过 mode 控制
     mode = "flagos" if use_flaggems else "native"
     # --log-file 让 start_service.sh 把 vLLM 服务日志写入本 variant 的独立文件，
@@ -187,12 +194,23 @@ def start_variant(service_cmd: str, vllm_plugins: str, use_flaggems: bool,
         stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT
     )
 
+    # start_service.sh 在后台启动、走完端口探测后才写 service_port（端口可能被自动
+    # 递增）。短轮询等待该文件出现，拿到服务实际端口后同时用于 wait 与冒烟，确保三者
+    # 端口严格一致，不会连到占用原端口的其他服务。文件迟迟不出现则回退请求端口。
+    actual_port = port
+    for _ in range(30):  # 最多等 ~15s
+        resolved = resolve_service_port(port)
+        if os.path.exists(os.path.join(DEFAULT_LOG_DIR, "service_port")):
+            actual_port = resolved
+            break
+        time.sleep(0.5)
+
     # --from-start：本 variant 是全新启动，start_service.sh 的 nohup 以 truncate 方式
     # 重写 log_path，wait 必须从 offset 0 读起，才能捕获本次启动的进度信号
     # （loading_weights/service_ready 等）。否则沿用文件残留大小作 offset → 读不到
     # 进度信号 → 端口虽已响应仍被误判为"残留服务"(stale_service) → start_variant 误返回失败。
     wait_cmd = (
-        f"{wait_script} --port {port} --timeout 300 --max-timeout {max_timeout}"
+        f"{wait_script} --port {actual_port} --timeout 300 --max-timeout {max_timeout}"
         f" --log-path {log_path} --mode {mode} --from-start"
     )
     if model_name:
@@ -201,11 +219,64 @@ def start_variant(service_cmd: str, vllm_plugins: str, use_flaggems: bool,
     return rc == 0
 
 
+def resolve_service_port(default_port: int) -> int:
+    """读取服务实际监听端口。
+
+    start_service.sh 的端口来自 context.yaml 且**会因端口占用自动递增**，最终端口
+    回写到 logs/service_port。冒烟/查找必须用这个实际端口，不能假设 --port（默认
+    8000），否则可能连不上（误判失败）或连到占用同端口的其他服务（误判成功/答非所问）。
+    读不到文件时回退到传入的 default_port，保证不比原逻辑差。
+    """
+    port_file = os.path.join(DEFAULT_LOG_DIR, "service_port")
+    try:
+        with open(port_file, "r", encoding="utf-8") as f:
+            actual = int(f.read().strip())
+        if actual != default_port:
+            print(f"  [port] 服务实际端口 {actual}（≠ 请求端口 {default_port}），冒烟改用实际端口")
+        return actual
+    except (OSError, ValueError):
+        return default_port
+
+
+def resolve_served_model_id(port: int, model_name: str) -> str:
+    """动态解析 vLLM 实际注册的模型 id。
+
+    vLLM 以 served_model_name 注册模型（start_service.sh 用 name.split('/')[-1]
+    去掉了 org 前缀，如 upstage/）。冒烟请求若用带前缀的全名会命中不存在的 model
+    触发 404，被误判为冒烟/启动失败。这里先查 /v1/models 取服务实际注册的 id：
+      1. 若返回的 id 列表里能匹配到传入名（全名或去前缀短名），用匹配到的那个；
+      2. 单模型服务则直接用列表里唯一的 id；
+      3. 查询失败时回退到静态去前缀名，保证不比原逻辑更差。
+    """
+    fallback = (model_name or "default").split("/")[-1]
+    try:
+        req = urllib.request.Request(
+            f"http://localhost:{port}/v1/models", method="GET"
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        served_ids = [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+    except Exception:
+        return fallback
+
+    if not served_ids:
+        return fallback
+    # 传入名（全名或去前缀）能精确命中已注册 id 则优先用之
+    for candidate in (model_name, fallback):
+        if candidate and candidate in served_ids:
+            return candidate
+    # 单模型服务：直接用唯一注册 id
+    if len(served_ids) == 1:
+        return served_ids[0]
+    return fallback
+
+
 def smoke_test(port: int, model_name: str) -> tuple:
     """冒烟测例：问"中国的首都"，检查回答含关键词。返回 (passed, answer)。"""
     url = f"http://localhost:{port}/v1/chat/completions"
+    served_name = resolve_served_model_id(port, model_name)
     payload = {
-        "model": model_name or "default",
+        "model": served_name,
         "messages": [{"role": "user", "content": SMOKE_PROMPT}],
         "max_tokens": 64,
         "temperature": 0.0,
@@ -252,7 +323,9 @@ def try_variant(variant: str, vllm_plugins: str, use_flaggems: bool,
         return attempt
 
     print(f"  ✓ 服务已就绪，运行冒烟测例...")
-    passed, answer = smoke_test(port, model_name)
+    # 服务已就绪，service_port 必已写入 → 用实际监听端口冒烟，与启动/wait 端口一致
+    smoke_port = resolve_service_port(port)
+    passed, answer = smoke_test(smoke_port, model_name)
     attempt["smoke_passed"] = passed
     attempt["smoke_answer"] = answer
     if passed:
