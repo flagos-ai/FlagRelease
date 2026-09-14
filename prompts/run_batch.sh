@@ -197,6 +197,19 @@ print(re.sub(r'[^\w.\-]', '_', raw))
     return 0
 }
 
+# 采集本模型每次 claude -p 的 usage 快照（缓存命中/输入输出 token）。
+# 纯编排层脚本、只读既有产物、失败不影响主流程；必须在模型跑完后无条件调用一次，
+# 因为 run_pipeline.sh 只注册了 EXIT trap，被 run_batch 的 timeout --signal=TERM 杀掉时
+# trap 不执行，只能由批次层补采（被测进程被杀的 usage 仍留在 Claude Code transcript 里）。
+collect_model_usage() {
+    local model="$1"
+    local logs="/data/flagos-workspace/${model}/logs"
+    [ -d "$logs" ] || { echo "  (usage 采集: 无 logs 目录，跳过)"; return 0; }
+    python3 "${PROJECT_ROOT}/prompts/usage_collect.py" \
+        --log-dir "$logs" --model "$model" --cwd "${PROJECT_ROOT}" 2>&1 | sed 's/^/  /' || true
+    return 0
+}
+
 # ========== 预扫描任务数 ==========
 TOTAL=0
 while IFS='|' read -r T M || [ -n "$T" ]; do
@@ -345,6 +358,9 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
 
     # 汇聚本模型报告到批次统一目录（成功/失败/超时均尝试，缺失则提示不阻塞）
     aggregate_model_report "$MODEL"
+
+    # 采集本模型 usage 快照（此处是唯一收敛点：成功/超时 124/其它非零/stop-on-error break 全在其后）
+    collect_model_usage "$MODEL"
 
     if [ $EXIT_CODE -eq 124 ]; then
         ((FAIL++))

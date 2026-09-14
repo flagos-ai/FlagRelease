@@ -3396,3 +3396,9 @@ echo "  原始事件流: ${LOG_FILE}"
 echo "  可读执行记录: ${FULL_LOG}"
 echo "  流水线日志: ${PIPELINE_LOG}"
 echo "  内部 debug: ${DEBUG_FILE}"
+
+# ===== usage 采集（纯编排层、只读既有产物、幂等、失败不影响主流程）=====
+# 覆盖非批次（直接跑本脚本）的正常完成路径；被 timeout 杀掉时本行不会执行，
+# 由 run_batch.sh 的 collect_model_usage 兜底（被杀段的 usage 仍留在 transcript 里）。
+python3 "${SCRIPT_DIR}/usage_collect.py" --log-dir "${LOG_DIR:-}" --cwd "${PROJECT_ROOT:-}" \
+    >> "${LOG_DIR:-/tmp}/usage_collect.log" 2>&1 || true
