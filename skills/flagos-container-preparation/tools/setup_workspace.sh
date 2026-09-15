@@ -149,9 +149,8 @@ if [ "${HAS_HISTORY}" = "1" ]; then
         rm -f /workspace/gpqa_result.json
         rm -f /flagos-workspace/scripts/gpqa_result.json
 
-        # 停止可能残留的 vllm/sglang 服务进程
+        # 停止可能残留的 vllm 服务进程
         pkill -f 'vllm.entrypoints' 2>/dev/null || true
-        pkill -f 'sglang' 2>/dev/null || true
     "
     # 重置 context.yaml：从项目模板复制，确保与模板字段同步
     docker cp "${PROJECT_ROOT}/shared/context.template.yaml" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
@@ -232,14 +231,20 @@ SCRIPT_MAP=(
     "skills/flagos-service-startup/tools/service_monitor.py:scripts/service_monitor.py"
     # 服务启动（供 operator_search.py 调用）
     "skills/flagos-service-startup/tools/start_service.sh:scripts/start_service.sh"
+    # V1 三选状态机（分支 B，选定后固化 VLLM_PLUGINS + 写 context baseline.*）
+    "skills/flagos-service-startup/tools/baseline_selector.py:scripts/baseline_selector.py"
     # TP 推算
     "skills/flagos-service-startup/tools/calc_tp_size.py:scripts/calc_tp_size.py"
     # 性能测试
     "skills/flagos-performance-testing/tools/benchmark_runner.py:scripts/benchmark_runner.py"
     # 性能对比
     "skills/flagos-performance-testing/tools/performance_compare.py:scripts/performance_compare.py"
+    # 无 V1 场景性能基线合成（V2 初始 ×1.05）
+    "skills/flagos-performance-testing/tools/synthesize_perf_baseline.py:scripts/synthesize_perf_baseline.py"
     # 算子优化
     "skills/flagos-operator-replacement/tools/operator_optimizer.py:scripts/operator_optimizer.py"
+    # 算子配置统一共享模块（env构建/双路应用，供 reduction/expansion/diagnose 等 import）
+    "skills/flagos-operator-replacement/tools/flagos_op_config.py:scripts/flagos_op_config.py"
     # 算子搜索编排
     "skills/flagos-operator-replacement/tools/operator_search.py:scripts/operator_search.py"
     # 算子配置生成（Plugin 场景）
@@ -248,6 +253,8 @@ SCRIPT_MAP=(
     "skills/flagos-operator-replacement/tools/diagnose_ops.py:scripts/diagnose_ops.py"
     # 算子配置固化
     "skills/flagos-operator-replacement/tools/persist_op_config.py:scripts/persist_op_config.py"
+    # V4 减算子（起点交集/V2基准 + 增开1~3算子 + 有提升即取 + ≤2轮）
+    "skills/flagos-operator-replacement/tools/operator_reduction.py:scripts/operator_reduction.py"
     # 组件安装（统一入口）
     "skills/flagos-component-install/tools/install_component.py:scripts/install_component.py"
     # FlagTree 安装脚本
@@ -259,8 +266,12 @@ SCRIPT_MAP=(
     "skills/flagos-eval-comprehensive/tools/accuracy_compare.py:scripts/accuracy_compare.py"
     "skills/flagos-eval-comprehensive/tools/fast_gpqa.py:scripts/fast_gpqa.py"
     "skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml:scripts/fast_gpqa_config.yaml"
+    # 精度调优 checkpoint 持久化
+    "skills/flagos-eval-comprehensive/tools/persist_tuning_checkpoint.py:scripts/persist_tuning_checkpoint.py"
     # 远端评测监控
     "skills/flagos-eval-comprehensive/tools/eval_monitor.py:scripts/eval_monitor.py"
+    # 长任务执行器（长任务执行协议：detached 启动 + 状态文件 + 超时管理 + 断点恢复）
+    "skills/flagos-eval-comprehensive/tools/task_runner.py:scripts/task_runner.py"
     # 评测配置模板
     "skills/flagos-eval-comprehensive/tools/config.yaml:eval/config.yaml"
     # Plugin 安装
@@ -281,8 +292,13 @@ SCRIPT_MAP=(
     "skills/flagos-log-analyzer/tools/diagnose_failure.py:scripts/diagnose_failure.py"
     # 报告生成工具
     "shared/generate_report.py:scripts/generate_report.py"
+    # 芯片厂商×型号统一规范表（generate_report/issue_reporter 依赖，需与消费脚本同目录）
+    "shared/chip_spec.py:scripts/chip_spec.py"
+    "shared/chip_spec.yaml:scripts/chip_spec.yaml"
     # 越位执行数据清理工具
     "shared/rollback_overflow.py:scripts/rollback_overflow.py"
+    # 独立版本探测（报告现场抓取版本，不依赖 context 传递）
+    "shared/probe_versions.py:scripts/probe_versions.py"
 )
 
 for entry in "${SCRIPT_MAP[@]}"; do
@@ -334,11 +350,22 @@ else
     fi
 fi
 
+# 3.6. 部署 NV 精度基线表到容器 shared/（accuracy_compare.py --nv-baseline 查表默认路径）
+# 无 V1 场景 / 分支B「精度基线统一用 NV」时，步骤4/11 精度判定依赖此表；
+# 每次流程启动无条件刷新，确保容器内基线与仓库同步，去除对 Agent 临时 docker cp 的隐式依赖
+NV_BASELINE_FILE="${PROJECT_ROOT}/shared/nv_baseline.yaml"
+if [ -f "${NV_BASELINE_FILE}" ]; then
+    docker cp "${NV_BASELINE_FILE}" "${CONTAINER}:/flagos-workspace/shared/nv_baseline.yaml"
+    echo "  ✓ shared/nv_baseline.yaml (NV 精度基线表)"
+else
+    echo "  ⚠ shared/nv_baseline.yaml 未找到 (${NV_BASELINE_FILE})，NV 基线模式将不可用"
+fi
+
 # 4. 安装脚本依赖（如需要）
 echo "[4/6] 检查脚本依赖..."
 docker exec "${CONTAINER}" bash -c "
     PATH=/opt/conda/bin:\$PATH python3 -c 'import yaml' 2>/dev/null || PATH=/opt/conda/bin:\$PATH pip install pyyaml -q 2>/dev/null || true
-    PATH=/opt/conda/bin:\$PATH python3 -c 'import evalscope' 2>/dev/null || PATH=/opt/conda/bin:\$PATH pip install evalscope pyyaml requests modelscope -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>/dev/null || true
+    PATH=/opt/conda/bin:\$PATH python3 -c 'import evalscope' 2>/dev/null || PATH=/opt/conda/bin:\$PATH pip install 'evalscope==1.5.1' pyyaml requests modelscope -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>/dev/null || true
 "
 echo "  依赖检查完成"
 
@@ -372,7 +399,7 @@ fi
 
 # 4.6. 预装评测依赖（避免评测阶段首次 pip install 浪费 2-3 分钟）
 echo "[4.6/6] 预装评测依赖..."
-docker exec "${CONTAINER}" bash -c "PATH=/opt/conda/bin:\$PATH pip install evalscope pyyaml requests -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>&1 | tail -3" && \
+docker exec "${CONTAINER}" bash -c "PATH=/opt/conda/bin:\$PATH pip install 'evalscope==1.5.1' pyyaml requests -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>&1 | tail -3" && \
     echo "  ✓ 评测依赖预装完成" || \
     echo "  ⚠ 评测依赖安装失败（非致命，评测阶段会重试）"
 
@@ -391,6 +418,10 @@ if [ -n "${HOST_WORKSPACE}" ]; then
 fi
 # 写入标记文件供后续脚本读取
 docker exec "${CONTAINER}" bash -c "echo '${MOUNT_MODE}' > /flagos-workspace/.mount_mode"
+# 写入容器名供容器内脚本读取：operator_search.py 等在 pkill 无法释放 GPU 显存时，
+# 需据此触发宿主机 docker restart 兜底（容器内无 docker CLI，只能把容器名传出去用）。
+# 此前该文件从未被写入，导致容器内已有的 docker restart fallback 始终拿不到容器名而失效。
+docker exec "${CONTAINER}" bash -c "echo '${CONTAINER}' > /flagos-workspace/.container_name"
 
 # 7. 写入基础 context 字段（确保段间传递不依赖 Claude 后续写入）
 # 即使 Claude 会话中途断连，容器名等关键信息也已持久化到 context.yaml

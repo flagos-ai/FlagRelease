@@ -1,0 +1,146 @@
+# 芯片厂商 × 型号 统一规范表（唯一权威来源）
+#
+# 用途：检测(detect_gpu.py)、命名(config.py/get_image_name.sh)、报告(generate_report.py)
+# 全部从本表取值，消灭历史上三处散落且互相矛盾的厂商写法。
+#
+# 字段说明：
+#   vendor_en     报告展示用英文名（首字母大写）
+#   vendor_cn     厂商中文名
+#   naming_suffix 模型仓库命名后缀：xxx-{naming_suffix}-FlagOS
+#   smi_cmd       检测该厂商是否存在的命令（which 判断）
+#   aliases       context/枚举/历史代码里可能出现的别名 → 归一到本条 key
+#   chips         芯片型号规范化：原始 smi 采集到的关键字 → 规范显示名
+#                 - display: 报告展示用规范名（如 A100、H20-3e、910B）
+#                   match:   原始型号里出现即命中的关键字（全小写、去空格后比对）
+#                 匹配时按 match 关键字长度降序，长的优先（H20-3e 先于 H20），避免误匹配
+#
+# 新增厂商/芯片：只改本文件一处即可。
+
+nvidia:
+  vendor_en: Nvidia
+  vendor_cn: 英伟达
+  naming_suffix: nvidia
+  smi_cmd: nvidia-smi
+  aliases: [nvidia]
+  chips:
+    - { display: "H20-3e",  match: ["h20-3e", "h203e", "h20_3e"] }
+    - { display: "H20-SXM", match: ["h20-sxm", "h20sxm"] }
+    - { display: "H20",     match: ["h20"] }
+    - { display: "H100",    match: ["h100"] }
+    - { display: "H800",    match: ["h800"] }
+    - { display: "A100",    match: ["a100"] }
+    - { display: "A800",    match: ["a800"] }
+
+metax:
+  vendor_en: Metax
+  vendor_cn: 沐曦
+  naming_suffix: metax
+  smi_cmd: mx-smi
+  aliases: [metax, muxi]
+  chips:
+    - { display: "Metax C550", match: ["c550"] }
+
+hygon:
+  vendor_en: Hygon
+  vendor_cn: 海光
+  naming_suffix: hygon
+  smi_cmd: hy-smi
+  aliases: [hygon]
+  chips:
+    - { display: "DCU BW1000", match: ["bw1000"] }
+
+iluvatar:
+  vendor_en: Iluvatar
+  vendor_cn: 天数
+  naming_suffix: iluvatar
+  smi_cmd: ixsmi
+  aliases: [iluvatar, tianshu]
+  chips:
+    - { display: "BI-V200", match: ["bi-v200", "biv200"] }
+    - { display: "BI-V150", match: ["bi-v150", "biv150"] }
+
+mthreads:
+  vendor_en: Mthreads
+  vendor_cn: 摩尔
+  naming_suffix: mthreads
+  smi_cmd: mthreads-gmi
+  aliases: [mthreads, moore]
+  chips:
+    - { display: "MTT S5000", match: ["s5000"] }
+
+tsingmicro:
+  vendor_en: Tsingmicro
+  vendor_cn: 清微智能
+  naming_suffix: tsingmicro
+  smi_cmd: tsm_smi
+  aliases: [tsingmicro]
+  chips:
+    - { display: "TX8110", match: ["tx8110", "tx8100"] }
+
+zhenwu:
+  vendor_en: T-Head
+  vendor_cn: 平头哥
+  naming_suffix: zhenwu
+  # PPU-ZW810E 是 CUDA 兼容卡，nvidia-smi 实为 PPU wrapper；用 ppu-smi 作识别命令消歧（真 NVIDIA 机无此命令）
+  smi_cmd: ppu-smi
+  aliases: [zhenwu, t-head, thead, pingtouge, pp, ppu]
+  chips:
+    - { display: "PPU-ZW810E", match: ["ppu-zw810e", "zw810e", "zw810", "ppu"] }
+
+ascend:
+  vendor_en: Ascend
+  vendor_cn: 华为
+  naming_suffix: ascend
+  smi_cmd: npu-smi
+  aliases: [ascend, huawei]
+  chips:
+    - { display: "910C", match: ["910c"] }
+    - { display: "910B", match: ["910b", "ascend910b"] }
+    - { display: "910",  match: ["ascend910", "910"] }
+
+arm:
+  vendor_en: Arm
+  vendor_cn: 安谋
+  naming_suffix: arm
+  smi_cmd: ""
+  aliases: [arm]
+  chips:
+    - { display: "CIX P1", match: ["cix-p1", "cixp1", "p1"] }
+
+kunlunxin:
+  vendor_en: Kunlunxin
+  vendor_cn: 昆仑芯
+  naming_suffix: kunlunxin
+  smi_cmd: xpu-smi
+  aliases: [kunlunxin, kunlun]
+  chips:
+    - { display: "P900", match: ["p900"] }
+    - { display: "P800", match: ["p800"] }
+
+cambricon:
+  vendor_en: Cambricon
+  vendor_cn: 寒武纪
+  naming_suffix: cambricon
+  smi_cmd: cnmon
+  aliases: [cambricon]
+  chips:
+    - { display: "MLU590-M9DE", match: ["mlu590-m9de", "mlu590m9de", "mlu590-m9", "mlu590m9", "mlu590"] }
+
+sunrise:
+  vendor_en: Sunrise
+  vendor_cn: 曦望
+  naming_suffix: sunrise
+  smi_cmd: ""
+  aliases: [sunrise]
+  chips:
+    - { display: "S2", match: ["s2"] }
+
+enflame:
+  vendor_en: Enflame
+  vendor_cn: 燧原
+  naming_suffix: enflame
+  smi_cmd: ""
+  aliases: [enflame]
+  chips:
+    - { display: "ZIXIAOC200", match: ["zixiaoc200", "c200"] }
+    - { display: "S60",        match: ["s60"] }

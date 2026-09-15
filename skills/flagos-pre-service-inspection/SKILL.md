@@ -28,23 +28,6 @@ provides:
   - environment.gems_txt_auto_detect
 ---
 
-<!--
- Copyright 2026 FlagOS Contributors
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- -->
-
-
 # 启动服务前准备 Skill
 
 通过 `inspect_env.py` 一次 docker exec 完成全部环境检查（替代原来 10+ 次串行调用），输出结构化 JSON。
@@ -76,7 +59,6 @@ inspection:
   core_packages:
     torch: "<version>"
     vllm: "<version>"
-    sglang: "<version>"
   flag_packages:
     flaggems: "<version>"
     flagscale: "<version>"
@@ -110,7 +92,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 此命令一次性完成：
 - 执行模式检测（host / container）
-- 核心组件版本检查（torch, vllm, sglang）
+- 核心组件版本检查（torch, vllm）
 - flag 生态组件版本（flaggems, flagscale, flagcx, vllm_plugin）
 - FlagGems 运行时能力探测（capabilities, enable_signature 等）
 - FlagGems 多维度集成方式探测（环境变量/代码扫描/入口点/启动脚本）
@@ -147,7 +129,22 @@ environment:
 
 FlagTree 仅记录 `has_flagtree`，不影响场景分类。
 
-## 步骤 2.6 — vllm_flaggems 代码分析（仅 vllm_flaggems 场景）
+## 步骤 2.55 — 准入镜像分类（双 pipeline 路由依据）
+
+从 `inspect_env.py` JSON 输出的 `entry_classification` 字段读取准入镜像类型，写入 `context.yaml` 的 `workflow.entry_image_type`（编排层 `run_pipeline.sh` 据此路由到分支 A/B，**必须持久化，否则路由回退 unknown**）：
+
+```bash
+ENTRY_TYPE=$(docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/inspect_env.py --output-json" | python3 -c "import sys,json;print(json.load(sys.stdin).get('entry_classification',{}).get('entry_image_type','unknown'))")
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py --set workflow.entry_image_type=$ENTRY_TYPE --json"
+```
+
+| entry_image_type | 判定条件 | 路由分支 |
+|------------------|---------|---------|
+| `gems_tree` | flaggems + flagtree，无 plugin | A（简单：V1裸启动→V2代码注入→V3切plugin→V4减算子→V5） |
+| `gems_tree_plugin` | flaggems + flagtree + plugin | B（复杂：V1三选→V2(2.1/2.2)→V3(3.1/3.2)→V4→V5） |
+| `native` | 无 flaggems | native（仅评测，不发多版本） |
+
+
 
 当 `env_type == vllm_flaggems` 时，调用 `toggle_flaggems.py --action analyze` 深入分析代码中的 FlagGems 集成：
 
@@ -181,7 +178,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 # 完成条件
 
 - 执行模式已检测（host / container）
-- 核心组件（torch、vllm/sglang）已确认安装
+- 核心组件（torch、vllm）已确认安装
 - flag 组件版本已记录
 - FlagGems 集成方式已探测（integration_type）
 - FlagGems 启用/关闭方法已推导（enable_method / disable_method）
@@ -197,7 +194,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 | 问题 | 解决方案 |
 |------|----------|
 | torch 未安装 | 镜像可能有问题，建议更换镜像或手动安装 |
-| vllm/sglang 都未安装 | 确认镜像是否为推理镜像 |
+| vllm 未安装 | 确认镜像是否为推理镜像 |
 | FlagGems 未安装 | 确认镜像是否包含 FlagGems，或手动安装 |
 | inspect_env.py 不存在 | 运行 `setup_workspace.sh` 重新部署 |
 | capabilities 为空列表 | FlagGems 版本过旧，算子替换降级到源码修改模式 |

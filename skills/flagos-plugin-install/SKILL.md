@@ -14,23 +14,6 @@ provides:
   - plugin_install.success
 ---
 
-<!--
- Copyright 2026 FlagOS Contributors
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- -->
-
-
 # Plugin 安装 Skill
 
 在 flaggems+flagtree 环境精度性能双达标后，安装 vllm-plugin-FL 组件并验证。
@@ -188,13 +171,24 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 - `qualified=true` → 进入步骤 9，设置 `plugin_workflow.triggered=true`
 - `qualified=false` → 跳过步骤 9-13，设置 `plugin_workflow.skip_reason="主流程不达标"`
 
+### ⚠ 分支分流（进入步骤 9 前必读）
+
+**先读 `workflow.entry_image_type`（或 `workflow.pipeline_branch`）判断分支，决定是否安装 plugin：**
+
+- **分支 B（`entry_image_type=gems_tree_plugin` / `pipeline_branch=B`）**：准入镜像**本就自带可用 plugin**（我们提供的镜像至少在一个模型上已验证可用）。
+  - **禁止 `--action install`（禁止重装）**：重装会 `rm -rf` + 重新 clone/pip，**覆盖镜像里厂商适配好的 plugin**，破坏 V3 对比语义。
+  - 步骤 9 只做 `--action verify` 确认 plugin 可用 + 记录状态；plugin 通过启动环境变量 `VLLM_PLUGINS=fl` 在步骤 10 使能。
+  - 即便误调 `--action install`，`install_plugin.py` 内置分支硬闸门会拒绝重装并返回 `skipped=true`（除非显式 `--force`）——但仍**不应主动调 install**。
+
+- **分支 A（`entry_image_type=gems_tree` / `pipeline_branch=A`）**：准入镜像**无 plugin** → 照常 `--action install` 安装。
+
 ### 调用方式
 
 ```bash
-# 安装 plugin
+# 【分支 A 才安装】安装 plugin（分支 B 禁止，内置闸门也会拦截重装）
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_plugin.py --action install --json"
 
-# 验证安装
+# 验证安装（分支 A/B 均执行）
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_plugin.py --action verify --json"
 ```
 
@@ -234,7 +228,7 @@ Plugin 安装失败（install 返回 `success=false` 或 verify 返回 `installe
 | 算子集 | 从全量开始，经调优得到最终集合 | 直接使用主流程最终算子集 |
 | Issue 路由 | FlagGems 仓库 | `flagos-ai/vllm-plugin-FL` |
 | 服务崩溃 | 尝试恢复（切 native / 翻倍 TP） | **写 issue + 停止任务** |
-| 不达标处理 | 触发算子调优（步骤 5/7） | 写 issue，继续下一步（不调优） |
+| 不达标处理 | 触发算子调优（步骤 5/7） | **三级递进**：①写 issue → ②plugin 模式关算子调优 → ③全关仍不达标才判框架问题 |
 | 启动环境变量 | 按 env_type 决定 | 固定 `USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true` + blacklist |
 | V1 基线 | 当前流程内测得 | 复用步骤 4/6 的 V1 结果 |
 | Trace 文件 | `traces/03-07_*.json` | `traces/10-12_*.json` |
@@ -269,14 +263,42 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 # 设置 plugin_workflow.crash_stopped=true → 停止任务
 ```
 
-**步骤 11/12 不达标处理**：
-- 精度不达标：写 `logs/issues_accuracy.log`，`plugin_workflow.accuracy_ok=false`，继续步骤 12
-- 性能不达标：写 `logs/issues_performance.log`，`plugin_workflow.performance_ok=false`，继续步骤 13
-- 步骤 13 检查 `plugin_workflow.qualified`，不达标则跳过 plugin 发布
+**步骤 11/12 不达标处理（三级递进，精度/性能同此逻辑）**：
+
+V3 切 plugin 用的是主流程已达标的算子集，但 plugin 实现路径与注入模式不完全等价，可能出现精度/性能下降。发现不达标时**不直接放弃**，按三级递进逐级抢救，只有最后一级失败才认定框架问题：
+
+**第一级 — 记录 issue**
+- 精度不达标：写 `logs/issues_accuracy.log`，`plugin_workflow.accuracy_ok=false`
+- 性能不达标：写 `logs/issues_performance.log`，`plugin_workflow.performance_ok=false`
+- 用 `issue_reporter.py full --type plugin-error --repo flagos-ai/vllm-plugin-FL` 提交（仅本地文件）
+
+**第二级 — plugin 模式关算子调优（当前缺失的关键补救步）**
+- 在主流程已达标算子集基础上，用 plugin 模式继续关闭拖累精度/性能的算子：
+  ```bash
+  docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_search.py run \
+      --plugin-mode \
+      --final-output-name v3_performance \
+      --state-path /flagos-workspace/results/operator_config_v3.json \
+      ...（精度不达标用精度评测入口，性能不达标用性能评测入口）"
+  ```
+- plugin 模式下走 env_inline（`VLLM_FL_FLAGOS_BLACKLIST`），不写控制文件（见步骤 10 说明）。
+- 调优达标 → 记录最终算子集，`accuracy_ok/performance_ok=true`，正常继续下一步。
+
+**第三级 — 全关仍不达标才判框架问题**
+- 若把 flaggems 算子全部关闭后精度/性能仍不达标，说明问题不在算子层而在 plugin 框架本身：
+  - 提交 `plugin-error` issue（标注"全关算子仍不达标，判定为框架问题"）到 `flagos-ai/vllm-plugin-FL`
+  - 保持 `accuracy_ok/performance_ok=false`，继续步骤 13
+- 步骤 13 检查 `plugin_workflow.qualified`，不达标则按"Plugin 不达标发布"（Harbor 私有，不更新 README）处理。
+
+> 与 CLAUDE.md:98/101 一致：调优前先提交 issue，plugin 模式下继续关算子直到达标；调优后仍不达标才走不达标发布。
+> 注：本表上方"Plugin 算子集：复用主流程已达标算子集，不重新调优"仅描述**达标情况下**的默认路径；一旦不达标即进入本三级递进，允许在 plugin 模式下继续调优。
 
 ### 步骤 13（Plugin 发布）
 
-触发条件：`plugin_workflow.accuracy_ok=true AND plugin_workflow.performance_ok=true`
+**触发条件（仅精度硬闸门，性能不门控）**：`plugin_workflow.accuracy_ok=true`
+- 与 run_pipeline.sh 段4 一致：只要 V3 plugin 精度达标（`accuracy_ok=true`）就**必须**执行步骤13发布 V3，**`performance_ok` 不再作为发布门控**——性能不达标只决定发布 tag 的 qualified 标签（达标→更新 README；不达标→私有发布不更新 README），**绝不阻止 V3 产出**。
+- ⚠ **禁止**把 `plugin_workflow.performance_ok=false` 传导成 `qualified=false` 而跳过步骤13：这会导致精度已达标的 V3 被误判漏发（历史事故：DeepSeek-R1-0528 精度62%达标、性能77.9%<80%，被错误当硬闸门漏发 V3）。
+- 精度不达标（`accuracy_ok=false`，含三级递进全关算子仍不达标的框架问题）时：仍执行步骤13，但走"Plugin 不达标发布"（Harbor 私有 / 打 incompatible 标记，不更新 README），**不得让 V3 版位留空**。
 
 ```bash
 # 宿主机执行 plugin 发布

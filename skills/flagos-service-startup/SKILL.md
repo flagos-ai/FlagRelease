@@ -32,23 +32,6 @@ provides:
   - environment.initial_env_verified
 ---
 
-<!--
- Copyright 2026 FlagOS Contributors
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- -->
-
-
 # 服务启动 Skill
 
 支持 default/native/flagos 三种模式，基于 `flaggems_control` 探测结果动态决定启停方式。
@@ -118,7 +101,7 @@ service:
   initial_operator_list: [...]
   max_model_len: <服务实际的 max_model_len>
 runtime:
-  framework: <vllm|sglang>
+  framework: vllm  # 固定值，仅支持 vllm
   gpu_count: <GPU 数量>
   tp_size: <tensor-parallel-size>
   tp_reason: <TP 推算原因>
@@ -140,7 +123,7 @@ sleep 5
 
 备选方式（仅当不能重启容器时）：
 ```bash
-docker exec $CONTAINER bash -c "pkill -f 'vllm\|sglang\|flagscale' 2>/dev/null; sleep 3"
+docker exec $CONTAINER bash -c "pkill -f 'vllm\|flagscale' 2>/dev/null; sleep 3"
 ```
 
 ## 步骤 2 — 切换 FlagGems 状态（按 env_type 分路径）
@@ -222,9 +205,16 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 **算子列表获取**（启动后）：
 - 检查 `/tmp/flaggems_enable_oplist.txt`（plugin 架构下的权威算子列表）
 
-## 步骤 2.4 — GPU 空闲检测（强制）
+## 步骤 2.4 — GPU 空闲检测（强制，卡数锁定语义）
 
 服务启动前检测各 GPU 的显存占用情况，**只使用空闲 GPU，不清理其他进程。**
+
+**卡数锁定规则（2026-08-14 定稿，约束14 本意 = 同卡数而非同物理卡）**：
+- **首次启动（`runtime.gpu_count_locked != true`）**：正常检测 → 选定 N 张 → **锁定卡数 N**（写 `gpu_count_locked=true`），此后 V1/V2/V3/V4 全程卡数不变、TP 不变
+- **后续启动（已锁定）**：重新检测，但**必须凑够同样的 N 张**：
+  - 空闲卡 ≥ N → **优先复用上次的卡**（`runtime.cuda_visible_devices` 中仍空闲的部分），不足的从其他空闲卡补齐
+  - 空闲卡 < N → 复用上次的完整卡列表（哪怕部分已忙）+ 打警告——**卡数优先，宁可共享也不变 N**（V1 期间那些卡本来就是空的，切换窗口很短，真被挤了 vllm 会明确报错）
+- 换卡不换数：物理卡允许变（机器共享、别人的任务会走会来），`runtime.gpu_count` 与 TP 全程一致，V1/V2 对比口径成立
 
 使用统一检测脚本（自动适配 NVIDIA / 华为昇腾 / 沐曦等厂商）：
 
@@ -234,12 +224,12 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 输出 JSON 格式：`{vendor, free_gpus: [idx...], busy_gpus: [idx...], total, details: [{index, used_mib, total_mib, free_mib, usage_pct}...], visible_devices_env}`
 
-**处理逻辑**：
+**首次检测处理逻辑**：
 
 | 情况 | 操作 |
 |------|------|
 | 全部 GPU 空闲 | 正常使用全部 GPU，不设 VISIBLE_DEVICES |
-| 部分 GPU 空闲 | 设置对应厂商的 VISIBLE_DEVICES 环境变量（从输出的 `visible_devices_env` 字段获取），TP 按空闲 GPU 数重新推算 |
+| 部分 GPU 空闲 | 设置对应厂商的 VISIBLE_DEVICES 环境变量（从输出的 `visible_devices_env` 字段获取），TP 按空闲 GPU 数推算 |
 | 无空闲 GPU | 记录警告，仍尝试启动（小模型可能共享显存），OOM 后报错 |
 
 **部分 GPU 空闲时**：
@@ -247,19 +237,28 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 2. 更新 `runtime.gpu_count` 为空闲 GPU 数量
 3. 步骤 2.5 的 TP 推算基于空闲 GPU 数量
 4. `start_service.sh` 会自动从 `gpu.visible_devices_env` 读取正确的环境变量名并设置
-5. 输出提示并记录到 trace
+5. **无论哪种结果（全空闲/部分空闲/无空闲强启），启动前一律写 `runtime.gpu_count_locked=true`**——本次模型流程的卡数从此固定
+6. 输出提示并记录到 trace
 
 ```
 ⚠ GPU 资源检测: 8 张 GPU 中 6 张空闲
   占用中: GPU 0,1（显存占用 45.2%, 38.7%）
   本次使用: GPU 2,3,4,5,6,7（CUDA_VISIBLE_DEVICES=2,3,4,5,6,7）
+  ✓ 卡数已锁定: N=6（后续 V2/V3/V4 复用此卡数，物理卡可换、数量不变）
 ```
+
+**已锁定后的启动（V2/V3/V4 及断点续跑）**：
+1. 照常检测空闲卡（保持自适应，避开新被占的卡）
+2. 空闲 ≥ N：上次卡中仍空闲的**保留**，不足部分从空闲卡补齐 → 更新 `cuda_visible_devices`（`gpu_count` 不变）
+3. 空闲 < N：`cuda_visible_devices` 保持上次值不动 + 打警告「空闲卡不足 N，复用上次卡列表（卡数优先）」→ 照常启动
+4. `gpu_count` 与 TP **永不重推**（卡数锁定）
 
 **写入 context.yaml**：
 ```yaml
 runtime:
-  gpu_count: 6                          # 实际使用的 GPU 数量
-  cuda_visible_devices: "2,3,4,5,6,7"   # 指定卡的索引值（环境变量名由 gpu.visible_devices_env 决定）
+  gpu_count: 6                          # 实际使用的 GPU 数量（首次检测后锁定不变）
+  gpu_count_locked: true                # 卡数锁定标记：true 后后续启动不得改 gpu_count/TP
+  cuda_visible_devices: "2,3,4,5,6,7"   # 指定卡的索引值（环境变量名由 gpu.visible_devices_env 决定；已锁定后允许换卡、数量不变）
   total_gpus: 8                          # 机器总 GPU 数
   gpu_selection_reason: "GPU 0,1 被其他进程占用，使用剩余 6 张空闲 GPU"
 ```
@@ -617,7 +616,8 @@ environment:
      3. 查看 `q.xxx_()` 或 `torch.xxx()` 调用栈中紧邻 flag_gems 的函数名
      4. 如果崩溃发生在 graph capture 阶段，查看 capture 前最后注册/编译的算子
      5. 如果以上均无法定位，逐步禁用最近一轮新启用的算子组（二分法排查）
-   - **停止条件**：连续 2 轮重试后服务仍崩溃，且上述 5 种定位手段均无法识别新的问题算子，判定为不可恢复
+     6. `diagnose_ops.py` 的 `candidate_ops`（正则命中但白名单外的低置信候选）非空时，逐个/二分禁用这些候选——它们不在 `known_ops` 不代表不是问题算子
+   - **停止条件**：连续 2 轮重试后服务仍崩溃，且上述 6 种定位手段均无法识别新的问题算子（含 `candidate_ops` 已全部试过），才判定为不可恢复
    - 注意：推理阶段崩溃也属于"重试失败"，需要同样走 diagnose → 禁用 → 重启流程，不单独计数
 4. 连续 2 轮确认无新可禁用算子（5 种定位手段均无结果）→ 最后尝试添加 `--enforce-eager` 重启一次 → 仍失败 → 切回 Native 验证
 5. Native 也失败 → 报告环境问题；Native 成功 → 确认是 FlagGems 问题
@@ -697,13 +697,15 @@ ISSUE_EOF"
 4. `crashed_ops` 非空 → 累积禁用问题算子（`toggle_flaggems.py --action modify-enable --disabled-ops`）→ 重启（每轮重试前均需清理缓存）
 5. 重试成功（含推理验证通过）→ 记录 `disabled_ops` 到 context.yaml，`workflow.service_ok = true`，继续正常流程
 6. 重试后再次崩溃（启动或推理阶段）→ 备份日志 → 清缓存 → 再次 diagnose → 累积禁用新算子 → 继续重试。**不限轮次，只要每轮能定位到新问题算子就继续**
-7. **`diagnose_ops.py` 返回空时的算子定位**（返回空 ≠ 无问题算子，严禁跳过）：
+7. **`diagnose_ops.py` 的 `crashed_ops` 为空时的算子定位**（为空 ≠ 无问题算子，严禁跳过）：
+   - **先看 `candidate_ops`**：正则命中但白名单外的低置信候选（版本新增/命名变体），逐个/二分禁用验证——这是工具已从日志里抓到、只因不在 `known_ops` 才没进 `crashed_ops` 的名字，不试就判不可恢复属误判
    - 查看 traceback 中 `flag_gems/` 路径，文件名即算子名
    - 查看崩溃前最后编译的 Triton kernel 名（`Compiling ...` 日志行）
    - 查看 `q.xxx_()` / `torch.xxx()` 调用栈中紧邻 flag_gems 的函数名
    - 查看 graph capture 前最后注册/编译的算子
    - 以上均无法定位 → 逐步禁用最近一轮新启用的算子组（二分法排查）
-8. **停止条件**：连续 2 轮重试后服务仍崩溃，且上述所有定位手段均无法识别新的问题算子 → 最后尝试 `--enforce-eager` 一次 → 仍失败 → 判定不可恢复 → 调用 `issue_reporter.py full --type operator-crash`
+8. **停止条件**：连续 2 轮重试后服务仍崩溃，且上述所有定位手段均无法识别新的问题算子（含 `candidate_ops` 已全部试过）→ 最后尝试 `--enforce-eager` 一次 → 仍失败 → 判定不可恢复 → 调用 `issue_reporter.py full --type operator-crash`
+8b. **恢复成功也必须提 issue**：禁用算子后服务恢复成功时，同样必须调用 `issue_reporter.py full --type operator-crash --recovered` 记录哪些算子在该硬件/模型组合下会导致崩溃。这是通知 FlagGems 团队修复算子 bug 的唯一途径，不可省略。
 9. 排除操作失误：native 模式也失败 → 环境问题，需人工介入
 10. 确认是 FlagGems 问题（非硬件）→ `workflow.service_ok = false` → 提交 issue 后**停止任务**，不继续步骤4/6/7 的精度性能评测（FlagGems 完全不可用时评测无意义）→ 直接到步骤8发布（私有，附带崩溃原因）
 

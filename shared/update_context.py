@@ -30,7 +30,9 @@ update_context.py — context.yaml 结构化更新工具
 """
 
 import argparse
+import glob
 import json
+import os
 import sys
 import datetime
 
@@ -45,11 +47,16 @@ DEFAULT_CONTEXT = "/flagos-workspace/shared/context.yaml"
 
 def parse_value(val_str):
     """自动类型推断: true/false→bool, 数字→int/float, 其余→str"""
-    if val_str.lower() == "true":
+    lowered = val_str.lower()
+    if lowered == "true":
         return True
-    if val_str.lower() == "false":
+    if lowered == "false":
         return False
-    if val_str.lower() in ("null", "none", "~"):
+    # null 别名: null(任意大小写)/~/None(Python 字面量) → None。
+    # 注意小写 "none" 是业务状态值（如 baseline.v1_variant: none，V1 三选全失败），
+    # 必须保留为字符串——此前 "none" 被吞成 null，双 tag 判断(v1_variant=="none")失效，
+    # 导致 V1.3/none 场景从"一次发布 v2+v3"降级为"只发 v2、V3 重跑"
+    if lowered == "null" or val_str == "~" or val_str == "None":
         return None
     try:
         return int(val_str)
@@ -150,6 +157,110 @@ def convert_field_value_pairs(argv):
     return converted
 
 
+def _validate_ok_field(ctx, key_path):
+    """校验 performance_ok/accuracy_ok 设为 true 时，实际数据是否支持。
+
+    返回 None 表示通过，返回 str 表示错误原因。
+    """
+    import glob
+
+    results_dir = "/flagos-workspace/results"
+
+    if key_path == "workflow.performance_ok":
+        target_ratio = get_nested(ctx, "workflow.target_ratio", 0.8)
+        # 检查最新的性能结果文件
+        # search_summary.json 是唯一带 final_ratio/performance_ok 的权威摘要（operator_search.py 产出），
+        # 优先扫描它；flagos_*.json / search_step_*.json 是扁平 benchmark（无顶层 ratio），仅作兜底
+        perf_files = sorted(glob.glob(f"{results_dir}/search_summary*.json") +
+                           glob.glob(f"{results_dir}/flagos_*.json") +
+                           glob.glob(f"{results_dir}/search_step_*.json"),
+                           key=lambda f: os.path.getmtime(f) if os.path.exists(f) else 0,
+                           reverse=True)
+        if not perf_files:
+            return (f"设置 {key_path}=true 失败: 未找到性能结果文件。"
+                    f"请通过 operator_search.py 或 benchmark_runner.py 生成结果后再设置")
+        # 读取最新结果验证 ratio
+        try:
+            with open(perf_files[0], "r") as f:
+                data = json.load(f)
+            # 优先信任 search_summary 的 performance_ok 字段（与搜索判定同源）
+            if data.get("performance_ok") is False:
+                fr = data.get("final_ratio")
+                fr_str = f"{fr*100:.1f}%" if isinstance(fr, (int, float)) else "?"
+                return (f"设置 {key_path}=true 失败: 最新搜索摘要 performance_ok=false "
+                        f"(ratio={fr_str}, 文件: {perf_files[0]})")
+            if data.get("performance_ok") is True:
+                return None
+            # 无 performance_ok 字段：尝试从 final_ratio/ratio 取比值
+            ratio = data.get("final_ratio")
+            if ratio is None:
+                ratio = data.get("ratio")
+            if ratio is None:
+                # 扁平 benchmark 文件无顶层 ratio，无法就地判定 → 不阻断
+                # （避免误拒：真正的达标判据在 search_summary.json 中）
+                return None
+            if isinstance(ratio, dict):
+                ratio = min(ratio.values()) if ratio else 0
+            if ratio < target_ratio:
+                return (f"设置 {key_path}=true 失败: 最新结果 ratio={ratio*100:.1f}% "
+                        f"< target={target_ratio*100:.0f}% (文件: {perf_files[0]})")
+        except (json.JSONDecodeError, IOError):
+            pass  # 文件解析失败时不阻断，允许设置
+
+    elif key_path == "workflow.accuracy_ok":
+        threshold = get_nested(ctx, "workflow.accuracy_threshold", 0.05)
+        # 多数据集：校验全部 accuracy_compare_{dataset}.json，每个数据集独立判定，全达标才放行；
+        # 无 per-dataset 文件时回退旧行为（最新 accuracy_compare*.json）。
+        # 仅匹配已知数据集前缀（gpqa/mmlu/math_500），排除 accuracy_compare_v3.json 等
+        # 历史调优/插件判定产物（它们不参与步骤4 全数据集判定，误读会误拒）
+        KNOWN_ACC_FILES = ("accuracy_compare_gpqa.json",
+                           "accuracy_compare_mmlu.json",
+                           "accuracy_compare_math_500.json")
+        per_ds_files = sorted(f for f in glob.glob(f"{results_dir}/accuracy_compare_*.json")
+                              if os.path.basename(f) in KNOWN_ACC_FILES)
+        acc_files = per_ds_files if per_ds_files else sorted(
+            glob.glob(f"{results_dir}/accuracy_compare*.json"),
+            key=lambda f: os.path.getmtime(f) if os.path.exists(f) else 0,
+            reverse=True)
+        if not acc_files:
+            return (f"设置 {key_path}=true 失败: 未找到精度对比结果文件。"
+                    f"请通过精度评测生成结果后再设置")
+        # 逐文件校验：任一数据集不达标即拒绝（多数据集场景缺一个文件也会因
+        # 剩余文件不达标被拒；全部 aligned 才放行）
+        for acc_file in acc_files:
+            try:
+                with open(acc_file, "r") as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, IOError, ValueError):
+                continue  # 文件解析失败时不阻断（与旧行为一致）
+            # NV 基线模式（新流程）：优先信任 aligned 字段 + rel_drop 判据
+            if data.get("baseline_mode") == "nv_reference":
+                # 缺 NV 基线时不阻断（编排层已决定兜底）
+                if data.get("missing_nv"):
+                    continue
+                if data.get("aligned") is False:
+                    rd = data.get("rel_drop_pct", 0)
+                    return (f"设置 {key_path}=true 失败: 相对 NV 退化 {rd:.1f}% "
+                            f"超容差 (文件: {acc_file})")
+                continue
+            # 本地 V1 基线模式：优先信任 aligned 字段 + rel_drop（相对退化口径）
+            if data.get("aligned") is False:
+                rd = data.get("rel_drop")
+                rd_pct = (rd * 100) if isinstance(rd, (int, float)) else data.get("drop", 0)
+                return (f"设置 {key_path}=true 失败: 精度相对退化 {rd_pct:.1f}% "
+                        f"超阈值 {threshold*100:.0f}% (文件: {acc_file})")
+            if data.get("aligned") is True:
+                continue
+            # 回退：无 aligned 字段的旧结果，用 rel_drop（相对比例）比对
+            rel_drop = data.get("rel_drop")
+            if isinstance(rel_drop, (int, float)):
+                if rel_drop > threshold:
+                    return (f"设置 {key_path}=true 失败: 精度相对退化 {rel_drop*100:.1f}% "
+                            f"> 阈值 {threshold*100:.0f}% (文件: {acc_file})")
+
+    return None
+
+
 def main():
     raw_args = sys.argv[1:]
     if "--field" in raw_args:
@@ -194,6 +305,14 @@ def main():
                 sys.exit(1)
             key, val = item.split("=", 1)
             parsed = parse_value(val)
+
+            # 校验 performance_ok/accuracy_ok 写入（防止误设 true）
+            if key in ("workflow.performance_ok", "workflow.accuracy_ok") and parsed is True:
+                err = _validate_ok_field(ctx, key)
+                if err:
+                    print(f"[ERROR] {err}", file=sys.stderr)
+                    sys.exit(1)
+
             set_nested(ctx, key, parsed)
             changes.append({"op": "set", "key": key, "value": parsed})
 

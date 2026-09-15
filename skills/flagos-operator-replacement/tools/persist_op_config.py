@@ -45,6 +45,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# 导入变体展开函数
+from flagos_op_config import expand_operator_variants
+
 CONTEXT_YAML = "/flagos-workspace/shared/context.yaml"
 OP_CONFIG_JSON = "/flagos-workspace/results/operator_config.json"
 RECORD_FILE = "/root/flaggems_op_config.json"
@@ -226,7 +229,9 @@ def _persist_control_file_and_env(disabled_ops, enabled_ops):
         "FLAGGEMS_CONTROL_MODE": control_mode,
     }
     if disabled_ops:
-        env_vars["VLLM_FL_FLAGOS_BLACKLIST"] = ",".join(sorted(disabled_ops))
+        # 自动展开算子变体（addmm → addmm + addmm_out + addmm_dtype + addmm_dtype_out）
+        disabled_ops_expanded = expand_operator_variants(disabled_ops)
+        env_vars["VLLM_FL_FLAGOS_BLACKLIST"] = ",".join(sorted(disabled_ops_expanded))
     env_files = []
 
     try:
@@ -404,9 +409,14 @@ def persist_env_vars(disabled_ops):
     env_vars = {
         "USE_FLAGGEMS": "1",
         "VLLM_FL_PREFER_ENABLED": "true",
+        # V3 起 plugin 状态推进为 fl：覆盖 V1 三选固化的厂商插件/空值，
+        # start_service.sh 未显式传 --vllm-plugins 时继承此值
+        "VLLM_PLUGINS": "fl",
     }
     if disabled_ops:
-        env_vars["VLLM_FL_FLAGOS_BLACKLIST"] = ",".join(sorted(disabled_ops))
+        # 自动展开算子变体（addmm → addmm + addmm_out + addmm_dtype + addmm_dtype_out）
+        disabled_ops_expanded = expand_operator_variants(disabled_ops)
+        env_vars["VLLM_FL_FLAGOS_BLACKLIST"] = ",".join(sorted(disabled_ops_expanded))
 
     env_files = []
 
@@ -514,7 +524,7 @@ def verify_config(expected_count):
 
     # 停止服务
     print("  停止服务...")
-    subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null",
+    subprocess.run("pkill -f 'vllm' 2>/dev/null",
                     shell=True, capture_output=True, timeout=10)
     time.sleep(5)
 
@@ -556,7 +566,7 @@ def verify_config(expected_count):
         verified, count = False, actual_count
 
     # 停止服务释放 GPU
-    subprocess.run("pkill -f 'vllm\\|sglang' 2>/dev/null",
+    subprocess.run("pkill -f 'vllm' 2>/dev/null",
                     shell=True, capture_output=True, timeout=10)
     return verified, count
 

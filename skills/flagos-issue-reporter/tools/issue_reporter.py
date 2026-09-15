@@ -56,6 +56,19 @@ from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+# 芯片厂商规范表。容器内部署在同目录(scripts/)，宿主机在项目 shared/。
+# 两处候选都加入 sys.path，缺失时降级为原值。
+_chip_spec = None
+try:
+    _here = os.path.dirname(os.path.abspath(__file__))
+    for _cand in (_here,
+                  os.path.abspath(os.path.join(_here, "..", "..", "..", "shared"))):
+        if os.path.isfile(os.path.join(_cand, "chip_spec.py")) and _cand not in sys.path:
+            sys.path.insert(0, _cand)
+    import chip_spec as _chip_spec  # type: ignore
+except Exception:
+    _chip_spec = None
+
 _ENV_FILE = "/flagos-workspace/.env"
 
 
@@ -311,8 +324,19 @@ def _load_environment(env_file: Optional[str], context_yaml: Optional[str]) -> D
             with open(context_yaml, "r") as f:
                 ctx = yaml.safe_load(f) or {}
             gpu = ctx.get("gpu", {})
-            env["hardware"] = gpu.get("vendor", "")
-            env["gpu_type"] = gpu.get("type", "")
+            _vendor_raw = gpu.get("vendor", "")
+            _gpu_type_raw = gpu.get("type", "")
+            # 厂商/芯片走统一规范表展示（huawei→华为(Ascend)、型号规范化），缺失时回退原值
+            if _chip_spec and _vendor_raw:
+                try:
+                    env["hardware"] = _chip_spec.vendor_display(_vendor_raw)
+                    env["gpu_type"] = _chip_spec.canonical_chip(_vendor_raw, _gpu_type_raw)
+                except Exception:
+                    env["hardware"] = _vendor_raw
+                    env["gpu_type"] = _gpu_type_raw
+            else:
+                env["hardware"] = _vendor_raw
+                env["gpu_type"] = _gpu_type_raw
             insp = ctx.get("inspection", {})
             core = insp.get("core_packages", {})
             env["pytorch"] = core.get("torch", "")
@@ -646,7 +670,8 @@ def format_issue(
     """将 issue_data 格式化为 Bug Report markdown"""
 
     issue_type = issue_data.get("type", "operator-crash")
-    title = issue_data.get("title", "Bug Report")
+    # 标题统一以 【FR】 开头（幂等），使本地 markdown 与提交到 GitHub 的标题一致
+    title = _ensure_fr_prefix(issue_data.get("title", "Bug Report"))
     affected_ops = issue_data.get("affected_ops", [])
     op_details = issue_data.get("op_details", [])
     error_messages = issue_data.get("error_messages", [])
@@ -973,6 +998,18 @@ def _generate_flaggems_section(flaggems_ctx: Dict[str, Any]) -> str:
 # submit — 提交 issue
 # =============================================================================
 
+def _ensure_fr_prefix(title: str) -> str:
+    """确保 issue 标题以 【FR】 开头（幂等）。
+
+    兼容已带全角【FR】或半角 [FR] 前缀的标题，避免重复添加。
+    """
+    t = title.strip()
+    # 已带前缀（全角或半角，允许其后有空格）则原样返回
+    if t.startswith("【FR】") or t.startswith("[FR]"):
+        return t
+    return f"【FR】{t}"
+
+
 def submit_issue(
     issue_file: str,
     repo: str = "flagos-ai/FlagGems",
@@ -1001,6 +1038,9 @@ def submit_issue(
                 break
         if not title:
             title = "Bug Report"
+
+    # 所有 issue 标题统一以 【FR】 开头（幂等：已带前缀则不重复添加）
+    title = _ensure_fr_prefix(title)
 
     # 保存带类型+仓库名+时间戳的 markdown 文件
     repo_short = repo.replace("/", "_")

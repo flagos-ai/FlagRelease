@@ -1,19 +1,3 @@
-<!--
- Copyright 2026 FlagOS Contributors
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- -->
-
 # FlagOS 自动化框架 — 项目级指令
 
 > 此文件由 Claude Code 自动加载，提供 Skill 路由、工作流定义和自动决策规则。
@@ -72,6 +56,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 | 组件安装 / install component / 安装 FlagGems / 安装 FlagTree / 升级 FlagGems / flag upgrade | flagos-component-install | `skills/flagos-component-install/SKILL.md` |
 | 发布 / 镜像上传 / 镜像打包 / 模型发布 / release / publish / image upload / package image | flagos-release | `skills/flagos-release/SKILL.md` |
 | 安装 plugin / install plugin / plugin 安装 / vllm-plugin | flagos-plugin-install | `skills/flagos-plugin-install/SKILL.md` |
+| 离线推理 / offline inference / 模型适配 / inference 跑通 / 推理验证 | flagos-offline-inference | `skills/flagos-offline-inference/SKILL.md` |
 
 ---
 
@@ -85,36 +70,78 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 2 环境检测           → inspect_env.py 场景分类 + FlagGems 集成分析
 3 启服务             → V1(native) + V2(flagos) 启动验证 → 异常自动 issue
 4 精度评测           → V1/V2 GPQA Diamond 对比 → 异常自动 issue
-5 精度算子调优       → [条件] env_type≠native 且 V2精度下降>5% 时分组排查定位问题算子（最多3轮）
+5 精度算子调优       → [条件] env_type≠native 且 V2精度相对退化>5% 时分组排查定位问题算子（最多3轮）
 6 性能评测           → V1/V2 4k1k benchmark 对比 → 异常自动 issue
 7 性能算子调优       → [条件] env_type≠native 且 ratio<80% 时逐个禁用直到达标
-8 自动发布           → 打包 + 上传（统一私有发布，报告注明是否达标）
---- Plugin 验证流程（仅 qualified=true 时触发）---
+8 V2发布(Pro)        → 打包 Harbor 私有(始终) + V2 精度达标才对外传权重/README，tag 后缀 -v2
+--- Plugin 验证流程（plugin_entry=service_ok 触发，V2 精度不阻塞；性能不阻断）---
 9  Plugin 安装       → install_plugin.py 安装 vllm-plugin-FL → 失败则 issue + 停止
 10 Plugin 启服务     → 以达标算子集 + plugin 模式启动 → 崩溃则 issue + 停止
-11 Plugin 精度评测   → 与 V1 基线对比 → 不达标则 issue（继续）
-12 Plugin 性能评测   → 与 V1 基线对比 → 不达标则 issue（继续）
-13 Plugin 发布       → [不达标]issue + 镜像上传(私有) / [达标]镜像上传 + 更新已发布版本 README
+11 Plugin 精度评测   → 与 V1 基线对比 → 不达标则算子调优（plugin 模式）
+12 Plugin 性能评测   → 与 V1 基线对比 → 不达标则算子调优（plugin 模式）
+13 V3发布(Max)       → tag 后缀 -v3，[不达标]issue + 镜像上传(私有) / [达标]镜像上传 + 更新 README
+--- V4 减算子流程（service_ok AND V3(plugin)精度达标 触发，紧接 V3；性能不阻断，精度硬闸门）---
+13.5 V4减算子(Flag-express) → operator_reduction.py 两阶段（阶段1性能搜索不测精度、阶段2精度回溯）在 V3 达标算子集上减算子提性能，追求性能绝对值最大化、达标基准是超越 V3（不与 V1 比），保底≥1算子，精度相对退化≤5% 为成立前提 → tag 后缀 -v4，plugin 镜像模式发布
 ```
 
-执行顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → [qualified=true] → 9 → 10 → 11 → 12 → 13
+执行顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → [plugin_entry=service_ok] → 9 → 10 → 11 → 12 → 13 → [V3 精度达标] → 13.5(V4)
+（**plugin/V3 入口 = service_ok**：V2 精度不阻塞 V3 尝试；**V4 入口 = service_ok AND V3(plugin)精度达标**，不叠加 V2 精度；性能全程不阻断，仅影响发布 tag 的 qualified 标签）
+（对外发布(魔搭/HF)门控：V2 精度达标→步骤8建仓+传权重+README；V2 精度不达标→步骤8仅 Harbor 私有、不对外，若 V3 达标由步骤13 full-publish 补发；**V2 与 V3 都不达标→对外都不发**，仅留私有镜像）
 
-**算子累计禁用规则**：5 禁用精度问题算子 → 6 在此基础上测性能 → 7 继续禁用性能问题算子。步骤 10-12 复用步骤 5/7 的最终算子集，不重新调优。各步骤详细流程见对应 SKILL.md 的"编排层指令"章节。
+**算子累计禁用规则**：5 禁用精度问题算子 → 6 在此基础上测性能 → 7 继续禁用性能问题算子。步骤 10-12 以步骤 5/7 的最终算子集为起点：**精度达标则不重新调优；精度不达标按精度三级递进（先 issue → plugin 模式关算子调优 → 全关仍不达标才判框架问题）在 plugin 模式下继续调优；性能不达标不强制重调，尽力即可、达上限即停**（见步骤 11/12 说明）。各步骤详细流程见对应 SKILL.md 的"编排层指令"章节。
 
 **Plugin 流程特殊规则**：
-- 触发条件：步骤 8 完成且 `workflow.qualified=true`，否则步骤 9-13 全部 skipped
+- 触发条件（用户 2026-07-20 定稿，**入口只看能否起服务**）：步骤 8 完成且 `workflow.service_ok`（记为 **plugin_entry**，即 V2 环境能起服务）。**V2(注入)精度不达标不阻塞 V3 尝试**——V2(FlagGems 注入)与 V3(plugin)是两套不同的算子调度路径，V2 注入精度差不代表 V3 plugin 也差；V3 自己的精度在步骤11单独判。**性能不看重、不阻断**：performance_ok=false 不阻止步骤 9-13，性能仅决定发布 tag 的 qualified 标签。仅当 V2 服务起不来(service_ok=false)才 skip 步骤 9-13。
 - 崩溃停止：步骤 9 安装失败或步骤 10 服务崩溃 → 写 issue → 设 `plugin_workflow.crash_stopped=true` → **停止任务**
 - Issue 路由：步骤 9-13 所有 issue 通过 `issue_reporter.py full --type plugin-error --repo flagos-ai/vllm-plugin-FL` 提交（只保存本地文件）
-- 不触发算子调优：精度/性能不达标只写 issue，不进入调优流程
-- 算子集复用：使用主流程已达标的算子集（含步骤 5/7 的禁用列表），不重新调优，禁止重新检测 GPU
-- 镜像 tag：原 date_tag 追加 `-plugin`（如 `202603301143-plugin`）
-- Plugin 不达标发布：精度/性能不达标时，先提交 issue，再打包镜像上传 Harbor（私有），不更新 ModelScope/HuggingFace README
+- **Plugin 阶段算子调优（精度三级递进）**：步骤 11 **精度**不达标时按三级递进处理：①先提交 issue 记录问题；②用 `operator_search.py run --plugin-mode --final-output-name v3_performance --state-path operator_config_v3.json` 在 Plugin 模式下继续关闭拖累精度的算子直到精度达标；③若全关 flaggems 算子仍精度不达标，判定为框架问题，提交 plugin-error issue，accuracy_ok=false（精度硬闸门未过 → V3 不产出）。步骤 12 **性能**不达标：仅写 performance-degraded issue + 标 performance_ok=false，**照常继续步骤13**（可选跑一次 plugin 性能调优尽力提升，达上限即停，不强求达标）。
+- 算子集初始化：以主流程已达标的算子集（含步骤 5/7 的禁用列表）为起点，在此基础上累加禁用
+- 镜像 tag：原 date_tag 追加 `-v3`（如 `202603301143-v3`）
+- Plugin 不达标发布：调优后仍不达标时，先提交 issue，再打包镜像上传 Harbor（私有），不更新 ModelScope/HuggingFace README
 
-### V1/V2/V3 定义
 
-- **V1**：不开启 flaggems 算子替换的版本，作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务，则标记"无 V1"，跳过 V1 基线测试
-- **V2**：初始环境的 flaggems 状态（已开启部分或全部算子）。服务启动后以 `flaggems_enable_oplist.txt` 或 `gems.txt` 记录的算子为准
-- **V3**：经过算子调优（步骤5/7）后的优化版本。仅在精度或性能不达标时产出
+### 版本定义
+
+| 版本 | 定义 | 镜像 tag 后缀 | 产出方式 |
+|------|------|--------------|---------|
+| **V1** (基础版) | 仅 FlagTree，不开启 FlagGems | `-v1` | 阶段一手动发布 |
+| **V0** (中间态) | FlagGems 全量算子开启的初始状态 | — | 不发布（仅作为调优起点） |
+| **V2** (Pro版) | FlagGems + FlagTree，精度相对退化≤5%，性能≥80% of V1 | `-v2` | 步骤8自动发布 |
+| **V3** (Max版) | V2 + Plugin，精度相对退化≤5%，性能≥80% of V1 | `-v3` | 步骤13自动发布 |
+| **V4** (精简版/Flag-express) | V3 基础上减算子以提升性能，追求性能绝对值最大化、**达标基准是超越 V3（不与 V1 比较）**，**精度相对退化≤5%（版本成立前提）**，保底≥1算子 | `-v4` | operator_reduction.py 自动发布 |
+
+- **V1 基线**：不开启 flaggems 算子替换的版本（仅 FlagTree 生效），作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务，则标记"无 V1"，跳过 V1 基线测试，精度基线回退 NV 基线（`nv_baseline.yaml`），**性能基线合成**：V2 使能 flaggems 后首次可正常启动时（步骤4之前、精度调优削减算子之前），quick 测一轮初始性能（`v2_initial_performance`），经 `synthesize_perf_baseline.py` ×1.05 合成基线（全芯片统一标准；吞吐×1.05、延迟÷1.05），按 `native_performance.json` 标准格式落盘（`_meta.synthetic=true` + `target_ratio_override=1.0` 标记），下游对比/调优/报告照常消费。合成基线场景达标线 = 基线×1.0 = **V2 初始的 1.05 倍**（`target_ratio_override` 覆盖默认 0.8，仅对合成基线生效，实测 V1 不受影响）
+- **V0**：进入自动化时 flaggems 全量开启状态。服务启动后以 `flaggems_enable_oplist.txt` 或 `gems.txt` 记录的算子为准
+- **V2 Pro**：经过算子调优（步骤5/7）后达标的版本。精度相对退化≤5%，性能≥80% of V1
+- **V3 Max**：在 V2 基础上安装 Plugin 并调优达标的版本。允许 Plugin 模式下继续关闭算子
+- **V4 精简 (Flag-express)**：在 V3 基础上通过 `operator_reduction.py` 减算子提性能，**两阶段**：阶段1 性能搜索（从 V3 基线起逐个试禁用，仅当禁用后吞吐 > 当前基线才提交、基线动态推进，全程不测精度）；阶段2 精度回溯（按性能从高到低取组合测精度，达标即产出，不达标回退次优，最坏回退 V3 等价）。**追求性能绝对值最大化，达标基准是超越 V3（不与 V1 比较，V1 仅报告参考）**，硬约束至少保留 1 个算子（plugin 也不例外）。**精度相对退化≤5% 是 V4 成立前提**，收尾做最终精度终检，不达标则 V4 不成立（success=False）。V4 成立需同时满足：超越 V3 + 保留≥1算子 + 精度达标
+- **精度判据口径**：所有版本的精度达标均以「相对退化」计算——`rel_drop = (基线 - 当前) / 基线 ≤ 5%`，基线为本地 V1 或 NV 参考（`nv_baseline.yaml`）。见 `accuracy_compare.py`。**多数据集（`--datasets`）**：每个数据集独立判定（`accuracy_compare_{dataset}.json`），全部达标才 `accuracy_ok=true`。**V2/V3/V4 精度口径完全一致**——三个版本都对全部 `--datasets` 逐个独立评测、独立判定，全部达标才成立（V3 见步骤11、V4 终检见 `operator_reduction.py --accuracy-datasets`，V4 基线逐数据集取各自 `{prefix}_native.json`/NV）；V4 回退到起点的版本等价 V3，继承 V3 已验证精度结论、不重复终检
+
+### 双 pipeline 分支（准入镜像分类驱动）
+
+环境检测（步骤2 `inspect_env.py`）输出 `entry_image_type`，编排层（`run_pipeline.sh`）据此确定性路由到对应 pipeline，**无需 Claude 判断**：
+
+| entry_image_type | 分支 | 准入镜像组成 | 版本路径 |
+|------------------|------|--------------|---------|
+| `gems_tree` | **A**（简单） | flaggems + flagtree，无 plugin | V1(裸启动) → V2(代码注入全量) → V3(切 plugin 白名单) → V4(减算子) |
+| `gems_tree_plugin` | **B**（复杂） | flaggems + flagtree + plugin | V1(三选) → V2(2.1/2.2) → V3(3.1/3.2) → V4 |
+| `native` | native | 无 flaggems | 仅精度/性能评测，不做算子调优与多版本发布 |
+
+**分支 A（gems_tree）工作流**：
+- V1：裸启动基线（不开 flaggems 算子替换），产出精度/性能基线；缺失时用 `nv_baseline.yaml` 兜底
+- V2：代码注入方式开启全量 flaggems 算子，经步骤5/7 调优达标
+- V3：切换到 plugin 白名单方式（与 V2 算子集一致），验证 plugin 路径
+- V4：`operator_reduction.py` 从 V3 减算子提性能
+
+**分支 B（gems_tree_plugin）工作流**：
+- V1：**三选状态机**（`baseline_selector.py`）按优先级确定基础版依赖——
+  - `v1.1` VLLM_PLUGINS='' 纯净基线 → `v1.2` 厂商 platform plugin → `v1.3` fl plugin 但不开 flaggems
+  - 三者均失败 → `none`（强依赖 flaggems），精度基线回退 `nv_baseline.yaml`
+- V2：`2.1` 代码注入独立 V2 镜像；或 `2.2` V2=V3 同镜像（V1.3 场景，`--also-tag` 双 tag 发布）
+- V3：`3.1` 切厂商/fl plugin 白名单独立 V3；或 `3.2` V3=V2（同上双 tag）；厂商 plugin 不适配时用 `--incompatible-tag` 打不适配标记
+- V4：`operator_reduction.py` 随机选1~3算子优化性能
+
+- **发布仓库**：V1/V2/V4 发布到 `harbor.baai.ac.cn/flagrelease-public`；**V3 发布到 `harbor.baai.ac.cn/flagrelease-project`**（交付 SVT 验收，V3=Max 为最终交付版）
 
 ### native 场景工作流简化
 
@@ -150,16 +177,20 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 | 宿主机模型路径 | `check_model_local.py --no-download` 自动搜索。找到则使用实际路径挂载；未找到则使用 `/mnt/data/models/<model_name>` | `${MODEL_PATH}` 和 `${CONTAINER_MODEL_PATH}` 均取此路径 |
 | docker run | 模板优先：严格按 SKILL.md 中 GPU 厂商对应模板执行。模板失败时先修正变量重试；仍失败则 `docker inspect` 借鉴已有容器重试一次；仍失败则终止 | 不需确认 |
 | 精度评测 | 始终执行 V1 和 V2 | 不询问是否跳过 |
+| 数据集参数 | `--datasets` 逗号分隔（`gpqa_diamond`/`mmlu`/`math_500`/`mm_star`），默认 `gpqa_diamond`，作用于 run_pipeline.sh/run_batch.sh。`mm_star` 为多模态（VLM）数据集，仅对视觉语言模型有意义、须服务支持图像输入，多模态精度评测传 `--limit 0` 全量 1500 题 | 每个数据集独立评测、独立判定（per-dataset accuracy_compare_{dataset}.json），**全部达标才 accuracy_ok=true**（update_context.py 自动校验） |
+| 评测时长预算 | thinking 模型（qwen3/qwq/deepseek-r1/r2/mimo/hunyuan 或 runtime.thinking_model=true）`--limit 30 --max-timeout 22500`；普通模型 `--limit 50 --max-timeout 7200`。V1/V2 参数必须相同。**数据集预算**：gpqa_diamond 显式传 `--limit`（30/50）；mmlu `--max-timeout 21600`（默认 20/子集=1140 题，不传 `--limit`）；math_500 `--max-timeout 7200`（默认 40/等级=200 题，不传 `--limit`）；多数据集取各数据集 max_timeout 最大值，一律不传 `--limit`；timeout 是防挂死上限而非性能预期，国产慢卡（10×~30×）不得误杀（题数降采样 gap 实测见 `eval-sampling-gap-measured` 记忆：mmlu 20/子集 ±2.05pt、math 200 ±5.4pt） | 评测耗时长（thinking 6h+）是预算内预期，**禁止因耗时长跳过/放弃/截断评测** |
+| 长任务执行协议 | 所有可能运行超过 10 分钟的命令（评测、服务等待、性能测试、算子调优、发布推送）一律走协议：写任务命令文件 → `task_runner.py --cmd ... --state ... --log ... --timeout <上限>` detached 启动（容器内 `docker exec -d`、宿主机 `python3 ... &`）→ Claude 每 8 分钟短轮询状态文件（`sleep 480 && cat <state> && tail -3 <log>`，单次调用 <10 分钟且必有输出）→ 会话被杀后任务继续跑、新会话读 state 断点接管 | **禁止** Bash(timeout=大数) 前台阻塞（Bash 工具 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败），**禁止** TaskOutput 轮询；启动任务前先检查对应 state 文件，`status=running` 时直接接管禁止重复启动 |
 | FlagGems 仓库地址 | `https://github.com/FlagOpen/FlagGems.git` | 无需用户提供 |
 | 性能目标 | quick: 4k_input_1k_output 并发 64 ratio ≥ 80%；comprehensive: 每个用例每个并发级别均 ≥ 80%。**判定粒度：每个数据点的 min ratio** | 不询问 |
+| V1 性能基线缺失 | 步骤4前 V2 初始性能 quick 一轮 → `synthesize_perf_baseline.py` ×1.05 合成 `native_performance.json`（全芯片统一，`_meta.synthetic=true`，达标线=V2初始×1.05） | 报告按 native 基线展示 |
 | pip install 模式 | `pip install .`（非 editable） | 避免 `-e .` 在容器中的问题 |
 | pip 国内镜像 | `-i https://mirrors.aliyun.com/pypi/simple/` | pip 失败时自动加镜像重试 |
 | 服务端口 | 默认 8000，被占用则自动递增（+1 到 +10） | 不询问端口号 |
-| GPU 设备 | 启动前检测空闲 GPU（显存占用 <5%），仅使用空闲 GPU | 不询问使用哪些卡 |
+| GPU 设备 | 启动前检测空闲 GPU（显存占用 <5%），仅使用空闲 GPU；首次启动锁定卡数（gpu_count_locked），后续版本可换物理卡但卡数/TP 不变 | 不询问使用哪些卡 |
 | Harbor 仓库地址 | `harbor.baai.ac.cn/flagrelease-public` | 无需用户提供 |
 | 模型仓库命名 | `FlagRelease/{Model}-{vendor}-FlagOS` | 自动生成 |
 | 仓库可见性 | 全部私有发布 | 报告中注明是否达标 |
-| 容器内模型搜索路径 | `/data,/models,/root,/home,/workspace,/mnt,/opt` | 不询问 |
+| 容器内模型搜索路径 | `/mnt/data/,/data,/data1,/data2,/models,/root,/home,/workspace,/mnt,/opt` | 不询问 |
 | 容器内模型下载目录 | 镜像模式：下载到已挂载的 `${CONTAINER_MODEL_PATH}`；容器模式：优先已挂载宿主机卷路径 | 镜像模式下模型权重保证落在宿主机 |
 | 镜像模式容器名冲突 | 追加时间戳后缀 `_MMDD_HHMM` 创建新容器 | 禁止复用已有容器 |
 | 精度调优触发 | `accuracy_ok=false` 且 `env_type≠native` 时自动触发 | 不询问 |
@@ -170,7 +201,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 | Plugin 服务崩溃 | 写 issue 到 `flagos-ai/vllm-plugin-FL` → 停止任务 | 不切回非 plugin 模式 |
 | Plugin issue 路由 | 步骤 9-13 所有 issue → `flagos-ai/vllm-plugin-FL` | 非 FlagGems 仓库 |
 | Plugin 镜像命名 | 原 tag 追加 `-plugin` 后缀 | 自动生成 |
-| Plugin 算子集 | 复用主流程已达标的算子集（含步骤 5/7 禁用列表） | 不重新调优 |
+| Plugin 算子集 | 复用主流程已达标的算子集（含步骤 5/7 禁用列表） | 达标不重新调优；不达标进三级递进继续调优 |
 | 网络代理切换 | 从 `FLAGOS_PROXY_LIST` 逐个尝试 | 网络操作失败时自动切换代理重试，全部失败才终止 |
 | 容器内代理传递 | `docker exec -e http_proxy=<proxy> -e https_proxy=<proxy>` | 所有需要外网的 docker exec 命令必须传入代理 |
 
@@ -289,7 +320,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 | 文件 | 写入时机 |
 |------|---------|
 | `logs/issues_startup.log` | 服务启动失败、崩溃（不含超时） |
-| `logs/issues_accuracy.log` | V2精度下降 >5%、评测报错 |
+| `logs/issues_accuracy.log` | V2精度相对退化 >5%、评测报错 |
 | `logs/issues_performance.log` | 任一并发级别 V2/V1 < 80% |
 
 统一格式：
@@ -352,22 +383,22 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 ### GPU 资源管理
 
-14. **V1 和 V2 必须使用相同的 GPU 配置**，禁止重新检测 GPU
+14. **V1 和 V2 必须使用相同的 GPU 卡数（TP 一致）**。首次启动检测空闲卡后锁定卡数（`runtime.gpu_count_locked=true`），后续 V2/V3/V4 可重新检测空闲卡换物理卡（优先复用上次的卡），但卡数与 TP 不变——空闲卡不足 N 时复用上次卡列表硬上（卡数优先，详见 flagos-service-startup SKILL 步骤 2.4）
 15. **V1/V2 模式切换前必须先停止当前服务释放 GPU**。必须先 `docker restart $CONTAINER && sleep 5`
 16. **每个 segment 结束时必须停止推理服务释放 GPU 显存**
 17. **每轮算子搜索前必须验证 GPU 显存已释放**。`operator_search.py` 自动处理，连续清理仍无可用 GPU 则中止
 
 ### 流程约束
 
-18. **流程不可中途终止**。精度/性能不达标不是终止理由，标记 `ok=false` 继续下一步，最终走到步骤8（私有发布）。唯一允许终止：Claude API 本身不可用。**例外**：步骤3 FlagGems 崩溃且算子诊断重试连续 2 轮确认无任何可归因算子的新错误（工具 + 人工日志分析均无结果），设 `workflow.service_ok=false` → 提交 issue 后跳过步骤4-7，直接到步骤8（私有发布）。崩溃诊断不限轮次——每轮能定位到新问题算子就继续禁用并重试。`diagnose_ops.py` 返回空不等于"无新算子"，必须自行从日志中分析
+18. **流程不可中途终止**。精度/性能不达标不是终止理由，标记 `ok=false` 继续下一步，最终走到步骤8（私有发布）。唯一允许终止：Claude API 本身不可用。**例外**：步骤3 FlagGems 崩溃且算子诊断重试连续 2 轮确认无任何可归因算子的新错误（工具 + 人工日志分析均无结果），设 `workflow.service_ok=false` → 提交 issue 后跳过步骤4-7，直接到步骤8（私有发布）。崩溃诊断不限轮次——每轮能定位到新问题算子就继续禁用并重试。`diagnose_ops.py` 的 `crashed_ops` 返回空不等于"无新算子"：先看 `candidate_ops`（正则命中但白名单外的低置信候选，逐个/二分禁用验证），再自行从日志分析；`crashed_ops` 与 `candidate_ops` 均空且人工分析无果，才算"无可归因算子"
 18a. **启动崩溃第一原则：禁用算子是最高优先解**。步骤3 遇到任何形式的崩溃（AICore 异常、Triton 编译错误、graph capture 失败、RuntimeError 等），必须首先定位并禁用具体算子。在穷尽所有算子定位手段（diagnose_ops.py + 人工日志分析 + traceback 中 flag_gems 路径 + 崩溃前编译的 kernel 名）之前，**严禁**尝试 enforce-eager、切 native、或判定不可恢复。enforce-eager 仅作为"已禁用所有可疑算子后仍崩溃"时的最后辅助手段，不是替代算子排查的捷径
-19. **精度评测和性能测试严禁同时进行**，必须等一个完全结束后再启动另一个。整体串行：4 → 5 → 6 → 7
-20. **禁止添加 SKILL.md 未记录的 vLLM/sglang 启动参数**，遇到启动问题应分析日志找根因
+19. **精度评测和性能测试严禁同时进行**，必须等一个完全结束后再启动另一个。整体串行：4 → 5 → 6 → 7。**唯一例外**：无 V1 场景（`baseline.v1_available=false` 或 V1 无法启动）在步骤4之前插入一次 V2 初始性能测量（quick 一轮）用于合成基线——仍是串行执行（先性能后精度），不违反互斥本意
+20. **禁止添加 SKILL.md 未记录的 vLLM 启动参数**，遇到启动问题应分析日志找根因
 21. **V1 和 V2 精度评测必须使用完全相同的参数**。包括 max_tokens、题目数量、评测脚本版本，禁止任何一方使用不同配置
 22. **性能测试 output-name 标准命名**：V1=`native_performance`，V2=`flagos_performance`，V3=`flagos_optimized`
 23. **步骤5/7的 trace 文件独立**，不混入步骤4/6的 trace
-24. **步骤7性能算子调优 elimination 策略不限轮次上限**，每轮 benchmark 使用 quick 模式，达标即停。步骤5精度调优最多 3 轮（见 flagos-eval-comprehensive SKILL.md）
-25. **服务启动崩溃后重试前必须清理 Triton/FlagGems 编译缓存**。`rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/`。确保重试在干净状态下暴露所有问题算子，禁止依赖旧缓存侥幸通过
+24. **步骤7性能算子调优最多 2 轮**（`operator_search.py run --max-rounds 2`），elimination 策略，每轮 benchmark 使用 quick 模式，达标即停；2 轮内未达标**不阻塞流程**，标 `performance_ok=false` 尊重实测结果继续下一步（性能不达标不是终止理由，见约束18）。步骤5精度调优最多 3 轮（见 flagos-eval-comprehensive SKILL.md）
+25. **每次服务启动前必须清理 Triton/FlagGems 编译缓存**。`start_service.sh` 已内置此逻辑。手动启动时也必须执行 `rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/`。确保每次启动在干净状态下暴露所有问题算子，禁止依赖旧缓存侥幸通过
 
 ### 算子控制约束
 
@@ -380,7 +411,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 ### 数据完整性约束
 
 28. **每个 Skill 完成后必须写入对应的 trace JSON**
-29. **workflow 状态字段必须与实际数据一致**。`accuracy_ok=true` 仅当V2精度下降 ≤ 阈值；`performance_ok=true` 仅当 min_ratio ≥ target_ratio
+29. **workflow 状态字段必须与实际数据一致**。`accuracy_ok=true` 仅当V2精度相对退化 ≤ 阈值；`performance_ok=true` 仅当 min_ratio ≥ target_ratio。**禁止直接通过 `update_context.py --set workflow.performance_ok=true` 或 `--set workflow.accuracy_ok=true` 设置**——这两个字段只能由 `operator_search.py`（调优达标时自动设置）或 `update_context.py` 的内置校验逻辑设置。`update_context.py` 已增加写入校验：设置这两个字段为 true 时会自动验证最新结果文件，不达标则拒绝写入
 30. **工具脚本失败后必须读取 `/flagos-workspace/logs/_last_error.json`**，将错误同步到 context.yaml
 31. **流程中断后自动诊断**。新会话启动时应优先读取 `logs/failure_diagnosis.json` 了解中断原因
 32. **编排层生成的 JSON 必须包含 `_meta` 字段说明**

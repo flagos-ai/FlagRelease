@@ -75,6 +75,11 @@
       "Bash(python3 -c *)",
       "Bash(python main.py *)",
       "Bash(python3 issue_reporter.py *)",
+      "Bash(python3 skills/flagos-release/tools/main.py *)",
+      "Bash(python3 skills/flagos-release/tools/upload_to_platform.py *)",
+      "Bash(env *)",
+      "Bash(/opt/conda/bin/python3 *)",
+      "Bash(nohup *)",
 
       "Bash(git checkout *)",
       "Bash(git add *)",

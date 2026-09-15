@@ -44,9 +44,13 @@ import re
 import subprocess
 import sys
 
-DEFAULT_SEARCH_PATHS = ["/data", "/nfs", "/share", "/models", "/home"]
-CONTAINER_SEARCH_PATHS = ["/data", "/models", "/root", "/home", "/workspace", "/mnt", "/opt"]
+DEFAULT_SEARCH_PATHS = ["/mnt/data/", "/data", "/data1", "/data2", "/nfs", "/share", "/models", "/home"]
+CONTAINER_SEARCH_PATHS = ["/mnt/data/", "/data", "/data1", "/data2", "/models", "/root", "/home", "/workspace", "/mnt", "/opt"]
 DEFAULT_MAX_DEPTH = 4
+# modelscope 嵌套缓存形态：<root>/models/<org>--<model>/snapshots/<rev>/<权重>
+# 命中此类目录名时定向放宽深度，避免为覆盖深层缓存而全局加深度拖慢无关大目录(如 /home)
+SNAPSHOT_DIR_NAMES = {"snapshots"}
+SNAPSHOT_DEPTH_BONUS = 2
 SKIP_DIRS = {".git", "__pycache__", "node_modules", "venv", ".venv", ".cache", ".trash"}
 
 # 权重文件排除模式
@@ -123,6 +127,48 @@ def has_weight_files(dir_path: str) -> bool:
     return False
 
 
+_WORD_BOUNDARY_CHARS = "-_./ "
+
+
+def is_word_boundary_match(needle: str, haystack: str) -> bool:
+    """needle 作为完整词段出现在 haystack 中（前后是分隔符或串首/尾）。
+
+    用于收紧包含匹配：拒绝 phi-4 命中 phi4abc 这类无分隔符的粘连子串，
+    但保留 phi-4 命中 phi-4-instruct（分隔符切分的合法词段）。均已小写。
+    """
+    idx = haystack.find(needle)
+    while idx != -1:
+        before_ok = idx == 0 or haystack[idx - 1] in _WORD_BOUNDARY_CHARS
+        after = idx + len(needle)
+        after_ok = after == len(haystack) or haystack[after] in _WORD_BOUNDARY_CHARS
+        if before_ok and after_ok:
+            return True
+        idx = haystack.find(needle, idx + 1)
+    return False
+
+
+def hf_cache_snapshot_dirs(dir_path: str) -> list:
+    """HF cache 形态目录(models--<org>--<name>)下的权重目录 snapshots/<rev>/。
+
+    HF cache 顶层只有 refs/、blobs/、snapshots/ 三个子目录,权重软链在
+    snapshots/<revision>/ 下(目录名为 commit hash,与模型名无关)。
+    命中此类目录时,必须下探 snapshots 子目录才能完成权重校验——
+    否则顶层校验 weight_count=0 误报"无权重"(config 的 _name_or_path
+    为空时策略3 也救不回来)。
+    """
+    snap_dir = os.path.join(dir_path, "snapshots")
+    try:
+        if not os.path.isdir(snap_dir):
+            return []
+        return [
+            os.path.join(snap_dir, rev)
+            for rev in os.listdir(snap_dir)
+            if os.path.isdir(os.path.join(snap_dir, rev)) and not rev.startswith(".")
+        ]
+    except OSError:
+        return []
+
+
 def search_model_dirs(model_name: str, search_paths: list, max_depth: int) -> list:
     """在宿主机路径下搜索目录名匹配的模型目录。
 
@@ -142,8 +188,13 @@ def search_model_dirs(model_name: str, search_paths: list, max_depth: int) -> li
 
         for dirpath, dirnames, filenames in os.walk(root_path):
             # 计算当前深度
-            depth = dirpath[len(root_path):].count(os.sep)
-            if depth >= max_depth:
+            rel = dirpath[len(root_path):]
+            depth = rel.count(os.sep)
+            # modelscope 嵌套缓存(.../snapshots/<rev>/权重)埋得更深，仅当路径确实
+            # 经过 snapshots 目录时才定向放宽深度，其余分支维持 max_depth 剪枝
+            in_snapshot = any(seg in SNAPSHOT_DIR_NAMES for seg in rel.split(os.sep))
+            effective_max = max_depth + SNAPSHOT_DEPTH_BONUS if in_snapshot else max_depth
+            if depth >= effective_max:
                 dirnames.clear()
                 continue
 
@@ -158,8 +209,12 @@ def search_model_dirs(model_name: str, search_paths: list, max_depth: int) -> li
                 full_path = os.path.join(dirpath, d)
                 if d_lower == model_lower:
                     exact_matches.append(full_path)
-                elif model_lower in d_lower:
+                    # HF cache 形态(models--org--name):顶层无权重,
+                    # 权重在 snapshots/<rev>/ 下,同步下探为候选
+                    exact_matches.extend(hf_cache_snapshot_dirs(full_path))
+                elif is_word_boundary_match(model_lower, d_lower):
                     contain_matches.append(full_path)
+                    contain_matches.extend(hf_cache_snapshot_dirs(full_path))
 
             # 策略 3：当前目录有 config.json + 权重文件，检查 config 内容
             # 仅对目录名未匹配的目录执行（避免重复）
@@ -866,13 +921,23 @@ def main():
 
     # 选择 best_match: valid=true 中，exact > contains > config，权重大小优先
     MATCH_PRIORITY = {"exact": 0, "contains": 1, "config": 2}
-    valid_candidates = [c for c in candidates if c["valid"]]
     best_match = None
-    if valid_candidates:
-        valid_candidates.sort(
-            key=lambda c: (MATCH_PRIORITY.get(c["match_type"], 9), -c["total_size_gb"])
-        )
-        best_match = valid_candidates[0]["path"]
+    # 精确同名目录一旦存在即视为用户意图：有效则选其中最大者；即使全部无效，
+    # 也不回退到 contains/config，直接报未找到触发重新下载——绝不把名字里恰好
+    # 含目标名的“兄弟”模型(如 phi-4 → Phi-4-reasoning-plus)静默挂载上去。
+    if exact_matches:
+        valid_exact = [c for c in candidates
+                       if c["match_type"] == "exact" and c["valid"]]
+        if valid_exact:
+            valid_exact.sort(key=lambda c: -c["total_size_gb"])
+            best_match = valid_exact[0]["path"]
+    else:
+        valid_candidates = [c for c in candidates if c["valid"]]
+        if valid_candidates:
+            valid_candidates.sort(
+                key=lambda c: (MATCH_PRIORITY.get(c["match_type"], 9), -c["total_size_gb"])
+            )
+            best_match = valid_candidates[0]["path"]
 
     output = {
         "model_input": args.model,

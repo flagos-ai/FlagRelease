@@ -113,7 +113,9 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
                 if not config["model"].get("tokenizer_path"):
                     config["model"]["tokenizer_path"] = ctx.get("model", {}).get("container_path", "")
                 if not config["model"].get("name"):
-                    config["model"]["name"] = ctx.get("model", {}).get("name", "")
+                    # 优先 service.model_id（实际 served id，vLLM 只认这个）；
+                    # 回退 model.name（可能是含斜杠的仓库路径，会导致 404）
+                    config["model"]["name"] = svc.get("model_id") or ctx.get("model", {}).get("name", "")
                 print(f"[INFO] 从 context.yaml 补充了缺失配置")
             except Exception as e:
                 print(f"[WARN] 读取 context.yaml 失败: {e}")
@@ -210,6 +212,27 @@ def build_command(config: Dict[str, Any], test_case: Dict[str, Any]) -> List[str
     return cmd
 
 
+def _client_env() -> Dict[str, str]:
+    """为 vllm bench serve 客户端子进程构建隔离环境。
+
+    vllm bench serve 是纯 HTTP 压测客户端：构造请求→打到已启动的服务→统计吞吐/延迟，
+    自身不加载模型、不做推理。但 vllm CLI 启动时会无条件按 VLLM_PLUGINS 白名单加载
+    platform 插件。容器为服务端持久化了 VLLM_PLUGINS=fl（/etc/environment），子进程若
+    直接继承，会把 fl 激活为 current_platform；当镜像同时装有厂商 platform 插件
+    （如 ascend 的 vllm_ascend，同注册于 vllm.platform_plugins）时，两个 platform 插件
+    争抢 current_platform → 多插件加载冲突报错（仅厂商镜像偶发，纯 NV 镜像只有 fl 不冲突）。
+
+    客户端本就不需要任何插件（platform 用 CPU 都满足 bench 的"非 unspecified"要求），
+    故将 VLLM_PLUGINS 置空。注意：
+      - 空串语义是"禁用所有 vllm plugin"（见 start_service.sh 注释），vllm 会自动探测
+        真实 platform（如 cuda）；不能用 del，删除会退回自动发现、仍可能加载 fl。
+      - 仅改内存副本，不写 /etc/environment，不影响服务端启动时读取的持久化插件配置。
+    """
+    env = os.environ.copy()
+    env["VLLM_PLUGINS"] = ""
+    return env
+
+
 def run_benchmark(cmd: List[str], num_prompts: int, max_concurrency: Optional[int] = None,
                   dry_run: bool = False) -> Dict[str, Any]:
     """执行单次基准测试"""
@@ -226,7 +249,8 @@ def run_benchmark(cmd: List[str], num_prompts: int, max_concurrency: Optional[in
 
     try:
         proc = subprocess.Popen(
-            full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=_client_env(),
         )
         stdout_lines = []
         import threading, time

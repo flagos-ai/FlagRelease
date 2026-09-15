@@ -1,19 +1,3 @@
-<!--
- Copyright 2026 FlagOS Contributors
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- -->
-
 # Skills 概览
 
 本文档整理了 FlagOS GPU 性能测试自动化框架中所有 Skill 的功能说明和执行顺序。
@@ -75,7 +59,7 @@
         ↓
 4 性能评测           V1/V2 4k1k benchmark 对比 → 异常自动 issue + ≤3 轮算子优化
         ↓
-5 自动发布           打包 + 上传 → qualified 公开 / 不合格私有
+5 自动发布           打包 + 上传 → 统一私有发布（qualified 状态仅标注于报告）
         ↓
 → 报告整理收尾
 ```
@@ -90,7 +74,7 @@
 - 5发布凭证通过环境变量自动读取（Harbor 登录、`MODELSCOPE_TOKEN`、`HF_TOKEN`、`GITHUB_TOKEN`）
 
 **发布条件判定**：`qualified = service_ok AND accuracy_ok AND performance_ok`
-- qualified → 公开发布；不合格 → 私有发布
+- 统一私有发布（qualified 与否仅标注于报告，不影响可见性）
 - 提交了 issue 但优化成功 → 仍算合格
 
 ---
@@ -114,7 +98,7 @@
 │  4 性能评测                  V1/V2 benchmark 对比 → issue + ≤3 轮优化│
 │     (performance-testing)                                           │
 │         ↓                                                           │
-│  5 自动发布                  条件判定 → 打包 + 上传（公开/私有）       │
+│  5 自动发布                  打包 + 上传（统一私有）                   │
 │     (flagos-release)                                                │
 │                                                                     │
 ├─────────────────────────────────────────────────────────────────────┤
@@ -198,7 +182,7 @@
 | **依赖** | 步骤4 |
 | **触发词** | `发布`, `镜像上传`, `镜像打包`, `模型发布`, `release`, `publish` |
 
-**条件判定**：`qualified = service_ok AND accuracy_ok AND performance_ok` → 公开发布；否则私有发布
+**发布可见性**：统一私有发布，不留公开口子。`qualified = service_ok AND accuracy_ok AND performance_ok` 仅作为报告中的达标标注，不影响可见性
 
 ---
 
@@ -258,7 +242,7 @@
 | 是否需要算子优化 | 自动判断 < 80% 触发 |
 | 算子优化搜索 | 全自动搜索（≤3 轮），超限自动标记不合格 |
 | 报告生成 | 自动生成 |
-| 发布条件判定 | qualified → 公开 / 不合格 → 私有 |
+| 发布可见性 | 统一私有（qualified 仅标注于报告） |
 
 ### 需要人工介入的环节
 
@@ -305,8 +289,8 @@
          ↓
 ┌──────────────────────────────┐
 │ flagos-release (5)           │
-│ → 条件判定 qualified?        │
-│ → 打包 + 上传（公开/私有）    │
+│ → 标注 qualified 状态        │
+│ → 打包 + 上传（统一私有）    │
 └──────────────────────────────┘
 
 独立工具:

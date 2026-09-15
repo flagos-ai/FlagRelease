@@ -19,23 +19,6 @@ provides:
   - entry.type
 ---
 
-<!--
- Copyright 2026 FlagOS Contributors
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- -->
-
-
 # 容器准备 Skill
 
 支持三种入口，自动识别用户输入类型。容器就绪后通过 `setup_workspace.sh` 一次性部署所有工具脚本。
@@ -119,15 +102,16 @@ python3 skills/flagos-container-preparation/tools/check_model_local.py \
 
 ## 入口 2 — 已有镜像
 
-1. 自动检测 GPU 厂商
-2. **根据 GPU 厂商选择对应模板**，填充变量后生成 docker run 命令并自动执行
-3. 验证容器状态
+1. **镜像就绪保证（由 `run_pipeline.sh` 编排层完成，本 skill 无需执行）**：pipeline 启动时已做 `docker image inspect` 存在性检查，不在本地则 `docker pull`（直连失败按代理列表重试），全部失败则整个任务明确退出——**执行层禁止再跑 docker pull，也禁止因"镜像不存在/docker run 失败"降级复用旧容器**
+2. 自动检测 GPU 厂商
+3. **根据 GPU 厂商选择对应模板**，填充变量后生成 docker run 命令并自动执行
+4. 验证容器状态
 
 ### docker run 命令模板
 
 | 变量 | 说明 | 来源 |
 |------|------|------|
-| `${CONTAINER_NAME}` | 容器名称 | 自动生成，含冲突检测（见下方命名规则） |
+| `${CONTAINER_NAME}` | 容器名称 | **由 `run_pipeline.sh` 编排层预生成并注入 prompt（含冲突时间戳），执行层必须原样使用，禁止自行生成/判断**（见下方命名规则） |
 | `${MODEL_PATH}` | 宿主机模型路径 | `check_model_local.py` 搜索：**找到则使用实际路径**（如 `/home/admin/workspace/models/Qwen3-0.6B`）；**未找到则使用 `/data/models/<model_name>`**（预创建并挂载空目录，容器内下载） |
 | `${CONTAINER_MODEL_PATH}` | 容器内模型路径 | 与 `${MODEL_PATH}` 保持一致（宿主机路径原样映射到容器内同路径） |
 | `${WORKSPACE_PATH}` | 宿主机工作目录 | `/data/flagos-workspace` |
@@ -138,13 +122,16 @@ python3 skills/flagos-container-preparation/tools/check_model_local.py \
 
 ### 容器命名与冲突处理（镜像模式专用）
 
-容器名生成规则：
+容器名由 `run_pipeline.sh` 编排层**确定性预生成**（规则如下），通过 prompt 注入执行层：
 1. 基础名称：`<model_short_name>_flagos`（如 `Qwen3-8B_flagos`）
 2. 创建前检测：`docker inspect --type=container <基础名称>`
 3. 如不存在 → 直接使用基础名称
-4. 如已存在 → 追加时间戳：`<model_short_name>_flagos_<MMDD_HHMM>`（如 `Qwen3-8B_flagos_0410_1500`）
+4. 如已存在 → 追加时间戳：`<model_short_name>_flagos_<MMDD_HHMM>`（同分钟再冲突则 `<MMDD_HHMMSS>`）
 
-**禁止行为**：镜像模式下禁止复用任何已存在的容器，即使该容器是由同一镜像创建的。必须通过 `docker run` 创建全新容器。
+**禁止行为**（真机事故教训：曾因 docker run 失败降级复用旧容器，导致旧镜像跑新任务、结果错误归属）：
+- 镜像模式下禁止复用任何已存在的容器，即使该容器是由同一镜像创建的。必须通过 `docker run` 创建全新容器
+- docker run 失败**不是**复用的理由——修正变量重试/借鉴挂载参数重试（容器名不变）仍失败则终止任务
+- 执行层禁止改动编排层注入的容器名
 
 #### 模板 A：NVIDIA
 
@@ -216,13 +203,74 @@ docker run -d --name ${CONTAINER_NAME} \
 
 ```bash
 docker run -d --name ${CONTAINER_NAME} \
-    --net=host --pid=host --ipc=host --privileged \
+    --net=host --ipc=host --privileged \
     -v /usr/bin/cnmon:/usr/bin/cnmon \
     -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
     -v ${WORKSPACE_PATH:-/data/flagos-workspace/${MODEL_NAME}}:/flagos-workspace \
     -v /data:/data \
     ${IMAGE} sleep infinity
 ```
+
+#### 模板 F：Hygon DCU（海光）
+
+```bash
+docker run -d --name ${CONTAINER_NAME} \
+    --net=host --ipc=host \
+    --device=/dev/kfd --device=/dev/mkfd --device=/dev/dri \
+    --group-add video \
+    -v /opt/hyhal:/opt/hyhal \
+    -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
+    -v ${WORKSPACE_PATH:-/data/flagos-workspace/${MODEL_NAME}}:/flagos-workspace \
+    -v /data:/data \
+    ${IMAGE} sleep infinity
+```
+
+> **Hygon 识别**：宿主机存在 `/opt/hyhal` 或 `/opt/dtk` 目录，或 `hy-smi` 命令可用，或 `detect_gpu.py` 返回 `vendor=hygon`。
+> **必需设备**：`/dev/kfd`（ROCm kernel driver）、`/dev/mkfd`（Hygon DCU 特有）、`/dev/dri`（DRM 渲染）。缺少 `/dev/mkfd` 时 DCU 不可用。
+
+#### 模板 G：平头哥 PPU（T-Head，vendor=zhenwu）
+
+```bash
+docker run -itd --name=${CONTAINER_NAME} \
+    --privileged --network=host --ipc=host \
+    --shm-size=${SHM_SIZE:-512g} \
+    --ulimit memlock=-1 --ulimit stack=67108864 \
+    --security-opt seccomp=unconfined \
+    -v /dev:/dev \
+    -v /usr/local/PPU_SDK:/usr/local/PPU_SDK \
+    -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
+    -v ${WORKSPACE_PATH:-/data/flagos-workspace/${MODEL_NAME}}:/flagos-workspace \
+    -e XPU_VISIBLE_DEVICES=all \
+    -e XPU_DEVICE_ORDER=PCI_BUS_ID \
+    ${IMAGE} sleep infinity
+```
+
+> **PPU/zhenwu 识别**：`ppu-smi` 命令可用，或 `/usr/local/PPU_SDK` 目录存在，或 `nvidia-smi` 输出含 `PPU-SMI`/`HGGC Version`，或 `detect_gpu.py` 返回 `vendor=zhenwu`。
+> **CUDA 兼容卡**：PPU-ZW810E 走 CUDA 兼容栈——`torch.cuda` 可用，容器内 vLLM 用 `CUDA_VISIBLE_DEVICES` 选卡（`gpu.visible_devices_env=CUDA_VISIBLE_DEVICES`）；`XPU_VISIBLE_DEVICES=all` 用于容器整体放开物理卡。
+> **设备节点**：真实节点为 `/dev/alixpu`、`/dev/alixpu_ctl`、`/dev/alixpu_ppu0..N`，用 `-v /dev:/dev` 整体挂载覆盖（勿写死 `/dev/xpu`）。
+> **nvidia-smi 陷阱**：PPU 机的 `nvidia-smi`（位于 `/usr/local/PPU_SDK/CUDA_SDK/bin`）是 PPU wrapper，输出 PPU-SMI 而非真 NVIDIA，但支持标准 CSV query，选卡/显存检测可正常复用。
+
+#### 模板 H：天数智芯（Iluvatar，vendor=iluvatar）
+
+```bash
+docker run -itd --name=${CONTAINER_NAME} \
+    --privileged --network=host --ipc=host \
+    --shm-size=${SHM_SIZE:-64g} \
+    -v /lib/modules:/lib/modules \
+    -v /usr/src:/usr/src \
+    -v /dev:/dev \
+    -v /usr/local/corex/bin/ixsmi:/usr/local/corex/bin/ixsmi \
+    -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
+    -v ${WORKSPACE_PATH:-/data/flagos-workspace/${MODEL_NAME}}:/flagos-workspace \
+    -v /data:/data \
+    ${IMAGE}
+```
+
+> **天数/Iluvatar 识别**：`ixsmi` 命令可用，或 `/usr/local/corex` 目录存在，或 `detect_gpu.py` 返回 `vendor=iluvatar`（历史别名 `tianshu` 已归一为 `iluvatar`）。
+> **⚠️ ixsmi 必须 bind-mount**：基础镜像内 `/usr/local/corex` 的 `corex-<ver>` 目录**不含 ixsmi**（该工具由宿主机 corex 驱动自带），不挂载则容器内检不到 GPU，平台校验直接报"容器内没有 ixsmi"。对齐既有厂商做法：Ascend 挂 `npu-smi`、Cambricon 挂 `cnmon`、Hygon 挂 `/opt/hyhal`。
+> **挂软链路径，勿写版本目录**：宿主机 `/usr/local/corex` 为指向 `corex-<ver>` 的软链，故写 `/usr/local/corex/bin/ixsmi`；写死 `/usr/local/corex-4.5.0.20260509/bin/ixsmi` 会因宿主机 corex 版本不同（4.4.0 / 20260629 等）而失效。
+> **挂载前先确认源存在**（`ls -l /usr/local/corex/bin/ixsmi`）：`docker -v` 的源路径不存在时**会静默创建同名目录**——结果是容器内 `ixsmi` 成了目录、依然检不到 GPU，还在宿主机留下垃圾目录。
+> **设备与内核模块**：天数设备节点随卡型/驱动版本变化，用 `-v /dev:/dev` 整体挂载（勿写死具体节点）；`/lib/modules`、`/usr/src` 供 ixml 驱动内核模块使用。
 
 **模板规则**：
 - 业务环境变量（`USE_FLAGGEMS`、`VLLM_USE_V1` 等）不写入模板，由后续 skill 按需添加
@@ -271,7 +319,7 @@ model:
   local_path: "<宿主机路径>"
   container_path: "<容器内路径>"
 gpu:
-  vendor: "<nvidia|huawei|mthreads|metax|cambricon>"
+  vendor: "<nvidia|huawei|mthreads|metax|cambricon|hygon|zhenwu>"
   type: "<GPU 型号>"
   count: <数量>
 workspace:

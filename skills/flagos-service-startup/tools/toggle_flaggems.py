@@ -100,13 +100,6 @@ def find_model_runner_files():
         search_dirs.append(str(vllm_path.parent))
     except ImportError:
         pass
-    try:
-        import sglang
-        sgl_path = Path(sglang.__path__[0])
-        search_dirs.append(str(sgl_path.parent))
-    except ImportError:
-        pass
-
     for search_dir in search_dirs:
         search_path = Path(search_dir)
         if not search_path.exists():
@@ -583,16 +576,24 @@ def _compute_enabled_from_disabled(disabled_ops):
 
 
 def normalize_ops_to_func_names(ops):
-    """将算子名列表从大写显示名转换为小写函数名（纯规则转换，不依赖 gems.txt）"""
+    """将算子名列表从大写显示名或 debug 行格式转换为小写函数名（纯规则转换，不依赖 gems.txt）"""
     if not ops:
         return ops
-    if all(op == op.lower() and ' ' not in op for op in ops):
+    if all(op == op.lower() and ' ' not in op and 'flag_gems' not in op for op in ops):
         return ops
 
     result = []
     for op in ops:
+        # Handle [DEBUG] flag_gems.ops.X.Y: GEMS Z format
+        m = re.match(r'\[DEBUG\]\s*flag_gems\.ops\.(\w+)\.(\w+):', op, re.IGNORECASE)
+        if m:
+            func_name = m.group(2)
+            result.append(func_name)
+            continue
+        # Fallback: display name format (e.g., "GEMS ADD", "ADD")
         s = re.sub(r'\s*\(.*?\)', '', op)
         s = s.split(',')[0].strip()
+        s = re.sub(r'^GEMS\s+', '', s, flags=re.IGNORECASE)
         s = re.sub(r'-hopper$', '', s, flags=re.IGNORECASE)
         s = s.replace('.STABLE', '_stable')
         s = re.sub(r'\s+FORWARD$', '', s, flags=re.IGNORECASE)
@@ -666,6 +667,36 @@ def modify_enable_call(files, enabled_ops=None, disabled_ops=None):
 
     if not files:
         files = find_model_runner_files()
+
+    # plugin 场景守卫（步骤3崩溃恢复等路径）：plugin dispatch 的 worker 只读 VLLM_FL_* env、
+    # 不读控制文件（VLLM_FL_PREFER_ENABLED=true 使注入代码 pass），写控制文件会导致
+    # 禁用不生效、崩溃重试空转。此处改走 blacklist env 持久化（崩溃恢复已知禁用列表，
+    # 黑名单无需全量算子列表）。共享实现见 flagos_op_config（容器内同目录可 import）。
+    if disabled_ops and detect_plugin_mode():
+        try:
+            from flagos_op_config import persist_env, clear_env
+            merged = set(normalize_ops_to_func_names(disabled_ops))
+            existing = os.environ.get("VLLM_FL_FLAGOS_BLACKLIST", "")
+            merged |= {op for op in existing.split(",") if op}
+            clear_env("VLLM_FL_FLAGOS_WHITELIST")  # 黑名单生效需清除冲突的白名单
+            persist_env("USE_FLAGGEMS", "1")
+            persist_env("VLLM_FL_PREFER_ENABLED", "true")
+            persist_env("VLLM_FL_FLAGOS_BLACKLIST", ",".join(sorted(merged)))
+            print(f"  [plugin] 禁用算子经 VLLM_FL_FLAGOS_BLACKLIST 持久化: {sorted(merged)}")
+            return {
+                "action": "modify-enable",
+                "capabilities": caps,
+                "results": [{
+                    "file": "(plugin_env)",
+                    "method": "plugin_env_blacklist",
+                    "success": True,
+                    "disabled_ops": sorted(merged),
+                }],
+                "timestamp": datetime.now().isoformat(),
+            }
+        except ImportError:
+            print("  ⚠ flagos_op_config 不可用（宿主机/旧容器），降级走控制文件路径"
+                  "（plugin 下可能不生效，建议重新部署工具脚本）")
 
     results = []
     for filepath in files:

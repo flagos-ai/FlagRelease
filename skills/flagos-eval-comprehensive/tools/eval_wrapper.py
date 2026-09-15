@@ -28,11 +28,22 @@
   python3 eval_wrapper.py --eval-cmd "python3 fast_gpqa.py --config fast_gpqa_config.yaml --output /flagos-workspace/results/gpqa_native.json" \
       --service-log /flagos-workspace/logs/startup_native.log \
       --stall-timeout 300 \
-      --max-timeout 3600
+      --progress-timeout 1800 \
+      --max-timeout 7200
 
 输出约定:
   正常: 最后一行为 JSON (结果文件内容)，退出码 0
   异常: [EVAL_ERROR] 开头的结构化错误，退出码 1
+
+进度看门狗（防线3）:
+  从评测日志尾部解析 evalscope 的 tqdm 进度计数（如 "49/50"），按阶段区别对待：
+  - 收尾停滞（进度已到 total 且超过 --progress-timeout 不推进）= 收尾卡死
+    （判分/写结果死锁，Qwen3-30B 事故形态），终止评测进程并报错，
+    替代干等 max_timeout 总闸。
+  - 生成中停滞（进度 < total）= 当前题未完成，正常慢推理（慢芯片 + 长思考链
+    单题可达 20-40 分钟）与 runaway 在此阶段不可区分，只提示不杀；
+    runaway 的止血由 fast_gpqa 的 max_tokens cap 保证（复读会撞 cap 结束生成）。
+  "慢≠死"原则不变：生成中停滞一律等待；只有评测收尾停滞才杀。
 """
 
 import argparse
@@ -50,12 +61,12 @@ FATAL_LOG_PATTERNS = [
     (re.compile(r"(?:CUDA\s+)?out\s+of\s+memory|torch\.cuda\.OutOfMemoryError|\bOOM\b", re.I), "oom"),
     (re.compile(r"CUDA\s*(?:error|Error|ERROR)\s*:|CUDAError|no kernel image", re.I), "cuda_error"),
     (re.compile(r"Segmentation fault|SIGSEGV|SIGKILL", re.I), "segfault"),
-    (re.compile(r"Killed\s+.*(?:vllm|sglang)|killed by signal", re.I), "process_killed"),
+    (re.compile(r"Killed\s+.*(?:vllm)|killed by signal", re.I), "process_killed"),
     (re.compile(r"Address already in use", re.I), "port_conflict"),
     (re.compile(r"Connection refused", re.I), "connection_refused"),
 ]
 
-SERVICE_PROCESS_PATTERNS = ("vllm", "sglang", "flagscale")
+SERVICE_PROCESS_PATTERNS = ("vllm", "flagscale")
 
 
 def check_service_alive() -> bool:
@@ -67,25 +78,6 @@ def check_service_alive() -> bool:
                     return True
     except Exception:
         return True
-    return False
-
-
-def check_service_healthy(api_base: str) -> bool:
-    """检查推理服务是否仍在正常响应（进程存活 + API 可达）"""
-    if not check_service_alive():
-        return False
-    import urllib.request
-    import urllib.error
-    base = api_base.rstrip("/")
-    if not base.endswith("/v1"):
-        base += "/v1"
-    try:
-        req = urllib.request.Request(f"{base}/models", headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            if resp.status == 200:
-                return True
-    except Exception:
-        pass
     return False
 
 
@@ -112,6 +104,35 @@ def scan_log_fatal(log_path: str, offset: int) -> tuple:
             if pat.search(s):
                 return new_offset, {"type": sig_type, "line": s[:300]}
     return new_offset, None
+
+
+def extract_progress_from_log(log_path: str, tail_bytes: int = 16384) -> Optional[tuple]:
+    """从评测日志尾部解析最近一次 evalscope 进度计数。
+
+    真实格式（evalscope INFO 行）:
+      Evaluating[gpqa_diamond] 100%| 50/50 [Elapsed: 00:40 < Remaining: 00:00,  3.30it/s]
+      Evaluating[gpqa_diamond]  50%| 25/50 [Elapsed: 01:00 < Remaining: 00:26,  1.04s/it]
+
+    Returns:
+        (done, total) 或 None（无进度信息：探测阶段 / 非 tqdm 评测）
+    """
+    try:
+        size = os.path.getsize(log_path)
+        if size <= 0:
+            return None
+        with open(log_path, "rb") as f:
+            f.seek(max(0, size - tail_bytes))
+            tail = f.read().decode("utf-8", errors="replace")
+        # 同一行内匹配 "Evaluating[xx] ... N/M"，取最后一个出现（最新进度）
+        matches = re.findall(r"Evaluating\[[^\]]+\].*?(\d+)\s*/\s*(\d+)", tail)
+        if not matches:
+            return None
+        done, total = int(matches[-1][0]), int(matches[-1][1])
+        if total <= 0:
+            return None
+        return done, total
+    except OSError:
+        return None
 
 
 def get_eval_output_file(eval_cmd: str) -> Optional[str]:
@@ -169,6 +190,57 @@ def inject_model_name(eval_cmd: str, api_base: str = "http://localhost:8000/v1")
     return eval_cmd
 
 
+def list_served_models(api_base: str) -> Optional[list]:
+    """查询 /v1/models，返回服务端实际提供的模型 id 列表。
+
+    返回 None 表示探测失败（服务未就绪/网络异常）——调用方据此区分
+    "探测不到（无法判断）" 与 "探到了但不含目标模型（确定不匹配）"。
+    """
+    import urllib.request
+    base = api_base.rstrip("/")
+    if not base.endswith("/v1"):
+        base += "/v1"
+    try:
+        req = urllib.request.Request(f"{base}/models", headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+    except Exception:
+        return None
+
+
+def extract_model_name(eval_cmd: str) -> Optional[str]:
+    """从 eval_cmd 中提取 --model-name 的值（支持单引号/双引号/无引号）。"""
+    m = re.search(r"--model-name\s+(?:'([^']*)'|\"([^\"]*)\"|(\S+))", eval_cmd)
+    if not m:
+        return None
+    return m.group(1) or m.group(2) or m.group(3)
+
+
+def assert_model_available(eval_cmd: str, api_base: str) -> Optional[str]:
+    """开跑前一致性断言：确认最终要测的 model_name 确实由服务端提供。
+
+    返回 None 表示校验通过（或无法探测服务端、跳过校验，交由后续监控兜底）；
+    返回非空字符串表示确定不匹配的错误信息（调用方据此 fail-fast）。
+
+    仅在"探到了服务端模型列表、但其中不含目标模型"时判为错误——避免服务
+    尚未就绪导致的误杀（那种情况探测返回 None，走既有的服务健康/超时逻辑）。
+    """
+    target = extract_model_name(eval_cmd)
+    if not target:
+        # 没有 --model-name（自动注入也失败）：无从校验，交由评测脚本自身处理
+        return None
+    served = list_served_models(api_base)
+    if served is None:
+        print(f"[WRAPPER] 模型名校验跳过：/v1/models 暂不可达（服务可能未就绪），交由后续监控兜底")
+        return None
+    if target in served:
+        print(f"[WRAPPER] 模型名校验通过：'{target}' 已由服务端提供")
+        return None
+    return (f"context/命令中的模型名 '{target}' 与服务端不匹配。"
+            f"服务端 /v1/models 实际提供: {served}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="评测包装器")
     parser.add_argument("--eval-cmd", required=True, help="评测命令（在当前目录执行）")
@@ -179,8 +251,11 @@ def main():
                         help="API 地址（显式指定时优先级最高，否则从 context-yaml 读取 port）")
     parser.add_argument("--stall-timeout", type=int, default=300,
                         help="评测进程无新输出超过此秒数视为卡死 (默认 300s)")
-    parser.add_argument("--max-timeout", type=int, default=3600,
-                        help="评测最大允许时间 (默认 3600s)")
+    parser.add_argument("--progress-timeout", type=int, default=1800,
+                        help="评测收尾（进度已到 total）停滞超过此秒数判定收尾卡死并终止；"
+                             "生成中停滞只提示不杀 (默认 1800s=30min)")
+    parser.add_argument("--max-timeout", type=int, default=7200,
+                        help="评测最大允许时间 (默认 7200s = 2h)")
     parser.add_argument("--check-interval", type=int, default=15,
                         help="监控检查间隔 (默认 15s)")
     args = parser.parse_args()
@@ -188,6 +263,7 @@ def main():
     eval_cmd = args.eval_cmd
     service_log = args.service_log
     stall_timeout = args.stall_timeout
+    progress_timeout = args.progress_timeout
     max_timeout = args.max_timeout
     check_interval = args.check_interval
 
@@ -204,6 +280,18 @@ def main():
     # 自动注入模型名（防止使用模板默认值或遗漏）
     eval_cmd = inject_model_name(eval_cmd, api_base)
 
+    # 自动注入 --api-base（防止 fast_gpqa.py 使用默认端口而非实际端口）
+    if "--api-base" not in eval_cmd and "fast_gpqa.py" in eval_cmd:
+        eval_cmd = eval_cmd.replace("fast_gpqa.py", f"fast_gpqa.py --api-base '{api_base}'", 1)
+        print(f"[WRAPPER] 自动注入 api_base: {api_base}")
+
+    # 开跑前一致性断言：模型名写错/服务端没有该模型 → 每题必失败、白跑数十分钟。
+    # 在发第一道题前 fail-fast，几秒内暴露问题，并打出服务端实际模型名便于定位根因。
+    mismatch = assert_model_available(eval_cmd, api_base)
+    if mismatch:
+        emit_error("model_mismatch", mismatch, "")
+        return 1
+
     output_file = get_eval_output_file(eval_cmd)
 
     # 记录服务日志初始偏移
@@ -214,7 +302,7 @@ def main():
     # 启动评测进程，捕获 stdout/stderr 到临时文件
     eval_log = "/tmp/eval_wrapper_output.log"
     print(f"[WRAPPER] 启动评测: {eval_cmd}")
-    print(f"[WRAPPER] 监控参数: stall_timeout={stall_timeout}s, max_timeout={max_timeout}s")
+    print(f"[WRAPPER] 监控参数: stall_timeout={stall_timeout}s, progress_timeout={progress_timeout}s, max_timeout={max_timeout}s")
     if service_log:
         print(f"[WRAPPER] 服务日志: {service_log}")
     sys.stdout.flush()
@@ -234,6 +322,10 @@ def main():
     stall_extensions = 0
     service_dead_since = None
     grace_period = 60  # 前 60s 不检查服务（可能还在初始化）
+    # 进度看门狗状态（防线3）
+    last_progress = None          # 最近一次解析到的进度 (done, total)
+    last_progress_time = start_time
+    progress_watch_started = False
 
     try:
         while True:
@@ -256,7 +348,15 @@ def main():
                 emit_error("timeout", f"评测超时 ({int(elapsed)}s > {max_timeout}s)", get_tail(eval_log))
                 return 1
 
-            # 3. 输出停滞检测
+            # 3. 输出停滞——仅作信息提示，不作为查杀依据
+            # 设计原则："慢"不等于"死"。评测慢的模型（大模型/thinking）在 evalscope
+            # 黑盒里长时间无 stdout 属正常现象；只要服务没报错、进程还活着，就让它跑。
+            # 真正的生死判定交给下面三条真实证据：
+            #   ④ 服务日志致命信号（OOM/CUDA/segfault）→ 报错快速失败
+            #   ⑤ 服务进程已退出 → 终止
+            #   ② max_timeout 总闸 → 兜底
+            # 停滞本身不再主动探测 /v1/models（服务满负荷推理时该端点常超时，会把
+            # "在忙"误判成"死了"），也不再杀进程。
             try:
                 current_size = os.path.getsize(eval_log)
             except OSError:
@@ -268,20 +368,63 @@ def main():
             else:
                 stall_duration = time.time() - last_output_time
                 if stall_duration > stall_timeout:
-                    # 先检查服务是否仍在正常运行
-                    if check_service_healthy(api_base):
-                        stall_extensions += 1
-                        print(f"[WRAPPER] 输出停滞 {int(stall_duration)}s，但服务仍正常响应，延长等待 600s（第 {stall_extensions} 次延长）")
-                        last_output_time = time.time()
-                    else:
-                        print(f"[WRAPPER] 评测输出停滞 ({int(stall_duration)}s)，服务无响应，终止进程")
+                    stall_extensions += 1
+                    print(f"[WRAPPER] 评测输出已停滞 {int(stall_duration)}s（评测慢属正常，未报错、进程存活即继续等待；"
+                          f"第 {stall_extensions} 次提示，总耗时 {int(elapsed)}s / 上限 {max_timeout}s）")
+                    sys.stdout.flush()
+                    last_output_time = time.time()
+
+            # 3.5 进度看门狗（防线3）：按"生成中"与"收尾"两种停滞区别对待。
+            # 核心原则（与上面停滞检测同源）："慢"≠"死"。"进度不推进"本身不能
+            # 判死——evalscope 的 tqdm 是每题生成完成后才 +1，单题推理期间进度条
+            # 天然停滞，慢芯片 + 长思考链的正常单题可能 20-40 分钟（万 token 级
+            # 思考链 @ 5-10 token/s），若按时间阈值一律杀会误杀正常长推理。
+            # 分界信号是"评测处于哪个阶段"：
+            #   - 生成中（progress < total）：停滞 = 当前题未完成，可能是正常慢推理，
+            #     也可能是 runaway。二者在此阶段不可区分（runaway 时服务端也在
+            #     持续吐 token）。此时不杀——runaway 的止血由防线1（max_tokens cap）
+            #     保证：复读再长也会撞 cap 结束生成。只打印提示。
+            #   - 收尾（progress == total）：所有题生成完毕，evalscope 进入判分/聚合/
+            #     写结果阶段。判分是本地规则匹配，正常几分钟内完成，没有正当理由
+            #     停滞超过 progress_timeout —— 此时停滞 = 收尾卡死（Qwen3-30B 事故
+            #     形态），杀。
+            # 总闸仍有 max_timeout 兜底，任何阶段超预算（thinking 模型 22500s / 普通 7200s，
+            # 由编排层按题数×单题×1.25 注入）一律终止。
+            progress = extract_progress_from_log(eval_log)
+            if progress is not None:
+                if not progress_watch_started:
+                    progress_watch_started = True
+                    last_progress = progress
+                    last_progress_time = time.time()
+                elif progress != last_progress:
+                    last_progress = progress
+                    last_progress_time = time.time()
+                    print(f"[WRAPPER] 评测进度推进: {last_progress[0]}/{last_progress[1]} (总耗时 {int(elapsed)}s)")
+                    sys.stdout.flush()
+                elif time.time() - last_progress_time > progress_timeout:
+                    if last_progress[0] >= last_progress[1]:
+                        # 收尾停滞 → 真卡死，终止
+                        print(f"[WRAPPER] 评测收尾停滞: 已到 {last_progress[0]}/{last_progress[1]} 但评测进程"
+                              f"停滞超过 {progress_timeout}s（判分/写结果不应这么久），判定收尾卡死，终止评测")
                         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                         time.sleep(3)
                         if proc.poll() is None:
                             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                         proc.wait()
-                        emit_error("stall", f"评测输出停滞 {int(stall_duration)}s，服务无响应，进程已终止", get_tail(eval_log))
+                        emit_error(
+                            "progress_stalled",
+                            f"评测进度已到 {last_progress[0]}/{last_progress[1]} 但收尾停滞超过 {progress_timeout}s"
+                            f"（疑似评测收尾卡死，如判分/写结果死锁）",
+                            get_tail(eval_log),
+                        )
                         return 1
+                    else:
+                        # 生成中停滞 → 慢推理或 runaway，提示但不杀（cap 兜底）
+                        print(f"[WRAPPER] 评测进度在 {last_progress[0]}/{last_progress[1]} 停滞 {progress_timeout}s："
+                              f"单题长推理属正常（慢芯片/长思考链），继续等待；"
+                              f"若为 runaway 复读将由 max_tokens cap 兜底，收尾停滞才会终止")
+                        sys.stdout.flush()
+                        last_progress_time = time.time()
 
             # 4. 服务日志致命信号
             if service_log and elapsed > grace_period:

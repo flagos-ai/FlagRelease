@@ -413,6 +413,14 @@ def main():
     benchmarks["native"] = load_benchmark(args.native)
     benchmark_names.append("native")
 
+    # 合成基线（无 V1 场景）在 _meta 写入 target_ratio_override（=1.0），
+    # 使达标线 = 合成基线 ×1.0 = V2 首测 ×1.05。实测 V1 基线无此字段 → 沿用 --target-ratio。
+    effective_target_ratio = args.target_ratio
+    _override = ((benchmarks["native"] or {}).get("_meta", {}) or {}).get("target_ratio_override")
+    if isinstance(_override, (int, float)) and not isinstance(_override, bool) and _override > 0:
+        effective_target_ratio = float(_override)
+        print(f"检测到合成基线 target_ratio_override={_override} → 达标比率覆盖为 {effective_target_ratio}")
+
     if args.flagos_initial:
         benchmarks["flagos_initial"] = load_benchmark(args.flagos_initial)
         benchmark_names.append("flagos_initial")
@@ -434,16 +442,16 @@ def main():
 
     # 打印摘要
     if args.format == "markdown":
-        print_markdown_table(rows, benchmark_names, target_ratio=args.target_ratio)
+        print_markdown_table(rows, benchmark_names, target_ratio=effective_target_ratio)
     else:
-        print_comparison(rows, benchmark_names, target_ratio=args.target_ratio)
+        print_comparison(rows, benchmark_names, target_ratio=effective_target_ratio)
 
     # 保存 CSV
     save_csv(rows, args.output, benchmark_names)
 
     # 检查是否达标
-    target_check = check_target(rows, benchmark_names, args.target_ratio)
-    print(f"\n目标检查 (target >= {args.target_ratio*100:.0f}% native):")
+    target_check = check_target(rows, benchmark_names, effective_target_ratio)
+    print(f"\n目标检查 (target >= {effective_target_ratio*100:.0f}% native):")
     for name, passed in target_check.items():
         status = "PASS" if passed else "NEED OPTIMIZATION"
         print(f"  {name}: {status}")

@@ -46,13 +46,19 @@ from typing import Any, Dict, List, Optional, Tuple
 # 按市场占有率排序，常见厂商优先匹配
 
 GPU_VENDORS: List[Tuple[str, str, str, str]] = [
+    # zhenwu(平头哥 PPU-ZW810E)是 CUDA 兼容卡，其 nvidia-smi 实为 PPU wrapper（输出 PPU-SMI/HGGC Version），
+    # 也支持标准 CSV query。以 ppu-smi 作为唯一识别命令（真 NVIDIA 机无此命令）实现天然消歧，
+    # 必须排在 nvidia 之前，否则会被 nvidia-smi 抢先匹配。显存查询走 wrapper nvidia-smi（见 _FREE_QUERY_CMDS）。
+    ("zhenwu",    "ppu-smi",      "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits", "CUDA_VISIBLE_DEVICES"),
     ("nvidia",    "nvidia-smi",   "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits", "CUDA_VISIBLE_DEVICES"),
     ("huawei",    "npu-smi",      "npu-smi info",                           "ASCEND_RT_VISIBLE_DEVICES"),
     ("hygon",     "rocm-smi",     "rocm-smi --showmeminfo vram --csv",      "HIP_VISIBLE_DEVICES"),
     ("cambricon", "cnmon",        "cnmon info",                              "MLU_VISIBLE_DEVICES"),
     ("mthreads",  "mthreads-gmi", "mthreads-gmi -q",                        "MUSA_VISIBLE_DEVICES"),
     ("kunlunxin", "xpu_smi",     "xpu_smi",                                 "XPU_VISIBLE_DEVICES"),
-    ("tianshu",   "ixsmi",       "ixsmi -q",                                "CUDA_VISIBLE_DEVICES"),
+    # 注册名用规范名 iluvatar（与 chip_spec.yaml/chip_detector.py/context 全项目一致）；
+    # tianshu 是历史别名，经 _VENDOR_ALIASES 归一到 iluvatar。
+    ("iluvatar",  "ixsmi",       "ixsmi -q",                                "CUDA_VISIBLE_DEVICES"),
     ("metax",     "mx-smi",      "mx-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits", "CUDA_VISIBLE_DEVICES"),
 ]
 
@@ -60,10 +66,13 @@ GPU_VENDORS: List[Tuple[str, str, str, str]] = [
 VENDOR_KEYWORDS = {
     "nvidia": ["nvidia", "geforce", "tesla", "quadro", "rtx", "a100", "a800", "h100", "h800", "l40", "v100"],
     "huawei": ["ascend", "atlas"],
-    "hygon": ["hygon", "dcu"],
+    "hygon": ["hygon", "dcu", "bw200", "bw3000", "bw100"],
     "cambricon": ["mlu"],
     "mthreads": ["mtt", "musa"],
     "kunlunxin": ["kunlun", "xpu"],
+    "metax": ["metax", "c500", "c550", "n100"],
+    "zhenwu": ["ppu-zw810e", "ppu", "zw810", "zw810e"],
+    "iluvatar": ["iluvatar", "tianshu", "bi-v150", "biv150", "bi-v200", "biv200", "tg-v200", "tgv200"],
 }
 
 
@@ -216,8 +225,14 @@ def _detect_via_cli() -> Optional[Dict[str, Any]]:
         if output is None:
             continue
 
-        # 解析输出
-        if vendor == "nvidia":
+        # Hygon/MetaX 歧义消解：rocm-smi 存在时需进一步判断
+        if vendor == "hygon" and cli_cmd == "rocm-smi":
+            actual_vendor = _disambiguate_rocm_vendor()
+            if actual_vendor and actual_vendor != "hygon":
+                continue  # 不是 Hygon，跳过让后续厂商匹配
+
+        # 解析输出（zhenwu 的 nvidia-smi wrapper 同为 CSV 格式，复用 nvidia 解析）
+        if vendor in ("nvidia", "zhenwu"):
             info = _parse_nvidia_smi(output)
         else:
             info = _parse_generic_cli(vendor, output)
@@ -234,6 +249,34 @@ def _detect_via_cli() -> Optional[Dict[str, Any]]:
             }
 
     return None
+
+
+def _disambiguate_rocm_vendor() -> str:
+    """当 rocm-smi 存在时，区分 Hygon DCU 和 AMD GPU。
+
+    Hygon 特征：/opt/hyhal 或 /opt/dtk 目录存在，或 hy-smi 命令存在，
+    或 torch.cuda.get_device_name() 含 BW 前缀（BW200/BW3000）。
+    """
+    # 检查 Hygon 特有目录
+    if os.path.isdir("/opt/hyhal") or os.path.isdir("/opt/dtk"):
+        return "hygon"
+    # 检查 hy-smi 命令
+    if _cli_exists("hy-smi"):
+        return "hygon"
+    # 检查 /dev/mkfd（Hygon DCU 特有设备）
+    if os.path.exists("/dev/mkfd"):
+        return "hygon"
+    # 通过 torch 获取设备名
+    try:
+        import torch
+        if torch.cuda.is_available():
+            dev_name = torch.cuda.get_device_name(0).upper()
+            if any(kw in dev_name for kw in ["BW", "HYGON", "DCU"]):
+                return "hygon"
+    except Exception:
+        pass
+    # 默认视为 AMD（非 Hygon）
+    return "amd"
 
 
 # =============================================================================
@@ -272,7 +315,18 @@ def detect_gpu() -> Optional[Dict[str, Any]]:
 # 各厂商的 per-GPU 显存查询命令
 _FREE_QUERY_CMDS = {
     "nvidia":    "nvidia-smi --query-gpu=index,memory.used,memory.total,memory.free --format=csv,noheader,nounits",
+    # zhenwu 复用 PPU 的 nvidia-smi wrapper，支持含 free 列的标准 CSV（真机实测）
+    "zhenwu":    "nvidia-smi --query-gpu=index,memory.used,memory.total,memory.free --format=csv,noheader,nounits",
+    # iluvatar(天数)的 ixsmi 支持标准 CSV query（含 free 列，真机实测）
+    "iluvatar":  "ixsmi --query-gpu=index,memory.used,memory.total,memory.free --format=csv,noheader,nounits",
     "metax":     "mx-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits",
+}
+
+# 厂商别名归一化：调用方可能传入历史别名（tianshu）而非规范名（iluvatar）。
+# 归一方向与 chip_spec.yaml/chip_detector.py 一致（均往 iluvatar 收敛）。
+# key 统一小写，归一时先对入参 .lower() 容错大小写。
+_VENDOR_ALIASES = {
+    "tianshu": "iluvatar",
 }
 
 FREE_THRESHOLD_PCT = 5.0  # 显存占用低于此百分比视为空闲
@@ -321,7 +375,7 @@ def _query_gpu_free_for_vendor(vendor: str) -> List[Dict[str, Any]]:
     if vendor in _FREE_QUERY_CMDS:
         output = _run_cmd(_FREE_QUERY_CMDS[vendor])
         if output:
-            has_free = vendor == "nvidia"
+            has_free = vendor in ("nvidia", "zhenwu", "iluvatar")
             return _parse_csv_gpu_memory(output, has_free_col=has_free)
 
     # 华为昇腾
@@ -355,6 +409,10 @@ def check_gpu_free(vendor: str = None) -> Dict[str, Any]:
     if not vendor:
         info = detect_gpu()
         vendor = info["vendor"] if info else "unknown"
+
+    # 归一化厂商别名（如 tianshu → iluvatar），大小写不敏感
+    if vendor:
+        vendor = _VENDOR_ALIASES.get(vendor.lower(), vendor.lower())
 
     # 查询 per-GPU 显存
     details = _query_gpu_free_for_vendor(vendor)
@@ -390,6 +448,10 @@ def main():
     parser.add_argument("--output", "-o", help="输出 JSON 文件路径")
     parser.add_argument("--check-free", action="store_true", help="检测 per-GPU 显存占用")
     parser.add_argument("--vendor", help="指定厂商（跳过自动探测）")
+    # 结果本就以 JSON 打到 stdout；--json/--output-json 为无操作兼容项，
+    # 容忍编排层手拼命令时误加，避免 argparse 退出码2 导致 GPU 检测静默失败
+    parser.add_argument("--json", "--output-json", dest="json_compat",
+                        action="store_true", help="兼容项（默认即输出 JSON，无额外效果）")
     args = parser.parse_args()
 
     if args.check_free:

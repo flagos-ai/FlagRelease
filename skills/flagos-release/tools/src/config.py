@@ -17,6 +17,7 @@
 从 context.yaml 加载配置，并提供配置验证和自动填充
 """
 import os
+import sys
 import json
 import subprocess
 from dataclasses import dataclass, field
@@ -24,6 +25,19 @@ from typing import List
 import yaml
 
 from .chip_detector import ChipDetector, ChipVendor, VENDOR_NAMES, sanitize_docker_tag
+
+# 芯片厂商×型号统一规范表（项目 shared/ 目录）。用于命名后缀与厂商归一化。
+# 缺失时降级：naming_suffix 回退原 vendor 名，normalize 回退原值（不改变旧行为）。
+_chip_spec = None
+try:
+    _shared_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "shared")
+    )
+    if _shared_dir not in sys.path:
+        sys.path.insert(0, _shared_dir)
+    import chip_spec as _chip_spec  # type: ignore
+except Exception:
+    _chip_spec = None
 
 
 @dataclass
@@ -39,6 +53,10 @@ class ChipConfig:
     gems_version: str = ""
     cx: str = "none"
     date_tag: str = ""
+    # date_tag 的跨进程一致种子（原始 workflow_start 字符串，ISO8601）。
+    # 由 from_context 从 context 的 timing.workflow_start 读入，auto_fill_config
+    # 据此生成 date_tag，确保 push/README/upload 等多进程发布段拿到同一时间戳。
+    date_tag_seed: str = ""
     driver_version: str = ""
     sdk_version: str = ""
     torch_version: str = ""
@@ -68,7 +86,8 @@ class PublishConfig:
     weights_dir: str = ""
     # 自动读取评测结果目录（步骤4/5产出），填入 README
     results_dir: str = ""
-    # 仓库可见性
+    # 仓库可见性：恒为私有。发布点(publish.py)已硬编码私有，不再读此字段决定可见性，
+    # 保留仅为向后兼容。禁止改 False 或据此恢复公开发布分支。
     private: bool = True
     # 已有的 Harbor 镜像地址（跳过 commit/tag/push）
     existing_harbor_image: str = ""
@@ -100,9 +119,14 @@ class ModelInfo:
     flagrelease_name: str = ""
     flagrelease_name_pre: str = ""
     image_harbor_path: str = ""
+    # README 中 docker pull 命令展示的镜像地址覆盖：
+    # V4 发布时 README 仍推荐 V3(Max) 镜像（V4 是减算子实验版，交付推荐用 V3），
+    # 由 from_context 从 versions.v3.image_url 回填。为空则回退 image_harbor_path。
+    readme_image_override: str = ""
     container_run_cmd: str = ""
     serve_start_cmd: str = ""
     serve_infer_cmd: str = ""
+    canonical_model_path: str = ""
 
 
 @dataclass
@@ -113,7 +137,10 @@ class PipelineConfig:
     host_workspace_base: str = ""  # /data/flagos-workspace/<model>，由 context.yaml workspace.host_path 填充
     config_persisted: bool = False
     plugin_image_mode: bool = False  # plugin 模式：镜像 tag 追加 -plugin，仓库名追加 -plugin
-    plugin_qualified: bool = False   # plugin 精度+性能均达标时为 True，否则跳过 README 更新
+    plugin_qualified: bool = False   # plugin 精度达标(accuracy_ok)即为 True→更新 README；性能不门控
+    version_tag: str = "v2"          # 发布版本标签：v1/v2/v3/v4
+    also_tag: str = ""               # 额外镜像 tag 版本（V2=V3 同镜像双 tag 场景）
+    incompatible_tag: str = ""       # 不适配标记名（设置后只打标记不发布版本镜像）
 
     # 各阶段配置
     chip: ChipConfig = field(default_factory=ChipConfig)
@@ -152,29 +179,28 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
             {'metric': method, 'origin': ev['v1_score'], 'flagos': ev['v2_score']}
         ]
 
-    # serve_start_cmd
+    # serve_start_cmd + container_run_cmd
+    # 核心原则：README 中下载路径、docker run 挂载路径、vllm serve 模型路径三者必须一致
+    # 统一使用 canonical_model_path 作为唯一模型路径
+    import re
     svc = ctx.get('service', {})
     runtime = ctx.get('runtime', {})
     commands = ctx.get('commands', {})
     model_short = model.get('name', '').split('/')[-1] if model.get('name') else ''
     flagrelease_name = f"{model_short}-FlagOS" if model_short else ''
-    user_model_path = f"/data/{flagrelease_name}" if flagrelease_name else model.get('container_path', '')
+    canonical_model_path = f"/data/{flagrelease_name}" if flagrelease_name else model.get('container_path', '/data/model')
 
     if commands.get('serve_start'):
-        import re
         serve_cmd = commands['serve_start']
-        # 替换模型路径为用户下载路径
-        container_path = model.get('container_path', '')
-        if container_path and user_model_path:
-            serve_cmd = serve_cmd.replace(container_path, user_model_path)
+        # 用正则替换 vllm serve 后的模型路径参数（第一个非 -- 参数）
+        serve_cmd = re.sub(r'(vllm\s+serve\s+)\S+', rf'\1{canonical_model_path}', serve_cmd)
         # 替换端口为默认 8000
         serve_cmd = re.sub(r'--port\s+\d+', '--port 8000', serve_cmd)
         config.model_info.serve_start_cmd = serve_cmd
     else:
-        port = svc.get('port', 8000)
         tp = runtime.get('tp_size') or 1
         max_model_len = svc.get('max_model_len', '')
-        cmd_parts = [f"vllm serve {user_model_path}",
+        cmd_parts = [f"vllm serve {canonical_model_path}",
                      f"--host 0.0.0.0 --port 8000",
                      f"--tensor-parallel-size {tp}",
                      f"--served-model-name {model_short}" if model_short else None,
@@ -185,19 +211,27 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
 
     # container_run_cmd (优先从 context commands 读取实际命令)
     if commands.get('container_run'):
-        import re
         run_cmd = commands['container_run']
-        # 替换镜像为 {{IMAGE}} 占位符（镜像通常是最后一个非选项参数或可通过已知镜像名匹配）
+        # 替换镜像为目标镜像占位符
         image_name = ctx.get('image', {}).get('name', '')
         if image_name:
             run_cmd = run_cmd.replace(image_name, '{{IMAGE}}')
+        # 兜底：image.name 与实际 run 命令中的镜像不一致时替换落空，
+        # 基础镜像名会原样流进 README（pull/run 不一致），按 harbor 镜像 token 定位兜底替换
+        if '{{IMAGE}}' not in run_cmd:
+            run_cmd = re.sub(r'harbor\S+', '{{IMAGE}}', run_cmd, count=1)
         # 移除 workspace 挂载（-v ...:/flagos-workspace）
         run_cmd = re.sub(r'\s*-v\s+\S+:/flagos-workspace', '', run_cmd)
-        # 替换模型挂载为简化的 -v /data:/data
+        # 替换所有模型相关挂载为 -v /data:/data（canonical_model_path 在 /data/ 下，天然可达）
         container_path = model.get('container_path', '')
         local_path = model.get('local_path', '')
-        if container_path and local_path:
+        if container_path:
             run_cmd = re.sub(r'-v\s+\S+:' + re.escape(container_path), '-v /data:/data', run_cmd)
+        elif local_path:
+            run_cmd = re.sub(r'-v\s+' + re.escape(local_path) + r':\S+', '-v /data:/data', run_cmd)
+        # 如果命令中没有 -v /data:/data（原始命令无模型挂载或替换未命中），追加
+        if '-v /data:/data' not in run_cmd and '-v /data:' not in run_cmd:
+            run_cmd = re.sub(r'(docker\s+run\s+)', r'\1-v /data:/data ', run_cmd)
         # 替换容器名为通用名
         run_cmd = re.sub(r'--name[= ]\S+', '--name flagos', run_cmd)
         config.model_info.container_run_cmd = run_cmd
@@ -206,6 +240,22 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
             "docker run -itd --gpus=all --network=host "
             "-v /data:/data --name flagos {{IMAGE}}"
         )
+
+    # 天数(Iluvatar)：ixsmi 由宿主机 corex 驱动提供，基础镜像的 /usr/local/corex 下
+    # corex-<ver> 目录不含该工具，必须 bind-mount 进容器，否则容器内检不到 GPU
+    # （平台校验报"容器内没有 ixsmi"）。对齐既有厂商做法：Ascend 挂 npu-smi、
+    # Cambricon 挂 cnmon、Hygon 挂 /opt/hyhal。挂宿主机软链路径而非具体版本目录，
+    # 可跨 corex 版本。刻意放在 if/else 之后统一注入：commands.container_run 缺失
+    # 走兜底命令时同样补上，不留"换个口子又漏挂"的缺口；已含 ixsmi 则不重复注入。
+    if ((ctx.get('gpu', {}) or {}).get('vendor', '') == 'iluvatar'
+            and 'ixsmi' not in config.model_info.container_run_cmd):
+        config.model_info.container_run_cmd = re.sub(
+            r'\{\{IMAGE\}\}',
+            '-v /usr/local/corex/bin/ixsmi:/usr/local/corex/bin/ixsmi {{IMAGE}}',
+            config.model_info.container_run_cmd, count=1)
+
+    # 保存 canonical_model_path 供模板使用
+    config.model_info.canonical_model_path = canonical_model_path
 
     # ---- chip ----
     gpu = ctx.get('gpu', {})
@@ -221,10 +271,16 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     if flagtree_ver:
         config.chip.tree = flagtree_ver
 
+    # date_tag 跨进程一致种子：run-scoped 的 workflow_start（见 auto_fill_config /
+    # _tag_timestamp_from_seed）。发布分多进程执行（push/双tag/README/upload/一致性
+    # 重试），各进程各自 now() 会错开时间戳，导致 README 的 docker pull 指向 Harbor
+    # 上未推送的 tag。改由此稳定种子统一，缺失时 auto_fill 回退 now()。
+    config.chip.date_tag_seed = str((ctx.get('timing', {}) or {}).get('workflow_start', '') or '')
+
     # ---- publish ----
     config.publish.tag_image = True
     config.publish.push_harbor = True
-    # 统一私有发布，达标与否在总结报告中注明
+    # 统一私有发布（发布点已硬编码私有，不留公开口子），达标与否在总结报告中注明
     workflow = ctx.get('workflow', {})
     config.publish.private = True
     config.config_persisted = workflow.get('config_persisted', False)
@@ -274,6 +330,17 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     # 有 token 则启用对应平台上传
     config.publish.publish_modelscope = bool(config.publish.modelscope_token)
     config.publish.publish_huggingface = bool(config.publish.huggingface_token)
+
+    # ===== 需求 D（用户 2026-07-20 定稿）：V2 精度不达标时不对外发布 =====
+    # 非 plugin 模式(步骤8 V2 发布)：仅当 V2 精度达标(workflow.accuracy_ok=true) 才创建
+    # ModelScope/HuggingFace 仓库并上传权重；V2 精度不达标 → 仅 Harbor 私有镜像(过程产物)，
+    # 不对外发布。若后续 V3(plugin)达标，由步骤13的 full-publish 兜底补发对外仓库。
+    # 说明：plugin 模式(步骤13)不走此分支，其 README/发布门控由 plugin_qualified 决定。
+    if not config.plugin_image_mode:
+        v2_accuracy_ok = bool(workflow.get('accuracy_ok'))
+        if not v2_accuracy_ok:
+            config.publish.publish_modelscope = False
+            config.publish.publish_huggingface = False
     # results_dir 用于 README 自动读取评测结果
     workspace = ctx.get('workspace', {})
     container_workspace = workspace.get('container_path', '/flagos-workspace')
@@ -305,10 +372,24 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
             if len(parts) == 2:
                 config.publish.base_huggingface_repo_id = parts[1]
 
-    # plugin_workflow.qualified → plugin_qualified
+    # plugin_qualified → 决定是否更新 README。
+    # 现行规则（用户 2026-07 定稿）：精度是唯一硬闸门，性能不门控。
+    # 只要 plugin 精度达标（accuracy_ok=true）即视为合格、应更新 README；
+    # plugin_workflow.qualified 含性能门控(performance_ok)，不能用作 README 门控，
+    # 否则精度达标但性能<80%的 V3 会被误判"不达标"跳过 README
+    # （历史事故：DeepSeek-R1-0528 精度62%达标、性能77.9%，README被误跳）。
     plugin_wf = ctx.get('plugin_workflow', {})
-    if plugin_wf.get('qualified', False):
+    if plugin_wf.get('accuracy_ok', False) or plugin_wf.get('qualified', False):
         config.plugin_qualified = True
+
+    # V4 发布时 README 仍推荐 V3(Max) 镜像：从 versions.v3 读取已发布的 V3 镜像地址存起来，
+    # 供 publish 阶段在 version_tag==v4 时覆盖 README 的 docker pull 命令。
+    # 此处 version_tag 尚未设置（main.py 在 from_context 之后才设），故无条件读取、
+    # 由 publish 侧按 version_tag 决定是否启用。字段名兼容 image_url / harbor_image。
+    v3_node = ctx.get('versions', {}).get('v3', {}) or {}
+    v3_image = str(v3_node.get('image_url', '') or v3_node.get('harbor_image', '') or '').strip()
+    if v3_image:
+        config.model_info.readme_image_override = v3_image
 
     return config
 
@@ -357,6 +438,25 @@ def _read_json_field(filepath: str, field: str):
         return data.get(field)
     except (FileNotFoundError, json.JSONDecodeError, KeyError):
         return None
+
+
+def _tag_timestamp_from_seed(seed: str) -> str:
+    """把 run-scoped 的 workflow_start(ISO8601) 转成 tag 时间戳 YYYYmmddHHMM。
+
+    发布分多进程执行（push / 双tag / README / upload / 一致性重试），若各进程各自
+    datetime.now() 生成 date_tag，时间戳会错开，导致 README 的 docker pull 指向
+    Harbor 上不存在的 tag。改用 context 里 run-scoped 的稳定 workflow_start 作种子，
+    各进程得到同一 tag。种子缺失/解析失败返回 ""，调用方回退 now()（不劣于旧行为）。
+    """
+    if not seed:
+        return ""
+    import datetime
+    # fromisoformat 在 <3.11 不接受结尾 'Z'，先剥除；带偏移量(+08:00)可直接解析
+    s = str(seed).strip().rstrip("Zz")
+    try:
+        return datetime.datetime.fromisoformat(s).strftime("%Y%m%d%H%M")
+    except (ValueError, TypeError):
+        return ""
 
 
 def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
@@ -420,12 +520,25 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
     # ==================== 模型名称 ====================
     model_name = _extract_model_name(config.model_info.source_of_model_weights)
     vendor_name = config.chip.vendor or "unknown"
+    # 厂商名归一到规范 key（huawei→ascend、tianshu→iluvatar 等），
+    # 再取规范命名后缀，保证命名/tag/报告三处统一。
+    if _chip_spec and vendor_name and vendor_name != "unknown":
+        try:
+            vendor_name = _chip_spec.normalize_vendor(vendor_name) or vendor_name
+        except Exception:
+            pass
+    config.chip.vendor = vendor_name  # 回写归一化结果，供后续 tag 生成复用
+    # 命名后缀：规范表可用则查表，否则回退归一化后的 vendor 名
+    naming_vendor = vendor_name
+    if _chip_spec and vendor_name and vendor_name != "unknown":
+        try:
+            naming_vendor = _chip_spec.naming_suffix(vendor_name) or vendor_name
+        except Exception:
+            pass
 
     if not config.model_info.output_name and model_name:
-        if vendor_name == "nvidia":
-            config.model_info.output_name = model_name
-        else:
-            config.model_info.output_name = f"{model_name}-{vendor_name}"
+        # 全部厂商统一 xxx-{vendor}-FlagOS（含 nvidia，按规范表要求）
+        config.model_info.output_name = f"{model_name}-{naming_vendor}"
 
     if not config.model_info.flagrelease_name and config.model_info.output_name:
         suffix = "-FlagOS"
@@ -439,17 +552,41 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
             config.model_info.flagrelease_name_pre = model_name.split('-')[0]
 
     # ==================== 镜像 tag ====================
+    # V3 (Max) 发布到 flagrelease-project 仓库（交付 SVT 验收），其余版本（V1/V2/V4）走 public
+    if getattr(config, 'version_tag', None) == "v3":
+        if config.chip.harbor_registry == "harbor.baai.ac.cn/flagrelease-public":
+            config.chip.harbor_registry = "harbor.baai.ac.cn/flagrelease-project"
+
     if not config.chip.date_tag:
-        tag = datetime.datetime.now().strftime("%Y%m%d%H%M")
-        config.chip.date_tag = f"{tag}-plugin" if config.plugin_image_mode else tag
+        # 优先用跨进程一致的 workflow_start 种子；缺失/解析失败才回退 now()（不劣于旧行为）
+        tag = _tag_timestamp_from_seed(config.chip.date_tag_seed) or datetime.datetime.now().strftime("%Y%m%d%H%M")
+        # 根据 version_tag 决定后缀
+        version_tag = getattr(config, 'version_tag', None)
+        if version_tag:
+            version_suffix_map = {"v1": "-v1", "v2": "-v2", "v3": "-v3", "v4": "-v4"}
+            suffix = version_suffix_map.get(version_tag, "")
+        elif config.plugin_image_mode:
+            suffix = "-plugin"  # 向后兼容：未设置 version_tag 但设置了 plugin_image_mode
+        else:
+            suffix = ""
+        config.chip.date_tag = f"{tag}{suffix}"
 
     if not config.publish.image_target_tag and config.publish.existing_harbor_image:
         config.publish.image_target_tag = config.publish.existing_harbor_image
 
     if not config.publish.image_target_tag and config.chip.auto_generate_tag:
         from .chip_detector import ChipVersionInfo, generate_image_tag as _generate_tag
+        # ChipVendor 枚举可能未收录新增厂商(zhenwu/arm/sunrise/enflame)，构造失败时
+        # 兜底为 None——vendor_name 已显式传给 _generate_tag，info.vendor 仅作兜底不影响命名。
+        try:
+            _chip_vendor_enum = (
+                ChipVendor(vendor_name)
+                if vendor_name and vendor_name != "unknown" else None
+            )
+        except ValueError:
+            _chip_vendor_enum = None
         chip_info = ChipVersionInfo(
-            vendor=ChipVendor(vendor_name) if vendor_name and vendor_name != "unknown" else None,
+            vendor=_chip_vendor_enum,
             driver_version=config.chip.driver_version,
             sdk_version=config.chip.sdk_version,
             torch_backend=env_info.torch_backend if env_info and env_info.torch_backend else "",
@@ -460,15 +597,23 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
         ) if vendor_name and vendor_name != "unknown" else None
 
         if chip_info:
-            config.publish.image_target_tag = _generate_tag(
-                info=chip_info,
-                model_name=model_name or "unknown",
-                harbor_registry=config.chip.harbor_registry,
-                tree=config.chip.tree,
-                gems_version=config.chip.gems_version,
-                cx=config.chip.cx,
-                date_tag=config.chip.date_tag,
-            )
+            # 委托 get_image_name.sh 采集容器实际版本生成镜像名。
+            # 采集失败不应中断整个 auto_fill（后续还有 harbor_path/仓库ID/命令等填充），
+            # 留空 tag 交由 validate_config 报缺失，行为不比旧字符串拼接脆弱。
+            try:
+                config.publish.image_target_tag = _generate_tag(
+                    info=chip_info,
+                    model_name=model_name or "unknown",
+                    harbor_registry=config.chip.harbor_registry,
+                    tree=config.chip.tree,
+                    gems_version=config.chip.gems_version,
+                    cx=config.chip.cx,
+                    date_tag=config.chip.date_tag,
+                    container_name=config.container_name,
+                    vendor_name=vendor_name,
+                )
+            except Exception as e:
+                print(f"  ⚠ 自动生成镜像 tag 失败，留空待手动指定: {e}")
 
     if not config.publish.harbor_path and config.publish.image_target_tag:
         config.publish.harbor_path = config.publish.image_target_tag

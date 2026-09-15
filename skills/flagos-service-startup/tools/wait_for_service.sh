@@ -39,7 +39,7 @@ PORT=8000
 HOST="127.0.0.1"
 MODEL_NAME=""
 TIMEOUT=120          # 无活动超时（秒），不传 --log-path 时作为绝对超时
-MAX_TIMEOUT=1800     # 绝对上限（秒）
+MAX_TIMEOUT=5760     # 绝对上限（秒，1.6h；部分模型服务启动需 1.5h+）
 LOG_PATH=""
 MODE="default"       # default / native / flagos
 
@@ -52,6 +52,7 @@ while [[ $# -gt 0 ]]; do
         --timeout) TIMEOUT="$2"; shift 2 ;;
         --max-timeout) MAX_TIMEOUT="$2"; shift 2 ;;
         --log-path) LOG_PATH="$2"; shift 2 ;;
+        --from-start) FROM_START=true; shift ;;
         --mode) MODE="$2"; shift 2 ;;
         -h|--help)
             echo "Usage: wait_for_service.sh [OPTIONS]"
@@ -110,7 +111,11 @@ FATAL_LINE=""
 
 # 初始化日志跟踪
 if [ "$DYNAMIC_MODE" = true ] && [ -f "$LOG_PATH" ]; then
-    LAST_LOG_SIZE=$(wc -c < "$LOG_PATH" 2>/dev/null || echo 0)
+    if [ "${FROM_START:-false}" = true ]; then
+        LAST_LOG_SIZE=0
+    else
+        LAST_LOG_SIZE=$(wc -c < "$LOG_PATH" 2>/dev/null || echo 0)
+    fi
     LAST_ACTIVITY_TIME=$(date +%s)
 fi
 
@@ -163,7 +168,7 @@ FATAL = [
     (re.compile(r'(?:CUDA\s+)?out\s+of\s+memory|torch\.cuda\.OutOfMemoryError|\bOOM\b', re.I), 'oom'),
     (re.compile(r'CUDA\s*(?:error|Error|ERROR)\s*:|CUDAError|no kernel image is available', re.I), 'cuda_error'),
     (re.compile(r'Segmentation fault|SIGSEGV|SIGKILL', re.I), 'segfault'),
-    (re.compile(r'Killed\s+.*(?:vllm|sglang)|killed by signal', re.I), 'killed'),
+    (re.compile(r'Killed\s+.*(?:vllm)|killed by signal', re.I), 'killed'),
     (re.compile(r'Address already in use', re.I), 'port_conflict'),
     (re.compile(r'ModuleNotFoundError|ImportError:\s', re.I), 'import_error'),
     (re.compile(r'OSError.*(?:model|tokenizer).*not found|Cannot load model', re.I), 'model_not_found'),
@@ -201,6 +206,13 @@ for line in lines:
 
     # ERROR 行标记（仍检测致命信号，但跳过进度匹配）
     is_error_line = bool(re.match(r'^(?:\([^)]+\)\s+)?ERROR\s', s))
+
+    # 已知无害警告跳过
+    # 注意：本段整体嵌在外层 python3 -c 的双引号内，此处务必用单引号；
+    # 用内层双引号会提前闭合外层引号，使 bash 传给 python 的代码损坏、
+    # NameError 非零退出，analyze_new_lines 走兜底分支导致进度信号恒丢失。
+    if 'vllm._C' in s or 'Failed to import from vllm._C' in s:
+        continue
 
     # 致命信号
     for pat, label in FATAL:
@@ -273,7 +285,7 @@ check_process_activity() {
         fi
     fi
     if [ -z "$PID" ]; then
-        PID=$(ps -ef | grep -E "vllm.entrypoints|sglang.srt|multiproc_worker" | grep -v grep | awk '{print $2}' | head -1)
+        PID=$(ps -ef | grep -E "vllm.entrypoints|multiproc_worker" | grep -v grep | awk '{print $2}' | head -1)
     fi
     if [ -z "$PID" ]; then
         echo "dead"
@@ -408,7 +420,7 @@ print_failure_diagnostics() {
     # 检查进程
     echo ""
     echo "进程状态:"
-    ps -ef | grep -E "vllm|sglang|flagscale" | grep -v grep || echo "  无相关进程"
+    ps -ef | grep -E "vllm|flagscale" | grep -v grep || echo "  无相关进程"
 
     # 检查端口
     echo ""
@@ -418,11 +430,11 @@ print_failure_diagnostics() {
     elif command -v netstat &>/dev/null; then
         netstat -tlnp 2>/dev/null | grep ":${PORT}" || echo "  端口 ${PORT} 未监听"
     else
-        # ss/netstat 都没有，用 curl 探测
-        if curl -s --connect-timeout 1 "http://127.0.0.1:${PORT}/" &>/dev/null; then
+        # ss/netstat 都没有，用 python 探测
+        if python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${PORT}/', timeout=1)" &>/dev/null; then
             echo "  端口 ${PORT} 有响应"
         else
-            echo "  端口 ${PORT} 未监听（ss/netstat 不可用，curl 探测）"
+            echo "  端口 ${PORT} 未监听（ss/netstat 不可用，python 探测）"
         fi
     fi
 
@@ -542,7 +554,14 @@ print(json.dumps({
     fi
 
     # === CHECK 2: 端点检查 ===
-    RESPONSE=$(curl -s --connect-timeout 3 "${MODELS_URL}" 2>/dev/null || true)
+    RESPONSE=$(python3 -c "
+import urllib.request, urllib.error
+try:
+    r = urllib.request.urlopen('${MODELS_URL}', timeout=3)
+    print(r.read().decode())
+except:
+    pass
+" 2>/dev/null || true)
 
     if [ -n "$RESPONSE" ]; then
         HAS_DATA=$(echo "$RESPONSE" | python3 -c "
@@ -564,29 +583,40 @@ except:
                 echo "[${ELAPSED}s] 服务已响应，但模型名不匹配: 期望=${MODEL_NAME}, 实际=${MODEL_ID}"
             fi
 
-            # 残留服务检测：日志未确认 service_ready 时，端口响应视为可疑
-            if [ "$LOG_CONFIRMED_READY" = false ] && [ "$DYNAMIC_MODE" = true ]; then
+            # 残留服务检测：端口响应但本次启动无任何证据时才视为可疑。
+            # 关键修正：区分"真残留"与"服务已起但日志无 service_ready 短语"。
+            #   - 真残留 = 旧进程占端口、本次根本没有新服务启动 → PHASES_OBSERVED 为空（无任何进度信号）
+            #   - 国产厂商 vLLM 分支（vllm-ascend/寒武纪/海光等）或 vLLM+plugin 的 V1.3 常见情况 =
+            #     服务确实起来了（端口能响应、观测到 loading_weights/gpu_initialized/port_bound 等进度），
+            #     只是就绪日志短语与原生 vLLM 的 "Application startup complete" 不同，抓不到 service_ready。
+            # 因此：只要本次观测到任何 PROGRESS 信号（PHASES_OBSERVED 非空），端口响应即视为新服务就绪，放行。
+            if [ "$LOG_CONFIRMED_READY" = false ] && [ "$DYNAMIC_MODE" = true ] && [ -z "$PHASES_OBSERVED" ]; then
                 STALE_COUNT=$((STALE_COUNT + 1))
                 if [ "$STALE_COUNT" -ge 3 ]; then
                     echo ""
                     echo "=========================================="
-                    echo "✗ 检测到残留服务（端口 ${PORT} 响应但启动日志无 service_ready）"
+                    echo "✗ 检测到残留服务（端口 ${PORT} 响应但本次启动无任何进度信号）"
                     echo "=========================================="
-                    echo "  原因: 旧 vLLM 进程仍占用端口，新服务未能启动"
+                    echo "  原因: 旧 vLLM 进程仍占用端口，新服务未能启动（日志无 loading_weights/gpu_initialized 等进度）"
                     echo "  修复: 先执行 docker restart \$CONTAINER && sleep 5，再重新启动服务"
                     echo "  推荐: 使用 safe_restart_service.sh 一体化重启"
                     echo "=========================================="
                     echo ""
                     echo "JSON_RESULT:"
-                    echo '{"success":false,"error":"stale_service","error_detail":"端口被残留服务占用，需要 docker restart 清理"}'
+                    echo '{"success":false,"error":"stale_service","error_detail":"端口被残留服务占用（本次无启动进度信号），需要 docker restart 清理"}'
                     exit 2
                 fi
-                echo "[${ELAPSED}s] ⚠ 端口 ${PORT} 已响应但启动日志未确认 service_ready，疑似残留服务 (${STALE_COUNT}/3)"
+                echo "[${ELAPSED}s] ⚠ 端口 ${PORT} 已响应但本次启动无进度信号，疑似残留服务 (${STALE_COUNT}/3)"
                 echo "  响应模型: ${MODEL_ID}"
-                echo "  等待日志确认或致命信号..."
+                echo "  等待启动进度或致命信号..."
                 sleep "$INTERVAL"
                 ELAPSED=$((ELAPSED + INTERVAL))
                 continue
+            fi
+            # 端口响应 + 本次观测到进度信号但无 service_ready 短语（国产厂商常见）→ 判为就绪
+            if [ "$LOG_CONFIRMED_READY" = false ] && [ -n "$PHASES_OBSERVED" ]; then
+                echo "[${ELAPSED}s] 端口 ${PORT} 已响应，本次启动已观测到进度信号（${PHASES_OBSERVED}）"
+                echo "  日志无标准 service_ready 短语（厂商定制启动器常见），按端口响应判定就绪"
             fi
 
             # 非动态模式下的瞬时响应警告：端口在首次轮询即响应，可能是残留服务
@@ -609,13 +639,21 @@ except:
 " 2>/dev/null || echo "unknown")
 
             report_success "$MODEL_ID" "$MAX_MODEL_LEN"
+
+            # 自动写入 service_ok=true（消除对 LLM 记忆的依赖）
+            if [ -f /flagos-workspace/scripts/update_context.py ]; then
+                PATH=/opt/conda/bin:$PATH python3 /flagos-workspace/scripts/update_context.py \
+                    --set workflow.service_ok=true --json 2>/dev/null && \
+                    echo "  [auto] workflow.service_ok=true 已写入 context.yaml" || true
+            fi
+
             exit 0
         fi
     fi
 
     # === CHECK 3: 进程存活检测（仅动态模式，启动 10s 后） ===
     if [ "$DYNAMIC_MODE" = true ] && [ "$ELAPSED" -gt 10 ]; then
-        PROCESS_COUNT=$(ps -ef | grep -E "vllm|sglang|flagscale" | grep -v grep | wc -l)
+        PROCESS_COUNT=$(ps -ef | grep -E "vllm|flagscale" | grep -v grep | wc -l)
         if [ "$PROCESS_COUNT" -eq 0 ]; then
             echo ""
             echo "=========================================="

@@ -1,23 +1,8 @@
 #!/bin/bash
-
-# Copyright 2026 FlagOS Contributors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 # FlagOS 批量串行迁移 — 逐个调用 run_pipeline.sh
 #
 # 用法:
-#   bash prompts/run_batch.sh <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--proxy proxy1,proxy2,...] [--timeout seconds]
+#   bash prompts/run_batch.sh <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--datasets ds1,ds2,...] [--proxy proxy1,proxy2,...] [--timeout seconds] [--feishu-webhook URL]
 #
 # 任务列表文件格式（每行一个任务，| 分隔）:
 #   # 注释行和空行自动跳过
@@ -25,19 +10,33 @@
 #   my_existing_container | Qwen2.5-7B-Instruct
 #
 # 选项:
-#   --verbose        透传给 run_pipeline.sh，显示全量终端输出
-#   --stop-on-error  某个任务失败后终止整个批次（默认继续下一个）
-#   --force          强制重跑已完成的任务（默认跳过 workflow.all_done=true 的任务）
+#   --verbose         透传给 run_pipeline.sh，显示全量终端输出
+#   --stop-on-error   某个任务失败后终止整个批次（默认继续下一个）
+#   --force           强制重跑已完成的任务（默认跳过 workflow.all_done=true 的任务）
+#   --datasets        精度评测数据集（逗号分隔，gpqa_diamond/mmlu/math_500），全局透传给每个任务；
+#                     默认 gpqa_diamond（任务列表格式不变）
+#   --feishu-webhook  飞书自定义机器人 Webhook 地址；不传则不发送飞书通知
+#
+# 双 pipeline 说明:
+#   本脚本仅做批量调度，分支路由（A/B/native）由 run_pipeline.sh 内部按环境检测
+#   （inspect_env.py 输出的 entry_image_type）自动完成，任务列表无需指定分支。
+#     - gems_tree        → 分支 A（简单：V1裸启动→V2代码注入→V3切plugin→V4减算子→V5）
+#     - gems_tree_plugin → 分支 B（复杂：V1三选→V2(2.1/2.2)→V3(3.1/3.2)→V4→V5）
+#     - native           → native 简化流程（仅评测，不发多版本）
+#   汇总表额外展示每个任务实际走的分支与已产出版本（V1-V5，含 V1 变体/不适配标记），
+#   数据来自 /data/flagos-workspace/<model>/config/context_snapshot.yaml。
 #
 # 断点续跑:
 #   默认检查 /data/flagos-workspace/<model>/config/context_snapshot.yaml 中的
 #   workflow.all_done 字段，已完成的任务自动跳过。中断后重跑同一个任务列表即可续跑。
+#   注：续跑粒度为"整任务"——某任务中途失败（如仅 V4 发布失败）重跑时会重头执行，
+#   版本级续跑由 run_pipeline.sh 内部的 workflow_ledger 台账负责，本脚本不做版本级调度。
 
 set -uo pipefail
 
 # ========== 参数解析 ==========
 if [ $# -lt 6 ]; then
-    echo "用法: $0 <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force]"
+    echo "用法: $0 <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--datasets ds1,ds2,...] [--feishu-webhook URL]"
     echo ""
     echo "任务列表文件格式（每行 | 分隔）:"
     echo "  镜像地址或容器名 | 模型名"
@@ -51,14 +50,18 @@ STOP_ON_ERROR=false
 FORCE=false
 VERBOSE_FLAG=""
 PROXY_FLAG=""
-MODEL_TIMEOUT=36000  # 单模型超时（秒），默认 10 小时
+DATASET_FLAG=""
+MODEL_TIMEOUT=86400  # 单模型超时（秒），默认 24 小时
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --stop-on-error) STOP_ON_ERROR=true; shift ;;
         --force) FORCE=true; shift ;;
         --verbose) VERBOSE_FLAG="--verbose"; shift ;;
+        --datasets) DATASET_FLAG="--datasets $2"; shift 2 ;;
         --proxy) PROXY_FLAG="--proxy $2"; shift 2 ;;
         --timeout) MODEL_TIMEOUT="$2"; shift 2 ;;
+        # export 后 detached worker 与子进程 run_pipeline.sh 均自动继承此变量。
+        --feishu-webhook) export FEISHU_WEBHOOK_URL="$2"; shift 2 ;;
         *) echo "未知参数: $1"; exit 1 ;;
     esac
 done
@@ -67,6 +70,24 @@ if [ ! -f "$TASK_FILE" ]; then
     echo "错误: 任务列表文件不存在: $TASK_FILE"
     exit 1
 fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROGRESS_RUNNER="${PROJECT_ROOT}/tools/notifications/progress_runner.sh"
+
+# 汇报默认 live 模式：每个模型跑完立即后台分析并通知（控制流仍完全异步、不阻塞主迁移）。
+# 允许调用方显式覆盖（after-batch=批次结束统一分析；external=只写事件不消费）。
+export FLAGOS_PROGRESS_WORKER_MODE="${FLAGOS_PROGRESS_WORKER_MODE:-live}"
+
+# 汇报是完全旁路的观察者：不检查组件、不等待、不继承 tee 文件描述符，
+# 也不保存后台 PID。命令不存在、无权限或自身失败都只会丢失本次事件。
+progress_emit_detached() {
+    nohup "${PROGRESS_RUNNER}" emit "$@" \
+        </dev/null \
+        >/dev/null \
+        2>&1 &
+    return 0
+}
 
 # ========== 断点检查 ==========
 is_task_done() {
@@ -78,6 +99,115 @@ with open(sys.argv[1]) as f:
     ctx = yaml.safe_load(f)
 sys.exit(0 if ctx.get('workflow',{}).get('all_done') is True else 1)
 " "$ctx" 2>/dev/null
+}
+
+# ========== 分支/版本信息提取（用于汇总列，读 context_snapshot.yaml）===
+task_branch_versions() {
+    local model="$1"
+    local ctx="/data/flagos-workspace/${model}/config/context_snapshot.yaml"
+    [ -f "$ctx" ] || { echo "-|-"; return; }
+    python3 -c "
+import yaml, sys
+try:
+    with open(sys.argv[1]) as f:
+        ctx = yaml.safe_load(f) or {}
+except Exception:
+    print('-|-'); sys.exit(0)
+wf = ctx.get('workflow', {}) or {}
+branch = wf.get('pipeline_branch') or '-'
+# 不适配任务优先标注
+if wf.get('incompatible'):
+    print(f'{branch}|不适配'); sys.exit(0)
+versions = ctx.get('versions', {}) or {}
+baseline = ctx.get('baseline', {}) or {}
+built = []
+for v in ('v1','v2','v3','v4','v5'):
+    node = versions.get(v, {}) or {}
+    if node.get('built'):
+        label = v.upper()
+        # V1 附带变体，V3 附带 =V2 标记
+        if v == 'v1':
+            variant = baseline.get('v1_variant') or ''
+            if variant and variant not in ('native',):
+                label += f'({variant})'
+        if v == 'v3' and (node.get('equals_v2') or node.get('branch') == 'v3.2'):
+            label += '(=V2)'
+        built.append(label)
+print(f'{branch}|{\",\".join(built) if built else \"-\"}')
+" "$ctx" 2>/dev/null || echo "-|-"
+}
+
+# ========== 报告汇聚（复制每个模型的报告到本批次统一目录）===
+# 目录位于项目下 batch_reports_<批次时间戳>/，文件名沿用「厂商_模型名_时间戳」。
+# 成功/失败/超时/跳过均尝试汇聚已有报告；缺失则记录一条提示，不阻塞批次。
+aggregate_model_report() {
+    local model="$1"
+    local results_dir="/data/flagos-workspace/${model}/results"
+    local src_md="${results_dir}/report.md"
+    local src_json="${results_dir}/report.json"
+    if [ ! -f "$src_md" ] && [ ! -f "$src_json" ]; then
+        echo "  ⚠ 报告缺失，跳过汇聚: ${model}（未找到 report.md/report.json）"
+        return 0
+    fi
+    mkdir -p "${BATCH_REPORTS_DIR}" 2>/dev/null || true
+    # 目标文件名基名：厂商_模型名_时间戳（与 generate_report 的 build_report_basename 同口径）。
+    # 厂商取规范英文名首字母大写（nvidia → Nvidia，huawei → Ascend），与报告展示一致
+    local base
+    base=$(python3 -c "
+import yaml, sys, re, os
+from datetime import datetime
+ctx_path = sys.argv[1]
+model = sys.argv[2]
+shared_dir = sys.argv[3] if len(sys.argv) > 3 else ''
+vendor = 'unknown'; name = model.rsplit('/',1)[-1]; ts = ''
+try:
+    with open(ctx_path) as f:
+        ctx = yaml.safe_load(f) or {}
+    vendor = (ctx.get('gpu',{}) or {}).get('vendor','') or 'unknown'
+    name = ((ctx.get('model',{}) or {}).get('name','') or model).rsplit('/',1)[-1]
+    versions = ctx.get('versions',{}) or {}; release = ctx.get('release',{}) or {}
+    for vk in ('v4','v3','v2','v1'):
+        vc = versions.get(vk,{}) or {}
+        img = release.get(f'{vk}_harbor_image','') or vc.get('image_url','') or vc.get('harbor_image','') or vc.get('image','')
+        m = re.search(r':(\d{12})', img or '')
+        if m: ts = m.group(1); break
+    if shared_dir and vendor != 'unknown':
+        sys.path.insert(0, shared_dir)
+        try:
+            import chip_spec
+            vendor = chip_spec.vendor_en(vendor) or vendor
+        except Exception:
+            vendor = vendor.capitalize()
+except Exception:
+    pass
+if not ts:
+    ts = datetime.now().strftime('%Y%m%d%H%M')
+raw = f'{vendor}_{name}_{ts}'
+print(re.sub(r'[^\w.\-]', '_', raw))
+" "/data/flagos-workspace/${model}/config/context_snapshot.yaml" "$model" "${PROJECT_ROOT}/shared" 2>/dev/null)
+    [ -z "$base" ] && base=$(echo "${model}" | sed 's#/#_#g')
+    local copied=0
+    if [ -f "$src_md" ]; then
+        cp -f "$src_md" "${BATCH_REPORTS_DIR}/${base}.md" 2>/dev/null && copied=1
+    fi
+    if [ -f "$src_json" ]; then
+        cp -f "$src_json" "${BATCH_REPORTS_DIR}/${base}.json" 2>/dev/null && copied=1
+    fi
+    [ "$copied" = "1" ] && echo "  ✓ 报告已汇聚: ${BATCH_REPORTS_DIR}/${base}.md"
+    return 0
+}
+
+# 采集本模型每次 claude -p 的 usage 快照（缓存命中/输入输出 token）。
+# 纯编排层脚本、只读既有产物、失败不影响主流程；必须在模型跑完后无条件调用一次，
+# 因为 run_pipeline.sh 只注册了 EXIT trap，被 run_batch 的 timeout --signal=TERM 杀掉时
+# trap 不执行，只能由批次层补采（被测进程被杀的 usage 仍留在 Claude Code transcript 里）。
+collect_model_usage() {
+    local model="$1"
+    local logs="/data/flagos-workspace/${model}/logs"
+    [ -d "$logs" ] || { echo "  (usage 采集: 无 logs 目录，跳过)"; return 0; }
+    python3 "${PROJECT_ROOT}/prompts/usage_collect.py" \
+        --log-dir "$logs" --model "$model" --cwd "${PROJECT_ROOT}" 2>&1 | sed 's/^/  /' || true
+    return 0
 }
 
 # ========== 预扫描任务数 ==========
@@ -97,8 +227,43 @@ fi
 BATCH_START_TS=$(date +%s)
 BATCH_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BATCH_LOG="/data/flagos-workspace/batch_${BATCH_TIMESTAMP}.log"
+# 报告汇聚目录：放在项目目录下（当前执行任务目录，便于统一管理），非 workspace
+BATCH_REPORTS_DIR="${PROJECT_ROOT}/batch_reports_${BATCH_TIMESTAMP}"
+SUMMARY_FILE=""
+REPORT_FILE=""
+IDX=0; PASS=0; FAIL=0; SKIP=0
+RESULTS=()
+BATCH_END_EVENT_EMITTED=false
 mkdir -p /data/flagos-workspace 2>/dev/null || true
 exec > >(tee -a "$BATCH_LOG") 2>&1
+
+batch_on_exit() {
+    local exit_code="$1"
+    local ended_at elapsed processed
+    [ "${BATCH_END_EVENT_EMITTED}" = "true" ] && return 0
+    ended_at=$(date +%s)
+    elapsed=$(( ended_at - BATCH_START_TS ))
+    processed=$(( PASS + FAIL + SKIP ))
+    progress_emit_detached batch-end \
+        --batch-id "${BATCH_TIMESTAMP}" \
+        --workspace /data/flagos-workspace \
+        --exit-code "${exit_code}" \
+        --elapsed-seconds "${elapsed}" \
+        --run-ended-at "${ended_at}" \
+        --processed "${processed}" \
+        --passed "${PASS}" \
+        --failed "${FAIL}" \
+        --skipped "${SKIP}" || :
+    return 0
+}
+trap 'batch_on_exit "$?"' EXIT
+
+progress_emit_detached batch-start \
+    --batch-id "${BATCH_TIMESTAMP}" \
+    --workspace /data/flagos-workspace \
+    --task-file "${TASK_FILE}" \
+    --total-models "${TOTAL}" \
+    --batch-started-at "${BATCH_START_TS}" || :
 
 # ========== Banner ==========
 echo "============================================================"
@@ -115,9 +280,6 @@ echo "============================================================"
 echo ""
 
 # ========== 逐个执行 ==========
-IDX=0; PASS=0; FAIL=0; SKIP=0
-RESULTS=()
-
 while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
     TARGET=$(echo "$TARGET" | xargs)
     MODEL=$(echo "$MODEL" | xargs)
@@ -148,9 +310,19 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
 
     # 断点续跑（归档后 context_snapshot.yaml 已不存在，仅对未归档的中间状态生效）
     if ! $FORCE && is_task_done "$MODEL"; then
+        BV=$(task_branch_versions "$MODEL")
         echo "[${IDX}/${TOTAL}] ${MODEL} — 已完成，跳过"
         ((SKIP++))
-        RESULTS+=("⊘ | ${MODEL} | ${TARGET} | - | skipped")
+        RESULTS+=("⊘ | ${MODEL} | ${TARGET} | ${BV%%|*} | ${BV#*|} | - | skipped")
+        aggregate_model_report "$MODEL"
+        progress_emit_detached skip-model \
+            --batch-id "${BATCH_TIMESTAMP}" \
+            --workspace /data/flagos-workspace \
+            --model "${MODEL}" \
+            --target "${TARGET}" \
+            --task-index "${IDX}" \
+            --total-models "${TOTAL}" \
+            --batch-elapsed-seconds "$(( $(date +%s) - BATCH_START_TS ))" || :
         continue
     fi
 
@@ -161,18 +333,52 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
     echo "╚══════════════════════════════════════════════════════════════╝"
 
     TASK_START_TS=$(date +%s)
-    timeout --signal=TERM --kill-after=60 "$MODEL_TIMEOUT" \
-        bash prompts/run_pipeline.sh "$TARGET" "$MODEL" "$MS_TOKEN" "$HF_TOKEN" "$GH_TOKEN" "$HARBOR_USER" "$HARBOR_PASS" $VERBOSE_FLAG $PROXY_FLAG < /dev/null
+    progress_emit_detached model-start \
+        --batch-id "${BATCH_TIMESTAMP}" \
+        --workspace /data/flagos-workspace \
+        --task-index "${IDX}" \
+        --total-models "${TOTAL}" \
+        --target "${TARGET}" \
+        --model "${MODEL}" \
+        --run-started-at "${TASK_START_TS}" \
+        --batch-elapsed-seconds "$(( TASK_START_TS - BATCH_START_TS ))" || :
+    FLAGOS_BATCH_MODE=1 \
+    timeout --signal=TERM --kill-after=60 "${MODEL_TIMEOUT}" \
+        bash prompts/run_pipeline.sh "$TARGET" "$MODEL" "$MS_TOKEN" "$HF_TOKEN" "$GH_TOKEN" "$HARBOR_USER" "$HARBOR_PASS" $VERBOSE_FLAG $DATASET_FLAG $PROXY_FLAG < /dev/null
     EXIT_CODE=$?
-    TASK_ELAPSED=$(( $(date +%s) - TASK_START_TS ))
+    TASK_END_TS=$(date +%s)
+    TASK_ELAPSED=$(( TASK_END_TS - TASK_START_TS ))
     TASK_MIN=$(( TASK_ELAPSED / 60 ))
     TASK_SEC=$(( TASK_ELAPSED % 60 ))
     ELAPSED_FMT="${TASK_MIN}m${TASK_SEC}s"
 
+    # 提取分支/版本信息（context_snapshot.yaml 由 run_pipeline.sh 兜底同步写入）
+    BV=$(task_branch_versions "$MODEL")
+    BRANCH="${BV%%|*}"; VERS="${BV#*|}"
+
+    # 汇聚本模型报告到批次统一目录（成功/失败/超时均尝试，缺失则提示不阻塞）
+    aggregate_model_report "$MODEL"
+
+    # 采集本模型 usage 快照（此处是唯一收敛点：成功/超时 124/其它非零/stop-on-error break 全在其后）
+    collect_model_usage "$MODEL"
+
     if [ $EXIT_CODE -eq 124 ]; then
         ((FAIL++))
-        RESULTS+=("⏱ | ${MODEL} | ${TARGET} | ${ELAPSED_FMT} | timeout")
+        RESULTS+=("⏱ | ${MODEL} | ${TARGET} | ${BRANCH} | ${VERS} | ${ELAPSED_FMT} | timeout")
         echo "[${IDX}/${TOTAL}] ${MODEL} — ⏱ 超时 (>${MODEL_TIMEOUT}s, ${ELAPSED_FMT})"
+        progress_emit_detached model-finish \
+            --batch-id "${BATCH_TIMESTAMP}" \
+            --workspace /data/flagos-workspace \
+            --task-index "${IDX}" \
+            --total-models "${TOTAL}" \
+            --target "${TARGET}" \
+            --model "${MODEL}" \
+            --outcome timeout \
+            --exit-code "${EXIT_CODE}" \
+            --elapsed-seconds "${TASK_ELAPSED}" \
+            --batch-elapsed-seconds "$(( TASK_END_TS - BATCH_START_TS ))" \
+            --run-started-at "${TASK_START_TS}" \
+            --run-ended-at "${TASK_END_TS}" || :
         if $STOP_ON_ERROR; then
             echo ""
             echo "⚠ --stop-on-error 已启用，终止批量执行"
@@ -180,12 +386,38 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
         fi
     elif [ $EXIT_CODE -eq 0 ]; then
         ((PASS++))
-        RESULTS+=("✓ | ${MODEL} | ${TARGET} | ${ELAPSED_FMT} | exit=0")
-        echo "[${IDX}/${TOTAL}] ${MODEL} — ✓ 完成 (${ELAPSED_FMT})"
+        RESULTS+=("✓ | ${MODEL} | ${TARGET} | ${BRANCH} | ${VERS} | ${ELAPSED_FMT} | exit=0")
+        echo "[${IDX}/${TOTAL}] ${MODEL} — ✓ 完成 (分支${BRANCH}, ${VERS}, ${ELAPSED_FMT})"
+        progress_emit_detached model-finish \
+            --batch-id "${BATCH_TIMESTAMP}" \
+            --workspace /data/flagos-workspace \
+            --task-index "${IDX}" \
+            --total-models "${TOTAL}" \
+            --target "${TARGET}" \
+            --model "${MODEL}" \
+            --outcome success \
+            --exit-code "${EXIT_CODE}" \
+            --elapsed-seconds "${TASK_ELAPSED}" \
+            --batch-elapsed-seconds "$(( TASK_END_TS - BATCH_START_TS ))" \
+            --run-started-at "${TASK_START_TS}" \
+            --run-ended-at "${TASK_END_TS}" || :
     else
         ((FAIL++))
-        RESULTS+=("✗ | ${MODEL} | ${TARGET} | ${ELAPSED_FMT} | exit=${EXIT_CODE}")
+        RESULTS+=("✗ | ${MODEL} | ${TARGET} | ${BRANCH} | ${VERS} | ${ELAPSED_FMT} | exit=${EXIT_CODE}")
         echo "[${IDX}/${TOTAL}] ${MODEL} — ✗ 失败 (exit=${EXIT_CODE}, ${ELAPSED_FMT})"
+        progress_emit_detached model-finish \
+            --batch-id "${BATCH_TIMESTAMP}" \
+            --workspace /data/flagos-workspace \
+            --task-index "${IDX}" \
+            --total-models "${TOTAL}" \
+            --target "${TARGET}" \
+            --model "${MODEL}" \
+            --outcome failed \
+            --exit-code "${EXIT_CODE}" \
+            --elapsed-seconds "${TASK_ELAPSED}" \
+            --batch-elapsed-seconds "$(( TASK_END_TS - BATCH_START_TS ))" \
+            --run-started-at "${TASK_START_TS}" \
+            --run-ended-at "${TASK_END_TS}" || :
         if $STOP_ON_ERROR; then
             echo ""
             echo "⚠ --stop-on-error 已启用，终止批量执行"
@@ -219,7 +451,17 @@ SUMMARY_FILE="/data/flagos-workspace/batch_summary_${BATCH_TIMESTAMP}.txt"
     echo "✓ 成功: ${PASS}  ✗ 失败: ${FAIL}  ⊘ 跳过: ${SKIP}  总计: ${TOTAL}"
     echo "总耗时: ${BATCH_MIN}m${BATCH_SEC}s"
     echo ""
-    printf "%-4s | %-30s | %-50s | %-10s | %s\n" "状态" "模型" "目标" "耗时" "退出码"
-    echo "---- | ------------------------------ | -------------------------------------------------- | ---------- | ------"
+    printf "%-4s | %-30s | %-50s | %-6s | %-28s | %-10s | %s\n" "状态" "模型" "目标" "分支" "产出版本" "耗时" "退出码"
+    echo "---- | ------------------------------ | -------------------------------------------------- | ------ | ---------------------------- | ---------- | ------"
     for r in "${RESULTS[@]}"; do echo "$r"; done
 } > "$SUMMARY_FILE" 2>/dev/null && echo "汇总文件: ${SUMMARY_FILE}" || true
+
+# 报告汇聚目录提示
+if [ -d "${BATCH_REPORTS_DIR}" ]; then
+    RPT_COUNT=$(find "${BATCH_REPORTS_DIR}" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
+    echo "报告汇聚目录: ${BATCH_REPORTS_DIR}/ （${RPT_COUNT} 份报告）"
+else
+    echo "报告汇聚目录: 未生成（本批次无可汇聚的报告）"
+fi
+
+# ========== 批量执行退出码 ===

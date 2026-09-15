@@ -102,6 +102,25 @@ RUNTIME_OPLIST_PATHS = [
     "/tmp/flaggems_oplist.txt",
 ]
 
+GEMS_TXT_PATHS = [
+    "/root/gems.txt",
+    "/tmp/gems.txt",
+    "/flagos-workspace/logs/gems.txt",
+]
+
+
+def _parse_gems_txt_debug(content: str) -> List[str]:
+    """从 gems.txt debug 格式中提取短名算子列表。
+    格式示例: [DEBUG] flag_gems.ops.add.add: GEMS ADD
+    提取规则: flag_gems.ops.<short_name>.<func> → short_name
+    """
+    ops = set()
+    for line in content.splitlines():
+        match = re.search(r'flag_gems\.ops\.(\w+)\.\w+', line)
+        if match:
+            ops.add(match.group(1))
+    return sorted(ops)
+
 
 def find_ops_list_file(gems_path: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -110,6 +129,7 @@ def find_ops_list_file(gems_path: Optional[str] = None) -> Dict[str, Any]:
     搜索优先级：
     1. 运行时生成的文件（/tmp/flaggems_enable_oplist.txt 等）
     2. flag_gems 安装目录下的 .txt 文件（通过内容特征识别）
+    3. gems.txt debug 日志（解析 flag_gems.ops.xxx.yyy 提取短名）
 
     Returns:
         {
@@ -117,7 +137,7 @@ def find_ops_list_file(gems_path: Optional[str] = None) -> Dict[str, Any]:
             "path": str,         # 找到的文件路径
             "ops": list,         # 解析出的算子列表
             "count": int,
-            "source": str,       # "runtime" | "source_code"
+            "source": str,       # "runtime" | "source_code" | "gems_txt_debug"
             "search_paths": list # 搜索过的路径
         }
     """
@@ -203,6 +223,30 @@ def find_ops_list_file(gems_path: Optional[str] = None) -> Dict[str, Any]:
         result["source"] = "source_code"
         if len(candidates) > 1:
             result["other_candidates"] = [c[2] for c in candidates[1:]]
+
+    if result["found"]:
+        return result
+
+    # 第三优先级：gems.txt debug 日志格式解析
+    for gpath in GEMS_TXT_PATHS:
+        result["search_paths"].append(gpath)
+        if os.path.isfile(gpath):
+            try:
+                with open(gpath, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                if not content:
+                    continue
+                if 'flag_gems.ops.' in content:
+                    ops = _parse_gems_txt_debug(content)
+                    if ops:
+                        result["found"] = True
+                        result["path"] = gpath
+                        result["ops"] = ops
+                        result["count"] = len(ops)
+                        result["source"] = "gems_txt_debug"
+                        return result
+            except Exception:
+                continue
 
     return result
 
@@ -471,6 +515,21 @@ def init_optimization(ops_file: str, native_throughput: float,
         init_enabled = sorted(all_ops)
         init_disabled = []
 
+    # 合成基线（无 V1 场景）覆盖达标比率：synthesize_perf_baseline.py 在 _meta 写入
+    # target_ratio_override（=1.0），使达标线 = 合成基线 ×1.0 = V2 首测 ×1.05。
+    # 实测 V1 基线无此字段 → 保持 CLI 传入的 target_ratio（0.8），零影响。
+    effective_target_ratio = target_ratio
+    if native_benchmark:
+        try:
+            with open(native_benchmark, "r", encoding="utf-8") as _f:
+                _meta = (json.load(_f) or {}).get("_meta", {}) or {}
+            _override = _meta.get("target_ratio_override")
+            if isinstance(_override, (int, float)) and not isinstance(_override, bool) and _override > 0:
+                effective_target_ratio = float(_override)
+                print(f"检测到合成基线 target_ratio_override={_override} → 达标比率覆盖为 {effective_target_ratio}")
+        except Exception as _e:
+            print(f"读取 native benchmark _meta 失败（{_e}），沿用默认 target_ratio={target_ratio}")
+
     state = {
         "all_ops": all_ops,
         "registered_ops": registered_ops,
@@ -479,7 +538,7 @@ def init_optimization(ops_file: str, native_throughput: float,
         "disabled_ops": init_disabled,
         "native_throughput": native_throughput,
         "native_throughputs": _extract_native_throughputs(native_benchmark) if native_benchmark else {},
-        "target_ratio": target_ratio,
+        "target_ratio": effective_target_ratio,
         "current_ratio": 0.0,
         "search_log": [],
         "status": "in_progress",
@@ -525,7 +584,7 @@ def init_optimization(ops_file: str, native_throughput: float,
         for gname, gops in groups.items():
             print(f"  {gname}: {len(gops)} 个算子 ({', '.join(gops[:5])}{'...' if len(gops) > 5 else ''})")
     print(f"原生吞吐量: {native_throughput:.2f} tok/s")
-    print(f"目标吞吐量: {native_throughput * target_ratio:.2f} tok/s")
+    print(f"目标吞吐量: {native_throughput * effective_target_ratio:.2f} tok/s")
 
     return state
 

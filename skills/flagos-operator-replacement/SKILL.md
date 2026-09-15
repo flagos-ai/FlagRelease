@@ -26,23 +26,6 @@ provides:
   - optimization.search_log
 ---
 
-<!--
- Copyright 2026 FlagOS Contributors
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-     http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- -->
-
-
 # 算子替换与优化 Skill
 
 独立工具，可在任何阶段按需调用。支持两种模式：
@@ -368,14 +351,16 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/diagnose_ops.py crash-log \
 ```json
 {
   "crashed_ops": ["softmax"],
+  "candidate_ops": ["fancy_new_op"],
   "evidence": [{"op": "softmax", "line_start": 142, "error_type": "sm_unsupported", "error_message": "CUDA error: no kernel image..."}],
-  "suggestion": "建议禁用以下算子后重启: softmax"
+  "suggestion": "建议禁用以下算子后重启: softmax；另有白名单外低置信候选可一并验证: fancy_new_op"
 }
 ```
 
 **决策逻辑**：
 - `crashed_ops` 非空 → 直接禁用这些算子 → 重启服务 → 不进搜索
-- `crashed_ops` 为空但有 evidence → 人工查看日志
+- `crashed_ops` 为空但 `candidate_ops` 非空 → **不是"无算子"**：`candidate_ops` 是正则确实命中、但不在 `known_ops` 白名单的低置信候选（版本新增/命名变体）。**逐个或二分禁用这些候选**验证，禁用后能起服务/精度改善即确认。这一步是防止白名单不全导致"匹配到却当作无算子"的误判——判定"连续 2 轮无新算子/不可恢复"前，`candidate_ops` 必须已全部试过。
+- `crashed_ops` 与 `candidate_ops` 均为空但有 evidence → 人工查看日志（见 evidence 的错误行/AICore 前编译 kernel）
 - 无 evidence → 非算子问题，检查环境配置
 
 ## 场景 2：精度不达标 → 逐组禁用测试（达标即停）
@@ -735,7 +720,7 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_search.py run \
   --max-rounds 3
 ```
 
-**非 Plugin 场景**：
+**非 Plugin 场景**（步骤7 V2 性能调优，最多 2 轮，达标即停；2 轮未达标不阻塞流程）：
 ```bash
 ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_search.py run \
   --state-path /flagos-workspace/results/operator_config.json \
@@ -743,7 +728,7 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_search.py run \
   --service-startup-cmd "bash /flagos-workspace/scripts/start_service.sh" \
   --capabilities "yaml_config,only_enable" \
   --gems-txt-path ${GEMS_TXT_PATH} \
-  --max-rounds 3
+  --max-rounds 2
 ```
 
 搜索阶段每轮 benchmark **始终使用 quick**（只跑 `4k_input_1k_output` + max，`num_prompts=concurrency`），无需配置。quick 足以判断单算子对性能的影响。

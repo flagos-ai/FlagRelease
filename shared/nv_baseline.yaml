@@ -1,0 +1,3869 @@
+# ============================================================================
+# nv_baseline.yaml — NVIDIA 参考精度基线表
+# ============================================================================
+# 用途：新流程中，V2/V3/V4/V5 的精度达标判据始终以 NV（NVIDIA）结果为基线，
+#       而非同芯片本地 V1。判据：(current_score - nv_score) / nv_score >= -0.05
+#       即当前精度相对 NV 的退化不超过 5%。
+#
+# 由 accuracy_compare.py --nv-baseline <模型名> 查表使用。
+#
+# 结构：
+#   models:
+#     <规范模型名>:
+#       aliases: [<别名1>, <别名2>, ...]   # 用于模糊匹配（大小写/下划线/连字符不敏感）
+#       metrics:
+#         gpqa_diamond: <NV 分数, 百分比>
+#         <其他指标>: <分数>
+#       source: <数据来源说明>
+#       updated_at: <YYYY-MM-DD>
+#
+# 匹配规则（accuracy_compare.py 实现）：
+#   1. 规范化模型名（转小写、去除 -_/ 空格）后精确匹配 key 或任一 alias
+#   2. 未命中则返回 nv_score=None，判据降级为"缺 NV 基线"（编排层决定是否用本地 V1 兜底）
+#
+# ⚠ 维护约定：
+#   - 分数为百分比数值（如 62.5 表示 62.5%），与 gpqa_result.json 的 score 字段同单位
+#   - 新增模型时补充 aliases，覆盖常见命名变体（含参数量后缀、Instruct 后缀等）
+#   - source 注明数据出处（官方榜单 / 内部 NV 实测 / 论文），便于追溯
+# ============================================================================
+
+# 默认容差（相对退化下限），可被 accuracy_compare.py --nv-tolerance 覆盖
+default_tolerance: 0.05
+
+models:
+  # ---- 示例条目（请按实测数据补充/替换）----
+  Qwen3-8B:
+    aliases:
+      - qwen3-8b
+      - Qwen3-8B-Instruct
+      - qwen3_8b
+    metrics:
+      gpqa_diamond: 39.0        # TODO: 填入 NV 实测 GPQA Diamond 分数
+    source: "TODO: 填入数据来源"
+    updated_at: "2026-07-01"
+
+  Qwen2.5-7B-Instruct:
+    aliases:
+      - qwen2.5-7b-instruct
+      - qwen2.5-7b
+      - Qwen2.5-7B
+    metrics:
+      gpqa_diamond: 39.0        # TODO
+    source: "TODO"
+    updated_at: "2026-07-01"
+
+  gemma-3-1b-it:
+    aliases:
+      - google/gemma-3-1b-it
+      - gemma3-1b-it
+      - gemma_3_1b_it
+    metrics:
+      gpqa_diamond: 27.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  glm-4-9b-chat:
+    aliases:
+      - THUDM/glm-4-9b-chat
+      - glm4-9b-chat
+      - glm_4_9b_chat
+    metrics:
+      gpqa_diamond: 24.0
+    source: "NV 实测"
+    updated_at: "2026-07-03"
+
+  Hunyuan-7B-Instruct:
+    aliases:
+      - tencent/Hunyuan-7B-Instruct
+      - hunyuan-7b-instruct
+      - hunyuan_7b_instruct
+    metrics:
+      gpqa_diamond: 70.0
+      mmlu: 69.54               # 同步外部参考表（2026-09-07）
+      math_500: 94.60           # 同步外部参考表（2026-09-07）
+    source: "gpqa_diamond NV 实测；mmlu/math_500 同步外部参考表(2026-09-07)"
+    updated_at: "2026-09-07"
+
+  Falcon-H1-Tiny-90M-Instruct:
+    aliases:
+      - tiiuae/Falcon-H1-Tiny-90M-Instruct
+      - falcon-h1-tiny-90m-instruct
+      - falcon_h1_tiny_90m_instruct
+    metrics:
+      gpqa_diamond: 12.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  SmolLM2-135M-Instruct:
+    aliases:
+      - HuggingFaceTB/SmolLM2-135M-Instruct
+      - smollm2-135m-instruct
+      - smollm2_135m_instruct
+    metrics:
+      gpqa_diamond: 6.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  gemma-3-270m-it:
+    aliases:
+      - google/gemma-3-270m-it
+      - gemma-3-270m-it
+      - gemma_3_270m_it
+    metrics:
+      gpqa_diamond: 13.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Baguettotron:
+    aliases:
+      - PleIAs/Baguettotron
+      - baguettotron
+    metrics:
+      gpqa_diamond: 2.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  LFM2-350M:
+    aliases:
+      - LiquidAI/LFM2-350M
+      - lfm2-350m
+      - lfm2_350m
+    metrics:
+      gpqa_diamond: 19.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  LFM2.5-1.2B-Instruct:
+    aliases:
+      - LiquidAI/LFM2.5-1.2B-Instruct
+      - lfm2.5-1.2b-instruct
+      - lfm2_5_1.2b_instruct
+    metrics:
+      gpqa_diamond: 29.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  LFM2.5-1.2B-Thinking:
+    aliases:
+      - LiquidAI/LFM2.5-1.2B-Thinking
+      - lfm2.5-1.2b-thinking
+      - lfm2_5_1.2b_thinking
+    metrics:
+      gpqa_diamond: 29.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  DeepScaleR-1.5B-Preview:
+    aliases:
+      - agentica-org/DeepScaleR-1.5B-Preview
+      - deepscaler-1.5b-preview
+      - deepscaler_1.5b_preview
+    metrics:
+      gpqa_diamond: 16.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  DeepSeek-R1-Distill-Qwen-1.5B:
+    aliases:
+      - deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+      - deepseek-r1-distill-qwen-1.5b
+      - deepseek_r1_distill_qwen_1.5b
+    metrics:
+      gpqa_diamond: 7.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  # ---- 批次补充 2026-07-09（NV 实测，源数据为 0-1 小数，已 ×100 转百分比）----
+  Qwen3-4B-Instruct-2507:
+    aliases:
+      - Qwen/Qwen3-4B-Instruct-2507
+      - qwen3-4b-instruct-2507
+      - qwen3_4b_instruct_2507
+    metrics:
+      gpqa_diamond: 47.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Qwen3-4B-Thinking-2507:
+    aliases:
+      - Qwen/Qwen3-4B-Thinking-2507
+      - qwen3-4b-thinking-2507
+      - qwen3_4b_thinking_2507
+    metrics:
+      gpqa_diamond: 68.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Phi-3-vision-128k-instruct:
+    aliases:
+      - microsoft/Phi-3-vision-128k-instruct
+      - phi-3-vision-128k-instruct
+      - phi_3_vision_128k_instruct
+    metrics:
+      gpqa_diamond: 25.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  NuminaMath-7B-TIR:
+    aliases:
+      - AI-MO/NuminaMath-7B-TIR
+      - numinamath-7b-tir
+      - numinamath_7b_tir
+    metrics:
+      gpqa_diamond: 17.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Marco-o1:
+    aliases:
+      - AIDC-AI/Marco-o1
+      - marco-o1
+      - marco_o1
+    metrics:
+      gpqa_diamond: 32.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  BioMistral-7B:
+    aliases:
+      - BioMistral/BioMistral-7B
+      - biomistral-7b
+      - biomistral_7b
+    metrics:
+      gpqa_diamond: 11.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  DeepSeek-R1-Distill-Qwen-7B:
+    aliases:
+      - deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+      - deepseek-r1-distill-qwen-7b
+      - deepseek_r1_distill_qwen_7b
+    metrics:
+      gpqa_diamond: 30.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  codegemma-7b-it:
+    aliases:
+      - google/codegemma-7b-it
+      - codegemma-7b-it
+      - codegemma_7b_it
+    metrics:
+      gpqa_diamond: 9.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  gemma-1.1-7b-it:
+    aliases:
+      - google/gemma-1.1-7b-it
+      - gemma-1.1-7b-it
+      - gemma_1.1_7b_it
+    metrics:
+      gpqa_diamond: 37.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  gemma-7b-it:
+    aliases:
+      - google/gemma-7b-it
+      - gemma-7b-it
+      - gemma_7b_it
+    metrics:
+      gpqa_diamond: 18.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Nanbeige4.1-3B:
+    aliases:
+      - Nanbeige/Nanbeige4.1-3B
+      - nanbeige4.1-3b
+      - nanbeige4_1_3b
+    metrics:
+      gpqa_diamond: 81.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Phi-3-mini-128k-instruct:
+    aliases:
+      - microsoft/Phi-3-mini-128k-instruct
+      - phi-3-mini-128k-instruct
+      - phi_3_mini_128k_instruct
+    metrics:
+      gpqa_diamond: 33.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Phi-3-mini-4k-instruct:
+    aliases:
+      - microsoft/Phi-3-mini-4k-instruct
+      - phi-3-mini-4k-instruct
+      - phi_3_mini_4k_instruct
+    metrics:
+      gpqa_diamond: 30.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Phi-3.5-mini-instruct:
+    aliases:
+      - microsoft/Phi-3.5-mini-instruct
+      - phi-3.5-mini-instruct
+      - phi_3.5_mini_instruct
+    metrics:
+      gpqa_diamond: 26.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Phi-4-mini-instruct:
+    aliases:
+      - microsoft/Phi-4-mini-instruct
+      - phi-4-mini-instruct
+      - phi_4_mini_instruct
+    metrics:
+      gpqa_diamond: 38.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  NuExtract-1.5:
+    aliases:
+      - numind/NuExtract-1.5
+      - nuextract-1.5
+      - nuextract_1.5
+    metrics:
+      gpqa_diamond: 24.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  DASD-4B-Thinking:
+    aliases:
+      - Alibaba-Apsara/DASD-4B-Thinking
+      - dasd-4b-thinking
+      - dasd_4b_thinking
+    metrics:
+      gpqa_diamond: 44.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Jan-v1-4B:
+    aliases:
+      - janhq/Jan-v1-4B
+      - jan-v1-4b
+      - jan_v1_4b
+    metrics:
+      gpqa_diamond: 64.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  LocoOperator-4B:
+    aliases:
+      - LocoreMind/LocoOperator-4B
+      - locooperator-4b
+      - locooperator_4b
+    metrics:
+      gpqa_diamond: 52.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  MiniCPM3-4B:
+    aliases:
+      - openbmb/MiniCPM3-4B
+      - minicpm3-4b
+      - minicpm3_4b
+    metrics:
+      gpqa_diamond: 35.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  reader-lm-1.5b:
+    aliases:
+      - jinaai/reader-lm-1.5b
+      - reader-lm-1.5b
+      - reader_lm_1.5b
+    metrics:
+      gpqa_diamond: 8.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  ReaderLM-v2:
+    aliases:
+      - jinaai/ReaderLM-v2
+      - readerlm-v2
+      - readerlm_v2
+    metrics:
+      gpqa_diamond: 21.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Arch-Router-1.5B:
+    aliases:
+      - katanemo/Arch-Router-1.5B
+      - arch-router-1.5b
+      - arch_router_1.5b
+    metrics:
+      gpqa_diamond: 23.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  VibeThinker-1.5B:
+    aliases:
+      - WeiboAI/VibeThinker-1.5B
+      - vibethinker-1.5b
+      - vibethinker_1.5b
+    metrics:
+      gpqa_diamond: 47.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  SmolLM2-1.7B-Instruct:
+    aliases:
+      - HuggingFaceTB/SmolLM2-1.7B-Instruct
+      - smollm2-1.7b-instruct
+      - smollm2_1.7b_instruct
+    metrics:
+      gpqa_diamond: 24.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  MiniCPM-2B-sft-fp32:
+    aliases:
+      - openbmb/MiniCPM-2B-sft-fp32
+      - minicpm-2b-sft-fp32
+      - minicpm_2b_sft_fp32
+    metrics:
+      gpqa_diamond: 23.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  LFM2-2.6B-Exp:
+    aliases:
+      - LiquidAI/LFM2-2.6B-Exp
+      - lfm2-2.6b-exp
+      - lfm2_2.6b_exp
+    metrics:
+      gpqa_diamond: 44.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  SmolLM3-3B:
+    aliases:
+      - HuggingFaceTB/SmolLM3-3B
+      - smollm3-3b
+      - smollm3_3b
+    metrics:
+      gpqa_diamond: 6.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  granite-4.0-micro:
+    aliases:
+      - ibm-granite/granite-4.0-micro
+      - granite-4.0-micro
+      - granite_4.0_micro
+    metrics:
+      gpqa_diamond: 30.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  Schematron-3B:
+    aliases:
+      - inference-net/Schematron-3B
+      - schematron-3b
+      - schematron_3b
+    metrics:
+      gpqa_diamond: 22.0
+    source: "NV 实测"
+    updated_at: "2026-07-09"
+
+  # ---- 批次更新 2026-07-17 ----
+
+  Mistral-7B-OpenOrca:
+    aliases:
+      - Open-Orca/Mistral-7B-OpenOrca
+      - mistral-7b-openorca
+      - mistral_7b_openorca
+    metrics:
+      gpqa_diamond: 27
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen2.5-Coder-7B-Instruct:
+    aliases:
+      - Qwen/Qwen2.5-Coder-7B-Instruct
+      - qwen2.5-coder-7b-instruct
+      - qwen2_5_coder_7b_instruct
+    metrics:
+      gpqa_diamond: 27
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  aya-23-8B:
+    aliases:
+      - CohereLabs/aya-23-8B
+      - aya-23-8b
+      - aya_23_8b
+    metrics:
+      gpqa_diamond: 27
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-R1-0528-Qwen3-8B:
+    aliases:
+      - deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
+      - deepseek-r1-0528-qwen3-8b
+      - deepseek_r1_0528_qwen3_8b
+    metrics:
+      gpqa_diamond: 60
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-R1-Distill-Llama-8B:
+    aliases:
+      - deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+      - deepseek-r1-distill-llama-8b
+      - deepseek_r1_distill_llama_8b
+    metrics:
+      gpqa_diamond: 25
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Ministral-8B-Instruct-2410:
+    aliases:
+      - mistralai/Ministral-8B-Instruct-2410
+      - ministral-8b-instruct-2410
+      - ministral_8b_instruct_2410
+    metrics:
+      gpqa_diamond: 30
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  NeuralDaredevil-8B-abliterated:
+    aliases:
+      - mlabonne/NeuralDaredevil-8B-abliterated
+      - neuraldaredevil-8b-abliterated
+      - neuraldaredevil_8b_abliterated
+    metrics:
+      gpqa_diamond: 37
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  llama-3-Korean-Bllossom-8B:
+    aliases:
+      - MLP-KTLim/llama-3-Korean-Bllossom-8B
+      - llama-3-korean-bllossom-8b
+      - llama_3_korean_bllossom_8b
+    metrics:
+      gpqa_diamond: 33
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Hermes-2-Pro-Llama-3-8B:
+    aliases:
+      - NousResearch/Hermes-2-Pro-Llama-3-8B
+      - hermes-2-pro-llama-3-8b
+      - hermes_2_pro_llama_3_8b
+    metrics:
+      gpqa_diamond: 33
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  AgentCPM-Explore:
+    aliases:
+      - openbmb/AgentCPM-Explore
+      - agentcpm-explore
+      - agentcpm_explore
+    metrics:
+      gpqa_diamond: 36
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  AgentCPM-Report:
+    aliases:
+      - openbmb/AgentCPM-Report
+      - agentcpm-report
+      - agentcpm_report
+    metrics:
+      gpqa_diamond: 46
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  MiniCPM4-8B:
+    aliases:
+      - openbmb/MiniCPM4-8B
+      - minicpm4-8b
+      - minicpm4_8b
+    metrics:
+      gpqa_diamond: 36
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  MiniCPM4.1-8B:
+    aliases:
+      - openbmb/MiniCPM4.1-8B
+      - minicpm4.1-8b
+      - minicpm4_1_8b
+    metrics:
+      gpqa_diamond: 54
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Apertus-8B-Instruct-2509:
+    aliases:
+      - swiss-ai/Apertus-8B-Instruct-2509
+      - apertus-8b-instruct-2509
+      - apertus_8b_instruct_2509
+    metrics:
+      gpqa_diamond: 35
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  rnj-1-instruct:
+    aliases:
+      - EssentialAI/rnj-1-instruct
+      - rnj-1-instruct
+      - rnj_1_instruct
+    metrics:
+      gpqa_diamond: 37
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  SOLAR-10.7B-Instruct-v1.0:
+    aliases:
+      - upstage/SOLAR-10.7B-Instruct-v1.0
+      - solar-10.7b-instruct-v1.0
+      - solar_10_7b_instruct_v1_0
+    metrics:
+      gpqa_diamond: 34
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  MN-12B-Mag-Mell-R1:
+    aliases:
+      - inflatebot/MN-12B-Mag-Mell-R1
+      - mn-12b-mag-mell-r1
+      - mn_12b_mag_mell_r1
+    metrics:
+      gpqa_diamond: 32
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepCoder-14B-Preview:
+    aliases:
+      - agentica-org/DeepCoder-14B-Preview
+      - deepcoder-14b-preview
+      - deepcoder_14b_preview
+    metrics:
+      gpqa_diamond: 30
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  SuperNova-Medius:
+    aliases:
+      - arcee-ai/SuperNova-Medius
+      - supernova-medius
+      - supernova_medius
+    metrics:
+      gpqa_diamond: 44
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-R1-Distill-Qwen-14B:
+    aliases:
+      - deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
+      - deepseek-r1-distill-qwen-14b
+      - deepseek_r1_distill_qwen_14b
+    metrics:
+      gpqa_diamond: 45
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Fathom-R1-14B:
+    aliases:
+      - FractalAIResearch/Fathom-R1-14B
+      - fathom-r1-14b
+      - fathom_r1_14b
+    metrics:
+      gpqa_diamond: 60
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Phi-3-medium-128k-instruct:
+    aliases:
+      - microsoft/Phi-3-medium-128k-instruct
+      - phi-3-medium-128k-instruct
+      - phi_3_medium_128k_instruct
+    metrics:
+      gpqa_diamond: 37
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  phi-4:
+    aliases:
+      - microsoft/phi-4
+      - phi-4
+      - phi_4
+    metrics:
+      gpqa_diamond: 73
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Phi-4-reasoning-plus:
+    aliases:
+      - microsoft/Phi-4-reasoning-plus
+      - phi-4-reasoning-plus
+      - phi_4_reasoning_plus
+    metrics:
+      gpqa_diamond: 46
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Ministral-3-14B-Instruct-2512:
+    aliases:
+      - mistralai/Ministral-3-14B-Instruct-2512
+      - ministral-3-14b-instruct-2512
+      - ministral_3_14b_instruct_2512
+    metrics:
+      gpqa_diamond: 56
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Moonlight-16B-A3B-Instruct:
+    aliases:
+      - moonshotai/Moonlight-16B-A3B-Instruct
+      - moonlight-16b-a3b-instruct
+      - moonlight_16b_a3b_instruct
+    metrics:
+      gpqa_diamond: 33
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  reka-flash-3:
+    aliases:
+      - RekaAI/reka-flash-3
+      - reka-flash-3
+      - reka_flash_3
+    metrics:
+      gpqa_diamond: 59
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Codestral-22B-v0.1:
+    aliases:
+      - mistralai/Codestral-22B-v0.1
+      - codestral-22b-v0.1
+      - codestral_22b_v0_1
+    metrics:
+      gpqa_diamond: 26
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Magistral-Small-2506:
+    aliases:
+      - mistralai/Magistral-Small-2506
+      - magistral-small-2506
+      - magistral_small_2506
+    metrics:
+      gpqa_diamond: 62
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Mistral-Small-24B-Instruct-2501:
+    aliases:
+      - mistralai/Mistral-Small-24B-Instruct-2501
+      - mistral-small-24b-instruct-2501
+      - mistral_small_24b_instruct_2501
+    metrics:
+      gpqa_diamond: 54
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  sarvam-m:
+    aliases:
+      - sarvamai/sarvam-m
+      - sarvam-m
+      - sarvam_m
+    metrics:
+      gpqa_diamond: 48
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  gemma-2-27b-it:
+    aliases:
+      - google/gemma-2-27b-it
+      - gemma-2-27b-it
+      - gemma_2_27b_it
+    metrics:
+      gpqa_diamond: 48
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled:
+    aliases:
+      - Jackrong/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled
+      - qwen3.5-27b-claude-4.6-opus-reasoning-distilled
+      - qwen3_5_27b_claude_4_6_opus_reasoning_distilled
+    metrics:
+      gpqa_diamond: 75
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  MiroThinker-v1.5-30B:
+    aliases:
+      - miromind-ai/MiroThinker-v1.5-30B
+      - mirothinker-v1.5-30b
+      - mirothinker_v1_5_30b
+    metrics:
+      gpqa_diamond: 25
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3-30B-A3B-Instruct-2507:
+    aliases:
+      - Qwen/Qwen3-30B-A3B-Instruct-2507
+      - qwen3-30b-a3b-instruct-2507
+      - qwen3_30b_a3b_instruct_2507
+    metrics:
+      gpqa_diamond: 62
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3-30B-A3B-Thinking-2507:
+    aliases:
+      - Qwen/Qwen3-30B-A3B-Thinking-2507
+      - qwen3-30b-a3b-thinking-2507
+      - qwen3_30b_a3b_thinking_2507
+    metrics:
+      gpqa_diamond: 75
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3-Coder-30B-A3B-Instruct:
+    aliases:
+      - Qwen/Qwen3-Coder-30B-A3B-Instruct
+      - qwen3-coder-30b-a3b-instruct
+      - qwen3_coder_30b_a3b_instruct
+    metrics:
+      gpqa_diamond: 54
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Baichuan-M2-32B:
+    aliases:
+      - baichuan-inc/Baichuan-M2-32B
+      - baichuan-m2-32b
+      - baichuan_m2_32b
+    metrics:
+      gpqa_diamond: 64
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-R1-Distill-Qwen-32B:
+    aliases:
+      - deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
+      - deepseek-r1-distill-qwen-32b
+      - deepseek_r1_distill_qwen_32b
+    metrics:
+      gpqa_diamond: 37
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-R1-Distill-Qwen-32B-abliterated:
+    aliases:
+      - huihui-ai/DeepSeek-R1-Distill-Qwen-32B-abliterated
+      - deepseek-r1-distill-qwen-32b-abliterated
+      - deepseek_r1_distill_qwen_32b_abliterated
+    metrics:
+      gpqa_diamond: 28
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  granite-4.0-h-small:
+    aliases:
+      - ibm-granite/granite-4.0-h-small
+      - granite-4.0-h-small
+      - granite_4_0_h_small
+    metrics:
+      gpqa_diamond: 47
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  EXAONE-4.0-32B:
+    aliases:
+      - LGAI-EXAONE/EXAONE-4.0-32B
+      - exaone-4.0-32b
+      - exaone_4_0_32b
+    metrics:
+      gpqa_diamond: 62
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  HyperCLOVAX-SEED-Think-32B:
+    aliases:
+      - naver-hyperclovax/HyperCLOVAX-SEED-Think-32B
+      - hyperclovax-seed-think-32b
+      - hyperclovax_seed_think_32b
+    metrics:
+      gpqa_diamond: 48
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Sky-T1-32B-Preview:
+    aliases:
+      - NovaSky-AI/Sky-T1-32B-Preview
+      - sky-t1-32b-preview
+      - sky_t1_32b_preview
+    metrics:
+      gpqa_diamond: 60
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen2.5-Coder-32B-Instruct:
+    aliases:
+      - Qwen/Qwen2.5-Coder-32B-Instruct
+      - qwen2.5-coder-32b-instruct
+      - qwen2_5_coder_32b_instruct
+    metrics:
+      gpqa_diamond: 46
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  QwQ-32B:
+    aliases:
+      - Qwen/QwQ-32B
+      - qwq-32b
+      - qwq_32b
+    metrics:
+      gpqa_diamond: 63
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  QwQ-32B-Preview:
+    aliases:
+      - Qwen/QwQ-32B-Preview
+      - qwq-32b-preview
+      - qwq_32b_preview
+    metrics:
+      gpqa_diamond: 62
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  IQuest-Coder-V1-40B-Instruct:
+    aliases:
+      - IQuestLab/IQuest-Coder-V1-40B-Instruct
+      - iquest-coder-v1-40b-instruct
+      - iquest_coder_v1_40b_instruct
+    metrics:
+      gpqa_diamond: 37
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  IQuest-Coder-V1-40B-Loop-Instruct:
+    aliases:
+      - IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct
+      - iquest-coder-v1-40b-loop-instruct
+      - iquest_coder_v1_40b_loop_instruct
+    metrics:
+      gpqa_diamond: 39
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Phi-3.5-MoE-instruct:
+    aliases:
+      - microsoft/Phi-3.5-MoE-instruct
+      - phi-3.5-moe-instruct
+      - phi_3_5_moe_instruct
+    metrics:
+      gpqa_diamond: 36
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Kimi-Linear-48B-A3B-Instruct:
+    aliases:
+      - moonshotai/Kimi-Linear-48B-A3B-Instruct
+      - kimi-linear-48b-a3b-instruct
+      - kimi_linear_48b_a3b_instruct
+    metrics:
+      gpqa_diamond: 26
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Higgs-Llama-3-70B:
+    aliases:
+      - bosonai/Higgs-Llama-3-70B
+      - higgs-llama-3-70b
+      - higgs_llama_3_70b
+    metrics:
+      gpqa_diamond: 26
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-R1-Distill-Llama-70B:
+    aliases:
+      - deepseek-ai/DeepSeek-R1-Distill-Llama-70B
+      - deepseek-r1-distill-llama-70b
+      - deepseek_r1_distill_llama_70b
+    metrics:
+      gpqa_diamond: 63
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Kimi-Dev-72B:
+    aliases:
+      - moonshotai/Kimi-Dev-72B
+      - kimi-dev-72b
+      - kimi_dev_72b
+    metrics:
+      gpqa_diamond: 58
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Athene-V2-Chat:
+    aliases:
+      - Nexusflow/Athene-V2-Chat
+      - athene-v2-chat
+      - athene_v2_chat
+    metrics:
+      gpqa_diamond: 56
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen2-72B-Instruct:
+    aliases:
+      - Qwen/Qwen2-72B-Instruct
+      - qwen2-72b-instruct
+      - qwen2_72b_instruct
+    metrics:
+      gpqa_diamond: 40
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen2.5-72B-Instruct:
+    aliases:
+      - Qwen/Qwen2.5-72B-Instruct
+      - qwen2.5-72b-instruct
+      - qwen2_5_72b_instruct
+    metrics:
+      gpqa_diamond: 56
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3-Coder-Next:
+    aliases:
+      - Qwen/Qwen3-Coder-Next
+      - qwen3-coder-next
+      - qwen3_coder_next
+    metrics:
+      gpqa_diamond: 74
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3-Next-80B-A3B-Instruct:
+    aliases:
+      - Qwen/Qwen3-Next-80B-A3B-Instruct
+      - qwen3-next-80b-a3b-instruct
+      - qwen3_next_80b_a3b_instruct
+    metrics:
+      gpqa_diamond: 73
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3-Next-80B-A3B-Thinking:
+    aliases:
+      - Qwen/Qwen3-Next-80B-A3B-Thinking
+      - qwen3-next-80b-a3b-thinking
+      - qwen3_next_80b_a3b_thinking
+    metrics:
+      gpqa_diamond: 74
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  sarvam-105b:
+    aliases:
+      - sarvamai/sarvam-105b
+      - sarvam-105b
+      - sarvam_105b
+    metrics:
+      gpqa_diamond: 44
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  c4ai-command-a-03-2025:
+    aliases:
+      - CohereLabs/c4ai-command-a-03-2025
+      - c4ai-command-a-03-2025
+      - c4ai_command_a_03_2025
+    metrics:
+      gpqa_diamond: 61
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  zephyr-orpo-141b-A35b-v0.1:
+    aliases:
+      - HuggingFaceH4/zephyr-orpo-141b-A35b-v0.1
+      - zephyr-orpo-141b-a35b-v0.1
+      - zephyr_orpo_141b_a35b_v0_1
+    metrics:
+      gpqa_diamond: 26
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Mixtral-8x22B-Instruct-v0.1:
+    aliases:
+      - mistralai/Mixtral-8x22B-Instruct-v0.1
+      - mixtral-8x22b-instruct-v0.1
+      - mixtral_8x22b_instruct_v0_1
+    metrics:
+      gpqa_diamond: 40
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Step-3.5-Flash:
+    aliases:
+      - stepfun-ai/Step-3.5-Flash
+      - step-3.5-flash
+      - step_3_5_flash
+    metrics:
+      gpqa_diamond: 58
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  MiroThinker-v1.5-235B:
+    aliases:
+      - miromind-ai/MiroThinker-v1.5-235B
+      - mirothinker-v1.5-235b
+      - mirothinker_v1_5_235b
+    metrics:
+      gpqa_diamond: 47
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3-235B-A22B-Instruct-2507:
+    aliases:
+      - Qwen/Qwen3-235B-A22B-Instruct-2507
+      - qwen3-235b-a22b-instruct-2507
+      - qwen3_235b_a22b_instruct_2507
+    metrics:
+      gpqa_diamond: 67
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  Qwen3-235B-A22B-Thinking-2507:
+    aliases:
+      - Qwen/Qwen3-235B-A22B-Thinking-2507
+      - qwen3-235b-a22b-thinking-2507
+      - qwen3_235b_a22b_thinking_2507
+    metrics:
+      gpqa_diamond: 82
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  K-EXAONE-236B-A23B:
+    aliases:
+      - LGAI-EXAONE/K-EXAONE-236B-A23B
+      - k-exaone-236b-a23b
+      - k_exaone_236b_a23b
+    metrics:
+      gpqa_diamond: 60
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  MiMo-V2-Flash:
+    aliases:
+      - XiaomiMiMo/MiMo-V2-Flash
+      - mimo-v2-flash
+      - mimo_v2_flash
+    metrics:
+      gpqa_diamond: 70
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-R1-0528:
+    aliases:
+      - deepseek-ai/DeepSeek-R1-0528
+      - deepseek-r1-0528
+      - deepseek_r1_0528
+    metrics:
+      gpqa_diamond: 80
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-V3-0324:
+    aliases:
+      - deepseek-ai/DeepSeek-V3-0324
+      - deepseek-v3-0324
+      - deepseek_v3_0324
+    metrics:
+      gpqa_diamond: 70
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-V3.1-Terminus:
+    aliases:
+      - deepseek-ai/DeepSeek-V3.1-Terminus
+      - deepseek-v3.1-terminus
+      - deepseek_v3_1_terminus
+    metrics:
+      gpqa_diamond: 76
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-V3.2:
+    aliases:
+      - deepseek-ai/DeepSeek-V3.2
+      - deepseek-v3.2
+      - deepseek_v3_2
+    metrics:
+      gpqa_diamond: 47.09
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-V3.2-Exp:
+    aliases:
+      - deepseek-ai/DeepSeek-V3.2-Exp
+      - deepseek-v3.2-exp
+      - deepseek_v3_2_exp
+    metrics:
+      gpqa_diamond: 46.5
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  DeepSeek-V3.2-Speciale:
+    aliases:
+      - deepseek-ai/DeepSeek-V3.2-Speciale
+      - deepseek-v3.2-speciale
+      - deepseek_v3_2_speciale
+    metrics:
+      gpqa_diamond: 73
+    source: "NV 实测"
+    updated_at: "2026-07-17"
+
+  # ---- 批次补充 2026-08-05（NV 实测，源数据为 0-1 小数，已 ×100 转百分比）----
+
+  Tongyi-DeepResearch-30B-A3B:
+    aliases:
+      - Alibaba-NLP/Tongyi-DeepResearch-30B-A3B
+      - tongyi-deepresearch-30b-a3b
+      - tongyi_deepresearch_30b_a3b
+    metrics:
+      gpqa_diamond: 57
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  GLM-4.7-Flash:
+    aliases:
+      - zai-org/GLM-4.7-Flash
+      - glm-4.7-flash
+      - glm_4_7_flash
+    metrics:
+      gpqa_diamond: 55
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  TinyR1-32B-Preview:
+    aliases:
+      - qihoo360/TinyR1-32B-Preview
+      - tinyr1-32b-preview
+      - tinyr1_32b_preview
+    metrics:
+      gpqa_diamond: 64
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  DeepSeek-R1-Distill-Qwen-32B-Japanese:
+    aliases:
+      - cyberagent/DeepSeek-R1-Distill-Qwen-32B-Japanese
+      - deepseek-r1-distill-qwen-32b-japanese
+      - deepseek_r1_distill_qwen_32b_japanese
+    metrics:
+      gpqa_diamond: 62
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  gpt-oss-20b:
+    aliases:
+      - openai/gpt-oss-20b
+      - gpt-oss-20b
+      - gpt_oss_20b
+    metrics:
+      gpqa_diamond: 63
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  GLM-4-32B-0414:
+    aliases:
+      - zai-org/GLM-4-32B-0414
+      - glm-4-32b-0414
+      - glm_4_32b_0414
+    metrics:
+      gpqa_diamond: 55
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  Seed-OSS-36B-Instruct:
+    aliases:
+      - ByteDance-Seed/Seed-OSS-36B-Instruct
+      - seed-oss-36b-instruct
+      - seed_oss_36b_instruct
+    metrics:
+      gpqa_diamond: 79
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  Llama-3_3-Nemotron-Super-49B-v1_5:
+    aliases:
+      - nvidia/Llama-3_3-Nemotron-Super-49B-v1_5
+      - llama-3_3-nemotron-super-49b-v1_5
+      - llama-3.3-nemotron-super-49b-v1.5
+      - llama_3_3_nemotron_super_49b_v1_5
+    metrics:
+      gpqa_diamond: 68
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  Llama-3_3-Nemotron-Super-49B-v1:
+    aliases:
+      - nvidia/Llama-3_3-Nemotron-Super-49B-v1
+      - llama-3_3-nemotron-super-49b-v1
+      - llama-3.3-nemotron-super-49b-v1
+      - llama_3_3_nemotron_super_49b_v1
+    metrics:
+      gpqa_diamond: 51
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  Llama-3.3-70B-Instruct:
+    aliases:
+      - meta-llama/Llama-3.3-70B-Instruct
+      - llama-3.3-70b-instruct
+      - llama_3_3_70b_instruct
+    metrics:
+      gpqa_diamond: 53
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  Llama-3.1-Nemotron-70B-Instruct-HF:
+    aliases:
+      - nvidia/Llama-3.1-Nemotron-70B-Instruct-HF
+      - llama-3.1-nemotron-70b-instruct-hf
+      - llama_3_1_nemotron_70b_instruct_hf
+    metrics:
+      gpqa_diamond: 52
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  Hunyuan-A13B-Instruct:
+    aliases:
+      - tencent/Hunyuan-A13B-Instruct
+      - hunyuan-a13b-instruct
+      - hunyuan_a13b_instruct
+    metrics:
+      gpqa_diamond: 68
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  AceInstruct-1.5B:
+    aliases:
+      - nvidia/AceInstruct-1.5B
+      - aceinstruct-1.5b
+      - aceinstruct_1_5b
+    metrics:
+      gpqa_diamond: 37.0        # TODO: 待 NV 实测 GPQA Diamond 分数
+      mmlu: 55.53               # 同步外部参考表（2026-09-07）
+      math_500: 59.2            # 同步外部参考表（2026-09-07）
+    source: "mmlu/math_500 同步外部参考表(2026-09-07)；gpqa_diamond 待补 NV 实测"
+    updated_at: "2026-09-07"
+  # ---- 批次补充 2026-08-12（NV mmlu/math_500 基线）----
+
+  OpenReasoning-Nemotron-1.5B:
+    aliases:
+      - nvidia/OpenReasoning-Nemotron-1.5B
+      - openreasoning-nemotron-1.5b
+      - openreasoning_nemotron_1_5b
+    metrics:
+      mmlu: 52.21
+      math_500: 84.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  ZR1-1.5B:
+    aliases:
+      - Zyphra/ZR1-1.5B
+      - zr1-1.5b
+      - zr1_1_5b
+    metrics:
+      mmlu: 50.54
+      math_500: 89.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Phi-4-mini-reasoning:
+    aliases:
+      - microsoft/Phi-4-mini-reasoning
+      - phi-4-mini-reasoning
+      - phi_4_mini_reasoning
+    metrics:
+      mmlu: 72.83
+      math_500: 88.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  granite-3.3-2b-instruct:
+    aliases:
+      - ibm-granite/granite-3.3-2b-instruct
+      - granite-3.3-2b-instruct
+      - granite_3_3_2b_instruct
+    metrics:
+      mmlu: 56.26
+      math_500: 54.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  kanana-1.5-2.1b-instruct-2505:
+    aliases:
+      - kakaocorp/kanana-1.5-2.1b-instruct-2505
+      - kanana-1.5-2.1b-instruct-2505
+      - kanana_1_5_2_1b_instruct_2505
+    metrics:
+      mmlu: 53.35
+      math_500: 60.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AI21-Jamba-Reasoning-3B:
+    aliases:
+      - ai21labs/AI21-Jamba-Reasoning-3B
+      - ai21-jamba-reasoning-3b
+      - ai21_jamba_reasoning_3b
+    metrics:
+      mmlu: 71.02
+      math_500: 63.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Qwen3-4B-SafeRL:
+    aliases:
+      - Qwen/Qwen3-4B-SafeRL
+      - qwen3-4b-saferl
+      - qwen3_4b_saferl
+    metrics:
+      mmlu: 81.39
+      math_500: 94.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Marco-Nano-Instruct:
+    aliases:
+      - ATH-MaaS/Marco-Nano-Instruct
+      - marco-nano-instruct
+      - marco_nano_instruct
+    metrics:
+      mmlu: 68.81
+      math_500: 77.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  gemma-3-4B-T1-it:
+    aliases:
+      - twinkle-ai/gemma-3-4B-T1-it
+      - gemma-3-4b-t1-it
+      - gemma_3_4b_t1_it
+    metrics:
+      mmlu: 55.07
+      math_500: 54.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Apodex-1.0-4B-SFT:
+    aliases:
+      - apodex/Apodex-1.0-4B-SFT
+      - apodex-1.0-4b-sft
+      - apodex_1_0_4b_sft
+    metrics:
+      mmlu: 86.14
+      math_500: 92.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenReasoning-Nemotron-7B:
+    aliases:
+      - nvidia/OpenReasoning-Nemotron-7B
+      - openreasoning-nemotron-7b
+      - openreasoning_nemotron_7b
+    metrics:
+      mmlu: 81.49
+      math_500: 95.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenThinker-7B:
+    aliases:
+      - open-thoughts/OpenThinker-7B
+      - openthinker-7b
+      - openthinker_7b
+    metrics:
+      mmlu: 77.0
+      math_500: 88.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Hunyuan-7B-Instruct-0124:
+    aliases:
+      - tencent/Hunyuan-7B-Instruct-0124
+      - hunyuan-7b-instruct-0124
+      - hunyuan_7b_instruct_0124
+    metrics:
+      mmlu: 75.88
+      math_500: 71.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  SynLogic-7B:
+    aliases:
+      - MiniMaxAI/SynLogic-7B
+      - synlogic-7b
+      - synlogic_7b
+    metrics:
+      mmlu: 73.88
+      math_500: 75.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AceInstruct-7B:
+    aliases:
+      - nvidia/AceInstruct-7B
+      - aceinstruct-7b
+      - aceinstruct_7b
+    metrics:
+      mmlu: 71.37
+      math_500: 77.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AceReason-Nemotron-7B:
+    aliases:
+      - nvidia/AceReason-Nemotron-7B
+      - acereason-nemotron-7b
+      - acereason_nemotron_7b
+    metrics:
+      mmlu: 70.72
+      math_500: 95.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  NextCoder-7B:
+    aliases:
+      - microsoft/NextCoder-7B
+      - nextcoder-7b
+      - nextcoder_7b
+    metrics:
+      mmlu: 70.18
+      math_500: 68.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Light-R1-7B-DS:
+    aliases:
+      - qihoo360/Light-R1-7B-DS
+      - light-r1-7b-ds
+      - light_r1_7b_ds
+    metrics:
+      mmlu: 69.95
+      math_500: 94.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AceMath-RL-Nemotron-7B:
+    aliases:
+      - nvidia/AceMath-RL-Nemotron-7B
+      - acemath-rl-nemotron-7b
+      - acemath_rl_nemotron_7b
+    metrics:
+      mmlu: 59.81
+      math_500: 91.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AceReason-Nemotron-1.1-7B:
+    aliases:
+      - nvidia/AceReason-Nemotron-1.1-7B
+      - acereason-nemotron-1.1-7b
+      - acereason_nemotron_1_1_7b
+    metrics:
+      mmlu: 58.82
+      math_500: 95.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Dria-Agent-a-7B:
+    aliases:
+      - driaforall/Dria-Agent-a-7B
+      - dria-agent-a-7b
+      - dria_agent_a_7b
+    metrics:
+      mmlu: 53.4
+      math_500: 60.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenR1-Qwen-7B:
+    aliases:
+      - open-r1/OpenR1-Qwen-7B
+      - openr1-qwen-7b
+      - openr1_qwen_7b
+    metrics:
+      mmlu: 51.46
+      math_500: 88.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenThinker3-7B:
+    aliases:
+      - open-thoughts/OpenThinker3-7B
+      - openthinker3-7b
+      - openthinker3_7b
+    metrics:
+      mmlu: 50.04
+      math_500: 84.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  A.X-4.0-Light:
+    aliases:
+      - skt/A.X-4.0-Light
+      - a.x-4.0-light
+      - a_x_4_0_light
+    metrics:
+      mmlu: 74.72
+      math_500: 73.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  A.X-3.1-Light:
+    aliases:
+      - skt/A.X-3.1-Light
+      - a.x-3.1-light
+      - a_x_3_1_light
+    metrics:
+      mmlu: 65.98
+      math_500: 72.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AReaL-boba-2-8B:
+    aliases:
+      - inclusionAI/AReaL-boba-2-8B
+      - areal-boba-2-8b
+      - areal_boba_2_8b
+    metrics:
+      mmlu: 85.98
+      math_500: 95.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Nemotron-Cascade-8B:
+    aliases:
+      - nvidia/Nemotron-Cascade-8B
+      - nemotron-cascade-8b
+      - nemotron_cascade_8b
+    metrics:
+      mmlu: 85.09
+      math_500: 96.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Nemotron-Cascade-8B-Thinking:
+    aliases:
+      - nvidia/Nemotron-Cascade-8B-Thinking
+      - nemotron-cascade-8b-thinking
+      - nemotron_cascade_8b_thinking
+    metrics:
+      mmlu: 85.02
+      math_500: 96.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  DeepSeek-llama3.1-Bllossom-8B:
+    aliases:
+      - UNIVA-Bllossom/DeepSeek-llama3.1-Bllossom-8B
+      - deepseek-llama3.1-bllossom-8b
+      - deepseek_llama3_1_bllossom_8b
+    metrics:
+      mmlu: 69.9
+      math_500: 84.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  kanana-1.5-8b-instruct-2505:
+    aliases:
+      - kakaocorp/kanana-1.5-8b-instruct-2505
+      - kanana-1.5-8b-instruct-2505
+      - kanana_1_5_8b_instruct_2505
+    metrics:
+      mmlu: 69.77
+      math_500: 69.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Llama-3.1-Tulu-3.1-8B:
+    aliases:
+      - allenai/Llama-3.1-Tulu-3.1-8B
+      - llama-3.1-tulu-3.1-8b
+      - llama_3_1_tulu_3_1_8b
+    metrics:
+      mmlu: 69.19
+      math_500: 53.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  granite-3.3-8b-instruct:
+    aliases:
+      - ibm-granite/granite-3.3-8b-instruct
+      - granite-3.3-8b-instruct
+      - granite_3_3_8b_instruct
+    metrics:
+      mmlu: 68.39
+      math_500: 69.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  granite-3.2-8b-instruct-preview:
+    aliases:
+      - ibm-granite/granite-3.2-8b-instruct-preview
+      - granite-3.2-8b-instruct-preview
+      - granite_3_2_8b_instruct_preview
+    metrics:
+      mmlu: 67.63
+      math_500: 53.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  T-lite-it-2.1:
+    aliases:
+      - t-tech/T-lite-it-2.1
+      - t-lite-it-2.1
+      - t_lite_it_2_1
+    metrics:
+      mmlu: 82.46
+      math_500: 92.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Ling-lite:
+    aliases:
+      - inclusionAI/Ling-lite
+      - ling-lite
+      - ling_lite
+    metrics:
+      mmlu: 74.05
+      math_500: 79.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Ring-lite-distill-preview:
+    aliases:
+      - inclusionAI/Ring-lite-distill-preview
+      - ring-lite-distill-preview
+      - ring_lite_distill_preview
+    metrics:
+      mmlu: 67.79
+      math_500: 58.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Darwin-9B-NEG:
+    aliases:
+      - FINAL-Bench/Darwin-9B-NEG
+      - darwin-9b-neg
+      - darwin_9b_neg
+      - ansulev/Darwin-9B-NEG
+    metrics:
+      mmlu: 87.91
+      math_500: 83.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+    # 同名模型多 org 镜像: FINAL-Bench/Darwin-9B-NEG=87.91/83.6; ansulev/Darwin-9B-NEG=87.72/82.0，取首个 org 分数
+
+  Turkish-Gemma-9b-v0.1:
+    aliases:
+      - ytu-ce-cosmos/Turkish-Gemma-9b-v0.1
+      - turkish-gemma-9b-v0.1
+      - turkish_gemma_9b_v0_1
+    metrics:
+      mmlu: 75.19
+      math_500: 53.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Midm-2.0-Base-Instruct:
+    aliases:
+      - K-intelligence/Midm-2.0-Base-Instruct
+      - midm-2.0-base-instruct
+      - midm_2_0_base_instruct
+    metrics:
+      mmlu: 74.07
+      math_500: 64.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Arcee-Blitz:
+    aliases:
+      - arcee-ai/Arcee-Blitz
+      - arcee-blitz
+      - arcee_blitz
+    metrics:
+      mmlu: 89.97
+      math_500: 69.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AReaL-boba-2-14B:
+    aliases:
+      - inclusionAI/AReaL-boba-2-14B
+      - areal-boba-2-14b
+      - areal_boba_2_14b
+    metrics:
+      mmlu: 87.7
+      math_500: 95.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AReaL-boba-2-14B-Open:
+    aliases:
+      - inclusionAI/AReaL-boba-2-14B-Open
+      - areal-boba-2-14b-open
+      - areal_boba_2_14b_open
+    metrics:
+      mmlu: 87.4
+      math_500: 95.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Nemotron-Cascade-14B-Thinking:
+    aliases:
+      - nvidia/Nemotron-Cascade-14B-Thinking
+      - nemotron-cascade-14b-thinking
+      - nemotron_cascade_14b_thinking
+    metrics:
+      mmlu: 86.62
+      math_500: 96.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenReasoning-Nemotron-14B:
+    aliases:
+      - nvidia/OpenReasoning-Nemotron-14B
+      - openreasoning-nemotron-14b
+      - openreasoning_nemotron_14b
+    metrics:
+      mmlu: 86.48
+      math_500: 96.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AceReason-Nemotron-14B:
+    aliases:
+      - nvidia/AceReason-Nemotron-14B
+      - acereason-nemotron-14b
+      - acereason_nemotron_14b
+    metrics:
+      mmlu: 85.58
+      math_500: 95.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Light-R1-14B-DS:
+    aliases:
+      - qihoo360/Light-R1-14B-DS
+      - light-r1-14b-ds
+      - light_r1_14b_ds
+    metrics:
+      mmlu: 85.17
+      math_500: 93.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenMath-Nemotron-14B-Kaggle:
+    aliases:
+      - nvidia/OpenMath-Nemotron-14B-Kaggle
+      - openmath-nemotron-14b-kaggle
+      - openmath_nemotron_14b_kaggle
+    metrics:
+      mmlu: 77.23
+      math_500: 94.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Dhanishtha-2.0-preview:
+    aliases:
+      - HelpingAI/Dhanishtha-2.0-preview
+      - dhanishtha-2.0-preview
+      - dhanishtha_2_0_preview
+    metrics:
+      mmlu: 81.09
+      math_500: 68.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Lamarckvergence-14B:
+    aliases:
+      - suayptalha/Lamarckvergence-14B
+      - lamarckvergence-14b
+      - lamarckvergence_14b
+    metrics:
+      mmlu: 82.05
+      math_500: 79.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Rubicon-Preview:
+    aliases:
+      - inclusionAI/Rubicon-Preview
+      - rubicon-preview
+      - rubicon_preview
+    metrics:
+      mmlu: 87.58
+      math_500: 96.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  kanana-1.5-15.7b-a3b-instruct:
+    aliases:
+      - kakaocorp/kanana-1.5-15.7b-a3b-instruct
+      - kanana-1.5-15.7b-a3b-instruct
+      - kanana_1_5_15_7b_a3b_instruct
+    metrics:
+      mmlu: 65.02
+      math_500: 66.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Ling-lite-1.5:
+    aliases:
+      - inclusionAI/Ling-lite-1.5
+      - ling-lite-1.5
+      - ling_lite_1_5
+    metrics:
+      mmlu: 78.16
+      math_500: 84.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Ring-lite:
+    aliases:
+      - inclusionAI/Ring-lite
+      - ring-lite
+      - ring_lite
+    metrics:
+      mmlu: 67.65
+      math_500: 74.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Marco-Mini-Instruct:
+    aliases:
+      - ATH-MaaS/Marco-Mini-Instruct
+      - marco-mini-instruct
+      - marco_mini_instruct
+    metrics:
+      mmlu: 82.48
+      math_500: 91.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Mistral-Small-24B-Instruct-2501-reasoning:
+    aliases:
+      - yentinglin/Mistral-Small-24B-Instruct-2501-reasoning
+      - mistral-small-24b-instruct-2501-reasoning
+      - mistral_small_24b_instruct_2501_reasoning
+    metrics:
+      mmlu: 86.73
+      math_500: 92.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Qwopus3.6-27B-Coder:
+    aliases:
+      - Jackrong/Qwopus3.6-27B-Coder
+      - qwopus3.6-27b-coder
+      - qwopus3_6_27b_coder
+    metrics:
+      mmlu: 90.0
+      math_500: 97.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Qwen3.5-27B-Derestricted:
+    aliases:
+      - ArliAI/Qwen3.5-27B-Derestricted
+      - qwen3.5-27b-derestricted
+      - qwen3_5_27b_derestricted
+    metrics:
+      mmlu: 89.98
+      math_500: 84.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Darwin-28B-Opus:
+    aliases:
+      - FINAL-Bench/Darwin-28B-Opus
+      - darwin-28b-opus
+      - darwin_28b_opus
+    metrics:
+      mmlu: 86.14
+      math_500: 91.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Darwin-28B-Coder:
+    aliases:
+      - FINAL-Bench/Darwin-28B-Coder
+      - darwin-28b-coder
+      - darwin_28b_coder
+    metrics:
+      mmlu: 85.25
+      math_500: 90.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  iFlow-ROME:
+    aliases:
+      - FutureLivingLab/iFlow-ROME
+      - iflow-rome
+      - iflow_rome
+    metrics:
+      mmlu: 81.95
+      math_500: 81.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AReaL-boba-2-32B:
+    aliases:
+      - inclusionAI/AReaL-boba-2-32B
+      - areal-boba-2-32b
+      - areal_boba_2_32b
+    metrics:
+      mmlu: 88.95
+      math_500: 96.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenReasoning-Nemotron-32B:
+    aliases:
+      - nvidia/OpenReasoning-Nemotron-32B
+      - openreasoning-nemotron-32b
+      - openreasoning_nemotron_32b
+    metrics:
+      mmlu: 88.35
+      math_500: 96.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenThinker2-32B:
+    aliases:
+      - open-thoughts/OpenThinker2-32B
+      - openthinker2-32b
+      - openthinker2_32b
+    metrics:
+      mmlu: 88.09
+      math_500: 95.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenThinker-32B:
+    aliases:
+      - open-thoughts/OpenThinker-32B
+      - openthinker-32b
+      - openthinker_32b
+    metrics:
+      mmlu: 87.9
+      math_500: 94.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenCodeReasoning-Nemotron-32B:
+    aliases:
+      - nvidia/OpenCodeReasoning-Nemotron-32B
+      - opencodereasoning-nemotron-32b
+      - opencodereasoning_nemotron_32b
+    metrics:
+      mmlu: 87.25
+      math_500: 90.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Bespoke-Stratos-32B:
+    aliases:
+      - bespokelabs/Bespoke-Stratos-32B
+      - bespoke-stratos-32b
+      - bespoke_stratos_32b
+    metrics:
+      mmlu: 86.96
+      math_500: 90.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Light-R1-32B:
+    aliases:
+      - qihoo360/Light-R1-32B
+      - light-r1-32b
+      - light_r1_32b
+    metrics:
+      mmlu: 86.17
+      math_500: 94.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Olmo-3.1-32B-Think:
+    aliases:
+      - allenai/Olmo-3.1-32B-Think
+      - olmo-3.1-32b-think
+      - olmo_3_1_32b_think
+    metrics:
+      mmlu: 85.72
+      math_500: 95.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Sky-T1-32B-Flash:
+    aliases:
+      - NovaSky-AI/Sky-T1-32B-Flash
+      - sky-t1-32b-flash
+      - sky_t1_32b_flash
+    metrics:
+      mmlu: 85.68
+      math_500: 87.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  FluentlyQwen2.5-32B:
+    aliases:
+      - fluently/FluentlyQwen2.5-32B
+      - fluentlyqwen2.5-32b
+      - fluentlyqwen2_5_32b
+    metrics:
+      mmlu: 85.49
+      math_500: 82.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Olmo-3.1-32B-Instruct:
+    aliases:
+      - allenai/Olmo-3.1-32B-Instruct
+      - olmo-3.1-32b-instruct
+      - olmo_3_1_32b_instruct
+    metrics:
+      mmlu: 83.33
+      math_500: 94.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OREAL-32B:
+    aliases:
+      - internlm/OREAL-32B
+      - oreal-32b
+      - oreal_32b
+    metrics:
+      mmlu: 83.21
+      math_500: 93.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  IndustrialCoder:
+    aliases:
+      - Multilingual-Multimodal-NLP/IndustrialCoder
+      - industrialcoder
+    metrics:
+      mmlu: 79.47
+      math_500: 76.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OLMo-2-0325-32B-Instruct:
+    aliases:
+      - allenai/OLMo-2-0325-32B-Instruct
+      - olmo-2-0325-32b-instruct
+      - olmo_2_0325_32b_instruct
+    metrics:
+      mmlu: 77.02
+      math_500: 56.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  s1.1-32B:
+    aliases:
+      - simplescaling/s1.1-32B
+      - s1.1-32b
+      - s1_1_32b
+    metrics:
+      mmlu: 60.68
+      math_500: 93.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  T-pro-it-2.1:
+    aliases:
+      - t-tech/T-pro-it-2.1
+      - t-pro-it-2.1
+      - t_pro_it_2_1
+    metrics:
+      mmlu: 87.77
+      math_500: 93.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  A.X-3.1:
+    aliases:
+      - skt/A.X-3.1
+      - a.x-3.1
+      - a_x_3_1
+    metrics:
+      mmlu: 74.89
+      math_500: 83.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Qwen3.6-35B-A3B-Kimi-K2.6-Reasoning-Distilled:
+    aliases:
+      - lordx64/Qwen3.6-35B-A3B-Kimi-K2.6-Reasoning-Distilled
+      - qwen3.6-35b-a3b-kimi-k2.6-reasoning-distilled
+      - qwen3_6_35b_a3b_kimi_k2_6_reasoning_distilled
+    metrics:
+      mmlu: 91.0
+      math_500: 84.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Apodex-1.0-mini:
+    aliases:
+      - apodex/Apodex-1.0-mini
+      - apodex-1.0-mini
+      - apodex_1_0_mini
+    metrics:
+      mmlu: 90.48
+      math_500: 97.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Nemotron-H-47B-Reasoning-128K:
+    aliases:
+      - nvidia/Nemotron-H-47B-Reasoning-128K
+      - nemotron-h-47b-reasoning-128k
+      - nemotron_h_47b_reasoning_128k
+    metrics:
+      mmlu: 86.37
+      math_500: 84.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Dobby-Unhinged-Llama-3.3-70B:
+    aliases:
+      - SentientAGI/Dobby-Unhinged-Llama-3.3-70B
+      - dobby-unhinged-llama-3.3-70b
+      - dobby_unhinged_llama_3_3_70b
+    metrics:
+      mmlu: 84.68
+      math_500: 74.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  DeepSeek-llama3.3-Bllossom-70B:
+    aliases:
+      - UNIVA-Bllossom/DeepSeek-llama3.3-Bllossom-70B
+      - deepseek-llama3.3-bllossom-70b
+      - deepseek_llama3_3_bllossom_70b
+    metrics:
+      mmlu: 84.53
+      math_500: 92.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  # ============================================================
+  # 多模态 VLM — MMStar 参考基线（mm_star, 百分比; val 全量 1500 题）
+  # 补充于 2026-09-04
+  # ============================================================
+
+  Qwen3-VL-4B-Instruct:
+    aliases:
+      - Qwen/Qwen3-VL-4B-Instruct
+      - qwen3-vl-4b-instruct
+    metrics:
+      mm_star: 52.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Molmo2-4B:
+    aliases:
+      - allenai/Molmo2-4B
+      - molmo2-4b
+    metrics:
+      mm_star: 51
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3_5-4B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3_5-4B-Instruct
+      - internvl3_5-4b-instruct
+      - internvl3-5-4b-instruct
+    metrics:
+      mm_star: 53.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3_5-4B:
+    aliases:
+      - OpenGVLab/InternVL3_5-4B
+      - internvl3_5-4b
+      - internvl3-5-4b
+    metrics:
+      mm_star: 51.5
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  SAGE-MM-Qwen3-VL-4B-SFT_RL:
+    aliases:
+      - allenai/SAGE-MM-Qwen3-VL-4B-SFT_RL
+      - sage-mm-qwen3-vl-4b-sft_rl
+      - sage-mm-qwen3-vl-4b-sft-rl
+    metrics:
+      mm_star: 50.33
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  SAGE-MM-Qwen3-VL-8B-SFT_RL:
+    aliases:
+      - allenai/SAGE-MM-Qwen3-VL-8B-SFT_RL
+      - sage-mm-qwen3-vl-8b-sft_rl
+      - sage-mm-qwen3-vl-8b-sft-rl
+    metrics:
+      mm_star: 54.33
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Qwen3-VL-8B-Thinking:
+    aliases:
+      - Qwen/Qwen3-VL-8B-Thinking
+      - qwen3-vl-8b-thinking
+    metrics:
+      mm_star: 54.67
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  SAGE-MM-Qwen3-VL-8B-SFT:
+    aliases:
+      - allenai/SAGE-MM-Qwen3-VL-8B-SFT
+      - sage-mm-qwen3-vl-8b-sft
+    metrics:
+      mm_star: 52.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Qwen3-VL-8B-Instruct:
+    aliases:
+      - Qwen/Qwen3-VL-8B-Instruct
+      - qwen3-vl-8b-instruct
+    metrics:
+      mm_star: 55
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Molmo2-8B:
+    aliases:
+      - allenai/Molmo2-8B
+      - molmo2-8b
+    metrics:
+      mm_star: 53.33
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3_5-8B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3_5-8B-Instruct
+      - internvl3_5-8b-instruct
+      - internvl3-5-8b-instruct
+    metrics:
+      mm_star: 54.5
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3_5-8B:
+    aliases:
+      - OpenGVLab/InternVL3_5-8B
+      - internvl3_5-8b
+      - internvl3-5-8b
+    metrics:
+      mm_star: 52.33
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  CapRL-InternVL3.5-8B:
+    aliases:
+      - internlm/CapRL-InternVL3.5-8B
+      - caprl-internvl3.5-8b
+    metrics:
+      mm_star: 52.83
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3-9B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3-9B-Instruct
+      - internvl3-9b-instruct
+    metrics:
+      mm_star: 52.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3-9B:
+    aliases:
+      - OpenGVLab/InternVL3-9B
+      - internvl3-9b
+    metrics:
+      mm_star: 56.67
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  MiniCPM-V-4_5:
+    aliases:
+      - openbmb/MiniCPM-V-4_5
+      - minicpm-v-4_5
+      - minicpm-v-4-5
+    metrics:
+      mm_star: 56.83
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  MiniCPM-o-4_5:
+    aliases:
+      - openbmb/MiniCPM-o-4_5
+      - minicpm-o-4_5
+      - minicpm-o-4-5
+    metrics:
+      mm_star: 61.83
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3-14B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3-14B-Instruct
+      - internvl3-14b-instruct
+    metrics:
+      mm_star: 52.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3-14B:
+    aliases:
+      - OpenGVLab/InternVL3-14B
+      - internvl3-14b
+    metrics:
+      mm_star: 55
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3_5-14B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3_5-14B-Instruct
+      - internvl3_5-14b-instruct
+      - internvl3-5-14b-instruct
+    metrics:
+      mm_star: 56.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Ovis2-16B:
+    aliases:
+      - AIDC-AI/Ovis2-16B
+      - ovis2-16b
+    metrics:
+      mm_star: 55.83
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL2_5-26B:
+    aliases:
+      - OpenGVLab/InternVL2_5-26B
+      - internvl2_5-26b
+      - internvl2-5-26b
+    metrics:
+      mm_star: 51.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3_5-30B-A3B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3_5-30B-A3B-Instruct
+      - internvl3_5-30b-a3b-instruct
+      - internvl3-5-30b-a3b-instruct
+    metrics:
+      mm_star: 60.33
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Qwen3-VL-30B-A3B-Thinking:
+    aliases:
+      - Qwen/Qwen3-VL-30B-A3B-Thinking
+      - qwen3-vl-30b-a3b-thinking
+    metrics:
+      mm_star: 55.67
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Qwen3-VL-30B-A3B-Instruct:
+    aliases:
+      - Qwen/Qwen3-VL-30B-A3B-Instruct
+      - qwen3-vl-30b-a3b-instruct
+    metrics:
+      mm_star: 54
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Ovis2.6-30B-A3B:
+    aliases:
+      - AIDC-AI/Ovis2.6-30B-A3B
+      - ovis2.6-30b-a3b
+    metrics:
+      mm_star: 52.67
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Qwen3-VL-32B-Thinking:
+    aliases:
+      - Qwen/Qwen3-VL-32B-Thinking
+      - qwen3-vl-32b-thinking
+    metrics:
+      mm_star: 59.67
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Qwen3-VL-32B-Instruct:
+    aliases:
+      - Qwen/Qwen3-VL-32B-Instruct
+      - qwen3-vl-32b-instruct
+    metrics:
+      mm_star: 59.67
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Ovis2-34B:
+    aliases:
+      - AIDC-AI/Ovis2-34B
+      - ovis2-34b
+    metrics:
+      mm_star: 58
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3_5-38B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3_5-38B-Instruct
+      - internvl3_5-38b-instruct
+      - internvl3-5-38b-instruct
+    metrics:
+      mm_star: 59.67
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3-38B:
+    aliases:
+      - OpenGVLab/InternVL3-38B
+      - internvl3-38b
+    metrics:
+      mm_star: 58.83
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3_5-38B:
+    aliases:
+      - OpenGVLab/InternVL3_5-38B
+      - internvl3_5-38b
+      - internvl3-5-38b
+    metrics:
+      mm_star: 59.5
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL2_5-38B:
+    aliases:
+      - OpenGVLab/InternVL2_5-38B
+      - internvl2_5-38b
+      - internvl2-5-38b
+    metrics:
+      mm_star: 54.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3-38B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3-38B-Instruct
+      - internvl3-38b-instruct
+    metrics:
+      mm_star: 57.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Qwen2.5-VL-72B-Instruct:
+    aliases:
+      - Qwen/Qwen2.5-VL-72B-Instruct
+      - qwen2.5-vl-72b-instruct
+    metrics:
+      mm_star: 54.33
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL2_5-78B:
+    aliases:
+      - OpenGVLab/InternVL2_5-78B
+      - internvl2_5-78b
+      - internvl2-5-78b
+    metrics:
+      mm_star: 55.5
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3-78B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3-78B-Instruct
+      - internvl3-78b-instruct
+    metrics:
+      mm_star: 60.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3-78B:
+    aliases:
+      - OpenGVLab/InternVL3-78B
+      - internvl3-78b
+    metrics:
+      mm_star: 62.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  # ==== 语言模型参考基线批量同步（2026-09-07，共 123 个）====
+  EXAONE-Deep-2.4B:
+    aliases:
+      - LGAI-EXAONE/EXAONE-Deep-2.4B
+      - exaone-deep-2.4b
+      - exaone_deep_2_4b
+    metrics:
+      mmlu: 62
+      math_500: 92.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Lizzy-7B:
+    aliases:
+      - flwrlabs/Lizzy-7B
+      - lizzy-7b
+      - lizzy_7b
+    metrics:
+      mmlu: 67.35
+      math_500: 85
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  EXAONE-Deep-7.8B:
+    aliases:
+      - LGAI-EXAONE/EXAONE-Deep-7.8B
+      - exaone-deep-7.8b
+      - exaone_deep_7_8b
+    metrics:
+      mmlu: 74.55
+      math_500: 95.8
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  DNA-R1:
+    aliases:
+      - dnotitia/DNA-R1
+      - dna-r1
+      - dna_r1
+    metrics:
+      mmlu: 85.72
+      math_500: 76.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Phi-4-reasoning:
+    aliases:
+      - microsoft/Phi-4-reasoning
+      - phi-4-reasoning
+      - phi_4_reasoning
+    metrics:
+      mmlu: 86.81
+      math_500: 94
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Phi-4-o1:
+    aliases:
+      - prithivMLmods/Phi-4-o1
+      - phi-4-o1
+      - phi_4_o1
+    metrics:
+      mmlu: 85.35
+      math_500: 81
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  DASD-30B-A3B-Thinking-Preview:
+    aliases:
+      - Alibaba-Apsara/DASD-30B-A3B-Thinking-Preview
+      - dasd-30b-a3b-thinking-preview
+      - dasd_30b_a3b_thinking_preview
+    metrics:
+      mmlu: 80.38
+      math_500: 93
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Klear-46B-A2.5B-Instruct:
+    aliases:
+      - Kwai-Klear/Klear-46B-A2.5B-Instruct
+      - klear-46b-a2.5b-instruct
+      - klear_46b_a2_5b_instruct
+    metrics:
+      mmlu: 82.21
+      math_500: 81
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Qwen3-Nemotron-32B-RLBFF:
+    aliases:
+      - nvidia/Qwen3-Nemotron-32B-RLBFF
+      - qwen3-nemotron-32b-rlbff
+      - qwen3_nemotron_32b_rlbff
+    metrics:
+      mmlu: 88.16
+      math_500: 96.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Virtuoso-Large:
+    aliases:
+      - arcee-ai/Virtuoso-Large
+      - virtuoso-large
+      - virtuoso_large
+    metrics:
+      mmlu: 87.34
+      math_500: 84.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  OpenCodeReasoning-Nemotron-32B-IOI:
+    aliases:
+      - nvidia/OpenCodeReasoning-Nemotron-32B-IOI
+      - opencodereasoning-nemotron-32b-ioi
+      - opencodereasoning_nemotron_32b_ioi
+    metrics:
+      mmlu: 86.11
+      math_500: 91
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  nomos-1:
+    aliases:
+      - NousResearch/nomos-1
+      - nomos-1
+      - nomos_1
+    metrics:
+      mmlu: 85.42
+      math_500: 93.8
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  OlympicCoder-32B:
+    aliases:
+      - open-r1/OlympicCoder-32B
+      - olympiccoder-32b
+      - olympiccoder_32b
+    metrics:
+      mmlu: 83.19
+      math_500: 86.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  WebWorld-14B:
+    aliases:
+      - Qwen/WebWorld-14B
+      - webworld-14b
+      - webworld_14b
+    metrics:
+      mmlu: 81.61
+      math_500: 91.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Virtuoso-Small-v2:
+    aliases:
+      - arcee-ai/Virtuoso-Small-v2
+      - virtuoso-small-v2
+      - virtuoso_small_v2
+    metrics:
+      mmlu: 81.39
+      math_500: 75.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  SWE-Dev-32B:
+    aliases:
+      - zai-org/SWE-Dev-32B
+      - swe-dev-32b
+      - swe_dev_32b
+    metrics:
+      mmlu: 79.89
+      math_500: 77.8
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Virtuoso-Lite:
+    aliases:
+      - arcee-ai/Virtuoso-Lite
+      - virtuoso-lite
+      - virtuoso_lite
+    metrics:
+      mmlu: 77.84
+      math_500: 59.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Bespoke-Stratos-7B:
+    aliases:
+      - bespokelabs/Bespoke-Stratos-7B
+      - bespoke-stratos-7b
+      - bespoke_stratos_7b
+    metrics:
+      mmlu: 75.1
+      math_500: 82.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Hunyuan-4B-Instruct:
+    aliases:
+      - tencent/Hunyuan-4B-Instruct
+      - hunyuan-4b-instruct
+      - hunyuan_4b_instruct
+    metrics:
+      mmlu: 72.47
+      math_500: 92.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  MiniCPM4-MCP:
+    aliases:
+      - openbmb/MiniCPM4-MCP
+      - minicpm4-mcp
+      - minicpm4_mcp
+    metrics:
+      mmlu: 66.72
+      math_500: 61.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Arcee-Maestro-7B-Preview:
+    aliases:
+      - arcee-ai/Arcee-Maestro-7B-Preview
+      - arcee-maestro-7b-preview
+      - arcee_maestro_7b_preview
+    metrics:
+      mmlu: 59.16
+      math_500: 84.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Nex-N2-mini:
+    aliases:
+      - nex-agi/Nex-N2-mini
+      - nex-n2-mini
+      - nex_n2_mini
+    metrics:
+      mmlu: 91.02
+      math_500: 95.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Ornith-1.5-35B-A3B:
+    aliases:
+      - ornith-ai/Ornith-1.5-35B-A3B
+      - ornith-1.5-35b-a3b
+      - ornith_1_5_35b_a3b
+    metrics:
+      mmlu: 90.96
+      math_500: 89.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Qwable-v1:
+    aliases:
+      - lordx64/Qwable-v1
+      - qwable-v1
+      - qwable_v1
+    metrics:
+      mmlu: 90.83
+      math_500: 83
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  XYZ-Aquila-mini:
+    aliases:
+      - XYZAILab/XYZ-Aquila-mini
+      - xyz-aquila-mini
+      - xyz_aquila_mini
+    metrics:
+      mmlu: 90.02
+      math_500: 98
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  JoyAI-LLM-Flash:
+    aliases:
+      - jdopensource/JoyAI-LLM-Flash
+      - joyai-llm-flash
+      - joyai_llm_flash
+    metrics:
+      mmlu: 89.79
+      math_500: 97.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  DeepSWE-Preview:
+    aliases:
+      - agentica-org/DeepSWE-Preview
+      - deepswe-preview
+      - deepswe_preview
+    metrics:
+      mmlu: 89.56
+      math_500: 96.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  QwenLong-L1.5-30B-A3B:
+    aliases:
+      - Tongyi-Zhiwen/QwenLong-L1.5-30B-A3B
+      - qwenlong-l1.5-30b-a3b
+      - qwenlong_l1_5_30b_a3b
+    metrics:
+      mmlu: 89.45
+      math_500: 97.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  K2-Think:
+    aliases:
+      - IFM/K2-Think
+      - k2-think
+      - k2_think
+    metrics:
+      mmlu: 89.07
+      math_500: 97.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  GLM-Z1-32B-0414:
+    aliases:
+      - zai-org/GLM-Z1-32B-0414
+      - glm-z1-32b-0414
+      - glm_z1_32b_0414
+    metrics:
+      mmlu: 88.58
+      math_500: 95.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  AM-Thinking-v1:
+    aliases:
+      - a-m-team/AM-Thinking-v1
+      - am-thinking-v1
+      - am_thinking_v1
+    metrics:
+      mmlu: 88.37
+      math_500: 97.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  MiroThinker-v1.0-72B:
+    aliases:
+      - miromind-ai/MiroThinker-v1.0-72B
+      - mirothinker-v1.0-72b
+      - mirothinker_v1_0_72b
+    metrics:
+      mmlu: 88.37
+      math_500: 94.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  QwenLong-L1-32B:
+    aliases:
+      - Tongyi-Zhiwen/QwenLong-L1-32B
+      - qwenlong-l1-32b
+      - qwenlong_l1_32b
+    metrics:
+      mmlu: 88.23
+      math_500: 94.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  KAT-Dev:
+    aliases:
+      - Kwaipilot/KAT-Dev
+      - kat-dev
+      - kat_dev
+    metrics:
+      mmlu: 87.88
+      math_500: 95.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Qwen3-Coder-Next-Base:
+    aliases:
+      - Qwen/Qwen3-Coder-Next-Base
+      - qwen3-coder-next-base
+      - qwen3_coder_next_base
+    metrics:
+      mmlu: 87.07
+      math_500: 87.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  A.X-4.0:
+    aliases:
+      - skt/A.X-4.0
+      - a.x-4.0
+      - a_x_4_0
+    metrics:
+      mmlu: 87.05
+      math_500: 82
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  KAT-Dev-72B-Exp:
+    aliases:
+      - Kwaipilot/KAT-Dev-72B-Exp
+      - kat-dev-72b-exp
+      - kat_dev_72b_exp
+    metrics:
+      mmlu: 86.44
+      math_500: 85.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Hermes-4.3-36B:
+    aliases:
+      - NousResearch/Hermes-4.3-36B
+      - hermes-4.3-36b
+      - hermes_4_3_36b
+    metrics:
+      mmlu: 86.42
+      math_500: 82.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  L3.3-Nevoria-R1-70b:
+    aliases:
+      - Steelskull/L3.3-Nevoria-R1-70b
+      - l3.3-nevoria-r1-70b
+      - l3_3_nevoria_r1_70b
+    metrics:
+      mmlu: 86.38
+      math_500: 79.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  KAT-V1-40B:
+    aliases:
+      - Kwaipilot/KAT-V1-40B
+      - kat-v1-40b
+      - kat_v1_40b
+    metrics:
+      mmlu: 86.28
+      math_500: 97
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Olmo-3-32B-Think:
+    aliases:
+      - allenai/Olmo-3-32B-Think
+      - olmo-3-32b-think
+      - olmo_3_32b_think
+    metrics:
+      mmlu: 85.95
+      math_500: 95.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  L3.3-MS-Nevoria-70b:
+    aliases:
+      - Steelskull/L3.3-MS-Nevoria-70b
+      - l3.3-ms-nevoria-70b
+      - l3_3_ms_nevoria_70b
+    metrics:
+      mmlu: 84.65
+      math_500: 72.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  granite-4.1-30b:
+    aliases:
+      - ibm-granite/granite-4.1-30b
+      - granite-4.1-30b
+      - granite_4_1_30b
+    metrics:
+      mmlu: 84.21
+      math_500: 83.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Laguna-XS.2:
+    aliases:
+      - poolside/Laguna-XS.2
+      - laguna-xs.2
+      - laguna_xs_2
+    metrics:
+      mmlu: 83.42
+      math_500: 81.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Hermes-4-70B:
+    aliases:
+      - NousResearch/Hermes-4-70B
+      - hermes-4-70b
+      - hermes_4_70b
+    metrics:
+      mmlu: 83.33
+      math_500: 70.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Laguna-XS-2.1:
+    aliases:
+      - poolside/Laguna-XS-2.1
+      - laguna-xs-2.1
+      - laguna_xs_2_1
+    metrics:
+      mmlu: 82.7
+      math_500: 76
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Ornith-1.0-35B:
+    aliases:
+      - ornith-ai/Ornith-1.0-35B
+      - ornith-1.0-35b
+      - ornith_1_0_35b
+    metrics:
+      mmlu: 91.17
+      math_500: 96.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  BTL-4:
+    aliases:
+      - badtheorylabs/BTL-4
+      - btl-4
+      - btl_4
+    metrics:
+      mmlu: 91.04
+      math_500: 97
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Ornith-1.0-9B:
+    aliases:
+      - ornith-ai/Ornith-1.0-9B
+      - ornith-1.0-9b
+      - ornith_1_0_9b
+    metrics:
+      mmlu: 89.12
+      math_500: 82
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  cogito-v1-preview-qwen-32B:
+    aliases:
+      - deepcogito/cogito-v1-preview-qwen-32B
+      - cogito-v1-preview-qwen-32b
+      - cogito_v1_preview_qwen_32b
+    metrics:
+      mmlu: 88.97
+      math_500: 81.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Qwen3.8-9B-Distill:
+    aliases:
+      - empero-ai/Qwen3.8-9B-Distill
+      - qwen3.8-9b-distill
+      - qwen3_8_9b_distill
+    metrics:
+      mmlu: 88.46
+      math_500: 78.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  OmniCoder-9B:
+    aliases:
+      - Tesslate/OmniCoder-9B
+      - omnicoder-9b
+      - omnicoder_9b
+    metrics:
+      mmlu: 88.4
+      math_500: 77.8
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  T-pro-it-2.0:
+    aliases:
+      - t-tech/T-pro-it-2.0
+      - t-pro-it-2.0
+      - t_pro_it_2_0
+    metrics:
+      mmlu: 88.31
+      math_500: 95.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Qwable-9B-Claude-Fable-5:
+    aliases:
+      - empero-ai/Qwable-9B-Claude-Fable-5
+      - qwable-9b-claude-fable-5
+      - qwable_9b_claude_fable_5
+    metrics:
+      mmlu: 88.12
+      math_500: 75.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  QwQ-32B-Snowdrop-v0:
+    aliases:
+      - trashpanda-org/QwQ-32B-Snowdrop-v0
+      - qwq-32b-snowdrop-v0
+      - qwq_32b_snowdrop_v0
+    metrics:
+      mmlu: 87.84
+      math_500: 96.8
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  FairyR1-32B:
+    aliases:
+      - PKU-DS-LAB/FairyR1-32B
+      - fairyr1-32b
+      - fairyr1_32b
+    metrics:
+      mmlu: 87.3
+      math_500: 97.8
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Ornith-1.5-9B:
+    aliases:
+      - ornith-ai/Ornith-1.5-9B
+      - ornith-1.5-9b
+      - ornith_1_5_9b
+    metrics:
+      mmlu: 86.95
+      math_500: 85.8
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  UIGEN-X-32B-0727:
+    aliases:
+      - Tesslate/UIGEN-X-32B-0727
+      - uigen-x-32b-0727
+      - uigen_x_32b_0727
+    metrics:
+      mmlu: 86.77
+      math_500: 86.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  context-1:
+    aliases:
+      - chromadb/context-1
+      - context-1
+      - context_1
+    metrics:
+      mmlu: 86.54
+      math_500: 91.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  cogito-v1-preview-qwen-14B:
+    aliases:
+      - deepcogito/cogito-v1-preview-qwen-14B
+      - cogito-v1-preview-qwen-14b
+      - cogito_v1_preview_qwen_14b
+    metrics:
+      mmlu: 86.54
+      math_500: 76.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Qwen3-8B-Drama-Thinking:
+    aliases:
+      - FutureMa/Qwen3-8B-Drama-Thinking
+      - qwen3-8b-drama-thinking
+      - qwen3_8b_drama_thinking
+    metrics:
+      mmlu: 85.74
+      math_500: 95.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Qwythos-9B-v2:
+    aliases:
+      - empero-ai/Qwythos-9B-v2
+      - qwythos-9b-v2
+      - qwythos_9b_v2
+    metrics:
+      mmlu: 85.7
+      math_500: 94.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  harness-1:
+    aliases:
+      - pat-jj/harness-1
+      - harness-1
+      - harness_1
+    metrics:
+      mmlu: 85.33
+      math_500: 93.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  II-Medical-8B-1706:
+    aliases:
+      - Intelligent-Internet/II-Medical-8B-1706
+      - ii-medical-8b-1706
+      - ii_medical_8b_1706
+    metrics:
+      mmlu: 85.18
+      math_500: 94.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  OptiMind-SFT:
+    aliases:
+      - microsoft/OptiMind-SFT
+      - optimind-sft
+      - optimind_sft
+    metrics:
+      mmlu: 85.14
+      math_500: 91.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  DeepSeek-R1-Distill-Qwen-14B-Japanese:
+    aliases:
+      - cyberagent/DeepSeek-R1-Distill-Qwen-14B-Japanese
+      - deepseek-r1-distill-qwen-14b-japanese
+      - deepseek_r1_distill_qwen_14b_japanese
+    metrics:
+      mmlu: 84.91
+      math_500: 93.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Apriel-Nemotron-15b-Thinker:
+    aliases:
+      - ServiceNow-AI/Apriel-Nemotron-15b-Thinker
+      - apriel-nemotron-15b-thinker
+      - apriel_nemotron_15b_thinker
+    metrics:
+      mmlu: 84.74
+      math_500: 95.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Trinity-Mini:
+    aliases:
+      - arcee-ai/Trinity-Mini
+      - trinity-mini
+      - trinity_mini
+    metrics:
+      mmlu: 84.37
+      math_500: 94.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  gpt-oss-safeguard-20b:
+    aliases:
+      - openai/gpt-oss-safeguard-20b
+      - gpt-oss-safeguard-20b
+      - gpt_oss_safeguard_20b
+    metrics:
+      mmlu: 84.35
+      math_500: 94.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Qwythos-9B-Claude-Mythos-5-1M:
+    aliases:
+      - empero-ai/Qwythos-9B-Claude-Mythos-5-1M
+      - qwythos-9b-claude-mythos-5-1m
+      - qwythos_9b_claude_mythos_5_1m
+    metrics:
+      mmlu: 83.77
+      math_500: 77.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  mem-agent:
+    aliases:
+      - driaforall/mem-agent
+      - mem-agent
+      - mem_agent
+    metrics:
+      mmlu: 83.77
+      math_500: 96
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Datarus-R1-14B-preview:
+    aliases:
+      - DatarusAI/Datarus-R1-14B-preview
+      - datarus-r1-14b-preview
+      - datarus_r1_14b_preview
+    metrics:
+      mmlu: 83.69
+      math_500: 91.8
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  XortronCriminalComputingConfig:
+    aliases:
+      - darkc0de/XortronCriminalComputingConfig
+      - xortroncriminalcomputingconfig
+    metrics:
+      mmlu: 83.53
+      math_500: 74
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  gpt-oss-20b-heretic:
+    aliases:
+      - p-e-w/gpt-oss-20b-heretic
+      - gpt-oss-20b-heretic
+      - gpt_oss_20b_heretic
+    metrics:
+      mmlu: 83.46
+      math_500: 92.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  DeepAnalyze-8B:
+    aliases:
+      - RUC-DataLab/DeepAnalyze-8B
+      - deepanalyze-8b
+      - deepanalyze_8b
+    metrics:
+      mmlu: 83.42
+      math_500: 93.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  QED-Nano:
+    aliases:
+      - lm-provers/QED-Nano
+      - qed-nano
+      - qed_nano
+    metrics:
+      mmlu: 83.37
+      math_500: 94.8
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Mellum2-12B-A2.5B-Thinking:
+    aliases:
+      - JetBrains/Mellum2-12B-A2.5B-Thinking
+      - mellum2-12b-a2.5b-thinking
+      - mellum2_12b_a2_5b_thinking
+    metrics:
+      mmlu: 83.21
+      math_500: 90.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Omega-Darker-Gaslight_The-Final-Forgotten-Fever-Dream-24B:
+    aliases:
+      - ReadyArt/Omega-Darker-Gaslight_The-Final-Forgotten-Fever-Dream-24B
+      - omega-darker-gaslight_the-final-forgotten-fever-dream-24b
+      - omega_darker_gaslight_the_final_forgotten_fever_dream_24b
+    metrics:
+      mmlu: 83.17
+      math_500: 71.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  gpt-oss-20b-Derestricted:
+    aliases:
+      - ArliAI/gpt-oss-20b-Derestricted
+      - gpt-oss-20b-derestricted
+      - gpt_oss_20b_derestricted
+    metrics:
+      mmlu: 83.14
+      math_500: 91.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  GLM-Z1-9B-0414:
+    aliases:
+      - zai-org/GLM-Z1-9B-0414
+      - glm-z1-9b-0414
+      - glm_z1_9b_0414
+    metrics:
+      mmlu: 83.07
+      math_500: 95.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Broken-Tutu-24B-Unslop-v2.0:
+    aliases:
+      - ReadyArt/Broken-Tutu-24B-Unslop-v2.0
+      - broken-tutu-24b-unslop-v2.0
+      - broken_tutu_24b_unslop_v2_0
+    metrics:
+      mmlu: 83.02
+      math_500: 69.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Falcon-H1R-7B:
+    aliases:
+      - tiiuae/Falcon-H1R-7B
+      - falcon-h1r-7b
+      - falcon_h1r_7b
+    metrics:
+      mmlu: 82.51
+      math_500: 95
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  MiroThinker-1.7-mini:
+    aliases:
+      - miromind-ai/MiroThinker-1.7-mini
+      - mirothinker-1.7-mini
+      - mirothinker_1_7_mini
+    metrics:
+      mmlu: 82.44
+      math_500: 84.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Dans-PersonalityEngine-V1.2.0-24b:
+    aliases:
+      - PocketDoc/Dans-PersonalityEngine-V1.2.0-24b
+      - dans-personalityengine-v1.2.0-24b
+      - dans_personalityengine_v1_2_0_24b
+    metrics:
+      mmlu: 82.28
+      math_500: 61.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Hermes-4-14B:
+    aliases:
+      - NousResearch/Hermes-4-14B
+      - hermes-4-14b
+      - hermes_4_14b
+    metrics:
+      mmlu: 82.28
+      math_500: 76.8
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  II-Search-4B:
+    aliases:
+      - Intelligent-Internet/II-Search-4B
+      - ii-search-4b
+      - ii_search_4b
+    metrics:
+      mmlu: 82.16
+      math_500: 95.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Dans-PersonalityEngine-V1.3.0-24b:
+    aliases:
+      - PocketDoc/Dans-PersonalityEngine-V1.3.0-24b
+      - dans-personalityengine-v1.3.0-24b
+      - dans_personalityengine_v1_3_0_24b
+    metrics:
+      mmlu: 82.02
+      math_500: 52.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Fathom-Search-4B:
+    aliases:
+      - FractalAIResearch/Fathom-Search-4B
+      - fathom-search-4b
+      - fathom_search_4b
+    metrics:
+      mmlu: 81.91
+      math_500: 95.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  WEBGEN-4B-Preview:
+    aliases:
+      - Tesslate/WEBGEN-4B-Preview
+      - webgen-4b-preview
+      - webgen_4b_preview
+    metrics:
+      mmlu: 81.51
+      math_500: 95
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Jan-code-4b:
+    aliases:
+      - janhq/Jan-code-4b
+      - jan-code-4b
+      - jan_code_4b
+    metrics:
+      mmlu: 81.42
+      math_500: 95.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  ERNIE-4.5-21B-A3B-PT:
+    aliases:
+      - baidu/ERNIE-4.5-21B-A3B-PT
+      - ernie-4.5-21b-a3b-pt
+      - ernie_4_5_21b_a3b_pt
+    metrics:
+      mmlu: 81.3
+      math_500: 85.8
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  SWE-agent-LM-32B:
+    aliases:
+      - SWE-bench/SWE-agent-LM-32B
+      - swe-agent-lm-32b
+      - swe_agent_lm_32b
+    metrics:
+      mmlu: 80.19
+      math_500: 74.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  GLM-4-9B-0414:
+    aliases:
+      - zai-org/GLM-4-9B-0414
+      - glm-4-9b-0414
+      - glm_4_9b_0414
+    metrics:
+      mmlu: 79.97
+      math_500: 66.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Skywork-SWE-32B:
+    aliases:
+      - Skywork/Skywork-SWE-32B
+      - skywork-swe-32b
+      - skywork_swe_32b
+    metrics:
+      mmlu: 79.68
+      math_500: 72.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  granite-4.1-8b:
+    aliases:
+      - ibm-granite/granite-4.1-8b
+      - granite-4.1-8b
+      - granite_4_1_8b
+    metrics:
+      mmlu: 79.39
+      math_500: 82
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  OpenThinker-Agent-v1:
+    aliases:
+      - open-thoughts/OpenThinker-Agent-v1
+      - openthinker-agent-v1
+      - openthinker_agent_v1
+    metrics:
+      mmlu: 78.58
+      math_500: 94.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  LocoTrainer-4B:
+    aliases:
+      - LocoreMind/LocoTrainer-4B
+      - locotrainer-4b
+      - locotrainer_4b
+    metrics:
+      mmlu: 78.4
+      math_500: 87.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Mellum2-12B-A2.5B-Instruct:
+    aliases:
+      - JetBrains/Mellum2-12B-A2.5B-Instruct
+      - mellum2-12b-a2.5b-instruct
+      - mellum2_12b_a2_5b_instruct
+    metrics:
+      mmlu: 78.16
+      math_500: 92
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Olmo-3-7B-Think:
+    aliases:
+      - allenai/Olmo-3-7B-Think
+      - olmo-3-7b-think
+      - olmo_3_7b_think
+    metrics:
+      mmlu: 77.9
+      math_500: 95.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  pokee_research_7b:
+    aliases:
+      - PokeeAI/pokee_research_7b
+      - pokee_research_7b
+    metrics:
+      mmlu: 76.12
+      math_500: 77.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  LFM2.5-8B-A1B:
+    aliases:
+      - LiquidAI/LFM2.5-8B-A1B
+      - lfm2.5-8b-a1b
+      - lfm2_5_8b_a1b
+    metrics:
+      mmlu: 74.81
+      math_500: 91.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  DeepHermes-3-Mistral-24B-Preview:
+    aliases:
+      - NousResearch/DeepHermes-3-Mistral-24B-Preview
+      - deephermes-3-mistral-24b-preview
+      - deephermes_3_mistral_24b_preview
+    metrics:
+      mmlu: 73.55
+      math_500: 50
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  WEBGEN-OSS-20B:
+    aliases:
+      - Tesslate/WEBGEN-OSS-20B
+      - webgen-oss-20b
+      - webgen_oss_20b
+    metrics:
+      mmlu: 73.51
+      math_500: 75
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  OlympicCoder-7B:
+    aliases:
+      - open-r1/OlympicCoder-7B
+      - olympiccoder-7b
+      - olympiccoder_7b
+    metrics:
+      mmlu: 73.06
+      math_500: 78.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Qwen3-Coder-REAP-25B-A3B:
+    aliases:
+      - cerebras/Qwen3-Coder-REAP-25B-A3B
+      - qwen3-coder-reap-25b-a3b
+      - qwen3_coder_reap_25b_a3b
+    metrics:
+      mmlu: 71.82
+      math_500: 87.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Olmo-3-7B-Instruct:
+    aliases:
+      - allenai/Olmo-3-7B-Instruct
+      - olmo-3-7b-instruct
+      - olmo_3_7b_instruct
+    metrics:
+      mmlu: 70.89
+      math_500: 90.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  LFM2.5-2.6B:
+    aliases:
+      - LiquidAI/LFM2.5-2.6B
+      - lfm2.5-2.6b
+      - lfm2_5_2_6b
+    metrics:
+      mmlu: 70.59
+      math_500: 88.8
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  BitCPM-CANN-8B:
+    aliases:
+      - openbmb/BitCPM-CANN-8B
+      - bitcpm-cann-8b
+      - bitcpm_cann_8b
+    metrics:
+      mmlu: 70.11
+      math_500: 59
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Strand-Rust-Coder-14B-v1:
+    aliases:
+      - Fortytwo-Network/Strand-Rust-Coder-14B-v1
+      - strand-rust-coder-14b-v1
+      - strand_rust_coder_14b_v1
+    metrics:
+      mmlu: 69.91
+      math_500: 69.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  LFM2-8B-A1B:
+    aliases:
+      - LiquidAI/LFM2-8B-A1B
+      - lfm2-8b-a1b
+      - lfm2_8b_a1b
+    metrics:
+      mmlu: 69.81
+      math_500: 84.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Turkish-Gemma-9b-T1:
+    aliases:
+      - ytu-ce-cosmos/Turkish-Gemma-9b-T1
+      - turkish-gemma-9b-t1
+      - turkish_gemma_9b_t1
+    metrics:
+      mmlu: 68.82
+      math_500: 51.8
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  LFM2-2.6B:
+    aliases:
+      - LiquidAI/LFM2-2.6B
+      - lfm2-2.6b
+      - lfm2_2_6b
+    metrics:
+      mmlu: 68.61
+      math_500: 73
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  LFM2-2.6B-Transcript:
+    aliases:
+      - LiquidAI/LFM2-2.6B-Transcript
+      - lfm2-2.6b-transcript
+      - lfm2_2_6b_transcript
+    metrics:
+      mmlu: 68.21
+      math_500: 70.8
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Llama3.3-8B-Instruct-Thinking-Claude-4.5-Opus-High-Reasoning:
+    aliases:
+      - DavidAU/Llama3.3-8B-Instruct-Thinking-Claude-4.5-Opus-High-Reasoning
+      - llama3.3-8b-instruct-thinking-claude-4.5-opus-high-reasoning
+      - llama3_3_8b_instruct_thinking_claude_4_5_opus_high_reasoning
+    metrics:
+      mmlu: 67.89
+      math_500: 53
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Nemotron-Cascade-2-30B-A3B:
+    aliases:
+      - nvidia/Nemotron-Cascade-2-30B-A3B
+      - nemotron-cascade-2-30b-a3b
+      - nemotron_cascade_2_30b_a3b
+    metrics:
+      mmlu: 67.37
+      math_500: 95
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  GLM-4.7-Flash-REAP-23B-A3B:
+    aliases:
+      - cerebras/GLM-4.7-Flash-REAP-23B-A3B
+      - glm-4.7-flash-reap-23b-a3b
+      - glm_4_7_flash_reap_23b_a3b
+    metrics:
+      mmlu: 67.12
+      math_500: 94.2
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  VulnLLM-R-7B:
+    aliases:
+      - Virtue-AI-HUB/VulnLLM-R-7B
+      - vulnllm-r-7b
+      - vulnllm_r_7b
+    metrics:
+      mmlu: 65.42
+      math_500: 72.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Llama-3.1-Nemotron-8B-UltraLong-4M-Instruct:
+    aliases:
+      - nvidia/Llama-3.1-Nemotron-8B-UltraLong-4M-Instruct
+      - llama-3.1-nemotron-8b-ultralong-4m-instruct
+      - llama_3_1_nemotron_8b_ultralong_4m_instruct
+    metrics:
+      mmlu: 65.21
+      math_500: 54.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Ling-mini-2.0:
+    aliases:
+      - inclusionAI/Ling-mini-2.0
+      - ling-mini-2.0
+      - ling_mini_2_0
+    metrics:
+      mmlu: 64.93
+      math_500: 62.8
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  DeepHat-V1-7B:
+    aliases:
+      - DeepHat/DeepHat-V1-7B
+      - deephat-v1-7b
+      - deephat_v1_7b
+    metrics:
+      mmlu: 63.91
+      math_500: 58
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  openhands-lm-7b-v0.1:
+    aliases:
+      - OpenHands/openhands-lm-7b-v0.1
+      - openhands-lm-7b-v0.1
+      - openhands_lm_7b_v0_1
+    metrics:
+      mmlu: 63.65
+      math_500: 51.6
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  Ring-mini-2.0:
+    aliases:
+      - inclusionAI/Ring-mini-2.0
+      - ring-mini-2.0
+      - ring_mini_2_0
+    metrics:
+      mmlu: 63.47
+      math_500: 56.4
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"
+  EXAONE-4.0-1.2B:
+    aliases:
+      - LGAI-EXAONE/EXAONE-4.0-1.2B
+      - exaone-4.0-1.2b
+      - exaone_4_0_1_2b
+    metrics:
+      mmlu: 61.42
+      math_500: 81.8
+    source: "外部参考基线（评测榜单）"
+    updated_at: "2026-09-07"

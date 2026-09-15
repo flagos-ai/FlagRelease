@@ -101,7 +101,10 @@ get_default_branch() {
 get_backend_env() {
     local vendor="$1"
     case "$vendor" in
-        nvidia|amd|cpu) echo "" ;;  # 不设置 FLAGTREE_BACKEND
+        # zhenwu(平头哥 PPU)是 CUDA 兼容卡，走 nvidia 同路径，不设置 FLAGTREE_BACKEND。
+        # 注意：PPU 实际使用厂商镜像预装的 flagtree（如 0.6.0+ppu），本脚本仅在缺失时兜底；
+        # 其专属预编译 wheel 版本未登记（缺官方发布信息），源码编译走 main 分支。
+        nvidia|amd|cpu|zhenwu) echo "" ;;  # 不设置 FLAGTREE_BACKEND
         iluvatar)   echo "iluvatar" ;;
         mthreads)   echo "mthreads" ;;
         xpu)        echo "xpu" ;;

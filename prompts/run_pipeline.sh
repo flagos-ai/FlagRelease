@@ -1,26 +1,12 @@
 #!/bin/bash
-
-# Copyright 2026 FlagOS Contributors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 # FlagOS 全自动迁移流程 — 一键启动脚本（V1+V2+V3 算子调优）
 #
 # 用法:
-#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...]
+#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--datasets ds1,ds2,...] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>] [--feishu-webhook URL]
 #
 # 自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址
 # 模型路径：仅需模型名，自动搜索宿主机路径；未找到则容器内自动下载。也可通过 --model-path 显式指定
+# 数据集：--datasets 逗号分隔（gpqa_diamond/mmlu/math_500），默认 gpqa_diamond；每个数据集独立评测与判定
 #
 # 示例:
 #   bash prompts/run_pipeline.sh qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass
@@ -73,6 +59,7 @@ IMAGE_MODE=false
 MODEL_PATH=""
 FILTER_FLAGS=""
 PROXY_LIST=""
+DATASETS_CSV="gpqa_diamond"   # 精度评测数据集（逗号分隔，默认 gpqa_diamond）
 
 if [[ "${1:-}" == "--image" ]]; then
     # 向后兼容：旧 --image 格式
@@ -111,14 +98,15 @@ if [[ "${1:-}" == "--image" ]]; then
 else
     # 统一格式：7 个位置参数
     if [ $# -lt 7 ]; then
-        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...]"
+        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--datasets ds1,ds2,...] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>] [--feishu-webhook URL]"
         echo ""
         echo "自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址"
+        echo "数据集：--datasets 逗号分隔（gpqa_diamond/mmlu/math_500），默认 gpqa_diamond；每个数据集独立评测与判定"
         echo ""
         echo "示例:"
         echo "  $0 qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass"
         echo "  $0 harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --proxy http://10.1.12.192:80"
-        echo "  $0 harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --model-path /data/models/Qwen3-8B"
+        echo "  $0 harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --model-path /data/models/Qwen3-8B --datasets mmlu,math_500"
         echo "  加 --verbose 显示全量终端输出（调试用）"
         exit 1
     fi
@@ -136,12 +124,23 @@ else
         case "$1" in
             --verbose) FILTER_FLAGS="--verbose"; shift ;;
             --proxy) PROXY_LIST="$2"; shift 2 ;;
+            --flagrelease-token) export FLAGRELEASE_API_TOKEN="$2"; shift 2 ;;
+            # 飞书 Webhook 通过 export 传给 detached 汇报 worker（旁路，不影响主流程）。
+            --feishu-webhook) export FEISHU_WEBHOOK_URL="$2"; shift 2 ;;
             --model-path)
                 if [ -z "${2:-}" ]; then
                     echo "错误: --model-path 需要指定路径"
                     exit 1
                 fi
                 MODEL_PATH="$2"
+                shift 2
+                ;;
+            --datasets)
+                if [ -z "${2:-}" ]; then
+                    echo "错误: --datasets 需要指定数据集（逗号分隔，可选 gpqa_diamond/mmlu/math_500）"
+                    exit 1
+                fi
+                DATASETS_CSV="$2"
                 shift 2
                 ;;
             *)
@@ -169,6 +168,32 @@ if [ -z "$MODEL" ]; then
     echo "错误: 模型名为空，请检查输入参数（可能是分隔符使用了全角字符）"
     exit 1
 fi
+
+# ========== 数据集参数派生 ==========
+# DATASETS_CSV: 逗号分隔（如 "gpqa_diamond,mmlu"）→ DATASET_LIST 空格分隔 / PRIMARY_DATASET 首个
+DATASET_LIST=$(echo "$DATASETS_CSV" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
+if [ -z "$DATASET_LIST" ]; then
+    echo "错误: --datasets 为空，请指定至少一个数据集（gpqa_diamond/mmlu/math_500）"
+    exit 1
+fi
+for _ds in $DATASET_LIST; do
+    case "$_ds" in
+        gpqa_diamond|mmlu|math_500) ;;
+        *)
+            echo "错误: 未知数据集 '$_ds'（可选: gpqa_diamond/mmlu/math_500）"
+            exit 1
+            ;;
+    esac
+done
+PRIMARY_DATASET=$(echo "$DATASET_LIST" | awk '{print $1}')
+DATASET_COUNT=$(echo "$DATASET_LIST" | wc -w)
+# 数据集 → 结果文件前缀：gpqa_diamond 沿用历史短名 gpqa（gpqa_native.json 等），
+# 兼容 generate_report.py / upload_to_platform.py 等硬编码下游（零改动前提）；
+# 反向映射用于从文件名派生 --dataset 参数
+ds_prefix() { case "$1" in gpqa_diamond) echo "gpqa";; *) echo "$1";; esac; }
+ds_from_prefix() { case "$1" in gpqa) echo "gpqa_diamond";; *) echo "$1";; esac; }
+PRIMARY_PREFIX=$(ds_prefix "${PRIMARY_DATASET}")
+echo "[pre-flight] 精度评测数据集: ${DATASETS_CSV}（主数据集: ${PRIMARY_DATASET}，文件前缀: ${PRIMARY_PREFIX}）"
 
 # ========== 镜像模式：自动搜索宿主机模型路径 ==========
 if $IMAGE_MODE && [ -z "$MODEL_PATH" ]; then
@@ -214,6 +239,7 @@ if [ -n "$MODEL_PATH" ] && [ -z "${MODEL_FOUND_ON_HOST:-}" ]; then
     fi
 fi
 
+# ========== 镜像模式：镜像存在性检查 + 拉取（确定性归 shell，agent 不参与） ===
 # ========== Banner ==========
 echo "============================================================"
 echo "  FlagOS 全自动迁移流程"
@@ -277,6 +303,15 @@ fi
 # ========== 构造 Prompt ==========
 # 公共部分：tokens、执行模式、进度输出要求、步骤2-6
 COMMON_TOKENS=$(cat <<TOKENS_EOF
+
+**宿主机凭证注入（重要，2026-08-05 发布事故修复）**：
+  HARBOR_USER/HARBOR_PASSWORD/MODELSCOPE_TOKEN/HF_TOKEN 已由编排层 export 到本
+  Claude 进程的环境变量，宿主机直接执行的 python3 命令【禁止添加 env VAR=...、
+  /opt/conda/bin/python3 前缀】，直接按标准形态执行即可：
+    python3 skills/flagos-release/tools/main.py --from-context ...
+  长任务（发布等）按长任务执行协议 detached 启动：python3 ... task_runner.py ... &
+  （& 后台符后的 task_runner 继承本进程环境变量，凭证照常可用；禁止 nohup/disown）
+  （仅容器内命令才需要 docker exec -e 传凭证，见下）
 
 **容器内 Token**（已通过 setup_workspace.sh 写入容器 /flagos-workspace/.env，脚本自动加载；docker exec -e 仍建议保留作为双保险）：
   MODELSCOPE_TOKEN=${MODELSCOPE_TOKEN}
@@ -344,6 +379,22 @@ PLAN_STEPS_EOF
 )
 
 
+# ========== 容器名确定性预生成（冲突必然追加时间戳，agent 只消费不判断） ==========
+if $IMAGE_MODE; then
+    MODEL_SHORT_FOR_NAME=$(echo "${MODEL}" | sed 's|.*/||')
+    CONTAINER_NAME_PRE="${MODEL_SHORT_FOR_NAME}_flagos"
+    if docker inspect --type=container "${CONTAINER_NAME_PRE}" &>/dev/null; then
+        CONTAINER_NAME_PRE="${MODEL_SHORT_FOR_NAME}_flagos_$(date +%m%d_%H%M)"
+        # 极端情况同一分钟内重跑：再冲突则加秒
+        if docker inspect --type=container "${CONTAINER_NAME_PRE}" &>/dev/null; then
+            CONTAINER_NAME_PRE="${MODEL_SHORT_FOR_NAME}_flagos_$(date +%m%d_%H%M%S)"
+        fi
+        echo "[pre-flight] 同名容器已存在，本次容器名（强制新建）: ${CONTAINER_NAME_PRE}"
+    else
+        echo "[pre-flight] 本次容器名: ${CONTAINER_NAME_PRE}"
+    fi
+fi
+
 # ========== 根据模式构造步骤1 ==========
 if $IMAGE_MODE; then
     if $MODEL_FOUND_ON_HOST; then
@@ -359,13 +410,15 @@ if $IMAGE_MODE; then
     STEP1=$(cat <<STEP1_EOF
 1. 容器准备（从镜像创建）：
    - ${MODEL_NOTE}
-   - 检测 GPU 厂商（nvidia-smi / npu-smi 等），选择 SKILL.md 中对应的 docker run 模板
-   - **NVIDIA 模板（严格执行，仅替换变量值，禁止增删参数）**：
+   - 镜像已由编排层确保存在于本地（已完成存在性检查/拉取），**禁止执行 docker pull**
+   - **容器名已由编排层确定: \${CONTAINER_NAME}=${CONTAINER_NAME_PRE}，必须原样使用，禁止自行生成/判断/修改**
+   - 检测 GPU 厂商（nvidia-smi / npu-smi / ppu-smi 等），选择 SKILL.md 中对应的 docker run 模板。**厂商≠NVIDIA 时禁止套用下方 NVIDIA 模板**（\`--gpus=all\` 是 NVIDIA 专属，PPU/昇腾/寒武纪/天数等会失败）——必须去 flagos-container-preparation/SKILL.md 选对应模板（Ascend=B、Mthreads=C、MetaX=D、Cambricon=E、Hygon=F、平头哥PPU=G、天数Iluvatar=H）
+   - **仅 NVIDIA 适用的模板（严格执行，仅替换变量值，禁止增删参数）**：
      docker run -itd --name=\${CONTAINER_NAME} --gpus=all --network=host -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} -v /data/flagos-workspace/${MODEL}:/flagos-workspace ${IMAGE}
-   - **降级策略**：模板失败 → 检查变量值修正后重试 → 仍失败则 docker inspect 借鉴已有容器挂载配置重试一次 → 仍失败则终止
-   - 容器名自动生成为 <model_short_name>_flagos（如 Qwen3-8B_flagos）
-   - 如同名容器已存在，追加时间戳：<model_short_name>_flagos_<MMDD_HHMM>
-   - 镜像模式下禁止复用已有容器，必须 docker run 新建${DOWNLOAD_NOTE}
+   - **平头哥 PPU（vendor=zhenwu，CUDA 兼容卡，识别标志：ppu-smi 命令 / /usr/local/PPU_SDK 目录 / nvidia-smi 输出含 PPU-SMI）用 SKILL.md 模板 G**：禁用 \`--gpus=all\`，改用 \`--privileged -v /dev:/dev -v /usr/local/PPU_SDK:/usr/local/PPU_SDK -e XPU_VISIBLE_DEVICES=all\` 等参数
+   - **天数 Iluvatar（vendor=iluvatar，识别标志：ixsmi 命令 / /usr/local/corex 目录 / detect_gpu.py 返回 iluvatar）用 SKILL.md 模板 H**：禁用 \`--gpus=all\`，**必须挂载 \`-v /usr/local/corex/bin/ixsmi:/usr/local/corex/bin/ixsmi\`**（基础镜像内不含 ixsmi，不挂则容器内检不到 GPU、平台校验报“容器内没有 ixsmi”）；挂软链路径而非 corex 版本目录，挂载前先 \`ls -l /usr/local/corex/bin/ixsmi\` 确认源存在（源不存在时 docker 会静默建同名目录）
+   - **降级策略**：模板失败 → 检查变量值修正后重试 → 仍失败可 docker inspect 同类容器**仅抄参考其挂载/设备参数拼新的 docker run 命令**（容器名仍必须用 ${CONTAINER_NAME_PRE}），重试一次 → 仍失败则终止
+   - **绝对禁止复用任何已存在的容器**（包括同镜像创建的）。docker run 失败不是复用的理由——复用旧容器=旧镜像跑新任务，产出错误归属，比失败更糟${DOWNLOAD_NOTE}
    - bash skills/flagos-container-preparation/tools/setup_workspace.sh \${CONTAINER} ${MODEL} --skip-archive 部署工具脚本（宿主机已归档，跳过容器内归档避免移走正在写入的日志）
    - 写入容器内 /flagos-workspace/shared/context.yaml（entry.type=new_container, image.name=${IMAGE}）+ traces/01_container_preparation.json
    - **记录实际 docker run 命令到 context**：步骤1完成后，将实际成功执行的完整 docker run 命令写入 context.yaml：
@@ -381,14 +434,20 @@ ${STEP1}
 
 步骤2/3 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
 
-**步骤3 服务等待策略（硬性）**：
-- wait_for_service.sh 是阻塞脚本（最长运行 1800 秒），必须使用 Bash(timeout=600000) 前台执行（600000 毫秒 = 10 分钟）
-- **禁止**使用 TaskOutput 轮询，**禁止**每隔 N 秒手动 tail 日志检查状态
-- 脚本内部已实现日志监控、进度输出、早期失败检测，无需外部干预
-- 正确用法（一条命令，前台阻塞等待）：
-  docker exec \${CONTAINER} bash -c \"/flagos-workspace/scripts/wait_for_service.sh --port \$PORT --model-name '\$MODEL_NAME' --timeout 180 --max-timeout 1800 --log-path /flagos-workspace/logs/startup_default.log --mode default\"
-- 脚本退出码 0 = 服务就绪，非 0 = 失败（输出 JSON_RESULT 包含错误详情）
-- **注意**：Bash 工具的 timeout 参数单位是毫秒，不是秒。1800 秒 = 1800000 毫秒。设置过小会导致命令被转为后台任务
+**步骤3 服务等待策略（长任务执行协议 — 硬性）**：
+wait_for_service.sh 最长运行 5760 秒（1.6 小时），**禁止**用 Bash(timeout=大数) 前台阻塞等待——Bash 工具前台命令有 10 分钟硬上限，超过自动转后台、Claude 静默等待，批次控制器按 10 分钟无输出判会话失败并终止（长命令前台等待 = 会话被杀、任务丢失）；**禁止** TaskOutput 轮询。按三步执行：
+1. 写任务命令文件（一条 docker exec）：
+   docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/startup_default.cmd << 'CMD_EOF'
+/flagos-workspace/scripts/wait_for_service.sh --port \$PORT --model-name '\$MODEL_NAME' --timeout 180 --max-timeout 5760 --log-path /flagos-workspace/logs/startup_default.log --mode default
+CMD_EOF\"
+2. detached 启动（一条命令立即返回，不等待）：
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/startup_default.cmd' --state /flagos-workspace/logs/tasks/startup_default.state --log /flagos-workspace/logs/tasks/startup_default.log --timeout 6000\"
+3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
+   sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/startup_default.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/startup_default.log\"
+   - status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f <任务命令特征> 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
+   - status=done → 服务就绪（日志含 JSON_RESULT），继续后续步骤
+   - status=error/timeout → 读日志按崩溃诊断规则处理（脚本退出码 0=就绪，非 0=失败）
+启动前检查 /flagos-workspace/logs/tasks/startup_default.state：若存在且 status=running，说明上一会话已启动等待任务——直接接管轮询，**禁止重复启动任务**。
 
 **步骤3 FlagGems 启动崩溃算子诊断**：
 - FlagGems 模式启动崩溃时（不含超时），先备份崩溃日志再诊断：
@@ -396,8 +455,9 @@ ${STEP1}
   docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/diagnose_ops.py crash-log \\
     --log-path /flagos-workspace/logs/startup_default_crashed.log --json\"
 - crashed_ops 非空 → 禁用问题算子（toggle_flaggems.py --action modify-enable --disabled-ops \"算子列表\"）→ 重启服务 → 最多重试 2 轮
+- crashed_ops 为空但 candidate_ops 非空 → **不算"无算子"**：candidate_ops 是正则命中但白名单外的低置信候选（版本新增/命名变体），逐个/二分禁用这些候选后重启验证；仍属算子排查、不得直接走 Issue 规则
 - 重试成功 → 记录 disabled_ops 到 context.yaml 的 optimization.disabled_ops，正常继续
-- 重试全部失败或 crashed_ops 为空 → 走下方 Issue 强制规则
+- 重试全部失败或 crashed_ops 与 candidate_ops 均为空 → 走下方 Issue 强制规则
 
 **步骤3 Issue 强制规则**：
 - FlagGems 模式启动崩溃（不含超时）→ 必须调用 issue_reporter.py：
@@ -412,7 +472,7 @@ ${STEP1}
 - FlagGems 模式启动成功（推理验证通过）→ **必须设置 workflow.service_ok=true**（通过 update_context.py --set workflow.service_ok=true）
 - **记录实际 vllm serve 命令到 context**：服务启动成功后，将实际执行的 vllm serve 命令（不含 docker exec 包装、不含 PATH= 前缀、不含环境变量）写入 context.yaml：
   docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set 'commands.serve_start=<实际执行的 vllm serve 完整命令>'\"
-- 算子诊断重试全部失败或 crashed_ops 为空 → 提交 issue 后设置 workflow.service_ok=false
+- 算子诊断重试全部失败，且 crashed_ops 与 candidate_ops 均为空（candidate_ops 已逐个试过仍无效）→ 提交 issue 后设置 workflow.service_ok=false
 - 非算子原因（非硬件）导致的 FlagGems 崩溃 → 同样设置 workflow.service_ok=false
 - service_ok=false 时：用 USE_FLAGGEMS=0 启动 native 服务验证环境可用性，但不影响 service_ok 判定
 - service_ok 含义：FlagGems 模式是否可用（native 能启动但 FlagGems 不能 → service_ok=false）
@@ -453,14 +513,20 @@ ${STEP1}
 
 步骤2/3 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
 
-**步骤3 服务等待策略（硬性）**：
-- wait_for_service.sh 是阻塞脚本（最长运行 1800 秒），必须使用 Bash(timeout=600000) 前台执行（600000 毫秒 = 10 分钟）
-- **禁止**使用 TaskOutput 轮询，**禁止**每隔 N 秒手动 tail 日志检查状态
-- 脚本内部已实现日志监控、进度输出、早期失败检测，无需外部干预
-- 正确用法（一条命令，前台阻塞等待）：
-  docker exec \${CONTAINER} bash -c \"/flagos-workspace/scripts/wait_for_service.sh --port \$PORT --model-name '\$MODEL_NAME' --timeout 180 --max-timeout 1800 --log-path /flagos-workspace/logs/startup_default.log --mode default\"
-- 脚本退出码 0 = 服务就绪，非 0 = 失败（输出 JSON_RESULT 包含错误详情）
-- **注意**：Bash 工具的 timeout 参数单位是毫秒，不是秒。1800 秒 = 1800000 毫秒。设置过小会导致命令被转为后台任务
+**步骤3 服务等待策略（长任务执行协议 — 硬性）**：
+wait_for_service.sh 最长运行 5760 秒（1.6 小时），**禁止**用 Bash(timeout=大数) 前台阻塞等待——Bash 工具前台命令有 10 分钟硬上限，超过自动转后台、Claude 静默等待，批次控制器按 10 分钟无输出判会话失败并终止（长命令前台等待 = 会话被杀、任务丢失）；**禁止** TaskOutput 轮询。按三步执行：
+1. 写任务命令文件（一条 docker exec）：
+   docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/startup_default.cmd << 'CMD_EOF'
+/flagos-workspace/scripts/wait_for_service.sh --port \$PORT --model-name '\$MODEL_NAME' --timeout 180 --max-timeout 5760 --log-path /flagos-workspace/logs/startup_default.log --mode default
+CMD_EOF\"
+2. detached 启动（一条命令立即返回，不等待）：
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/startup_default.cmd' --state /flagos-workspace/logs/tasks/startup_default.state --log /flagos-workspace/logs/tasks/startup_default.log --timeout 6000\"
+3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
+   sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/startup_default.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/startup_default.log\"
+   - status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f <任务命令特征> 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
+   - status=done → 服务就绪（日志含 JSON_RESULT），继续后续步骤
+   - status=error/timeout → 读日志按崩溃诊断规则处理（脚本退出码 0=就绪，非 0=失败）
+启动前检查 /flagos-workspace/logs/tasks/startup_default.state：若存在且 status=running，说明上一会话已启动等待任务——直接接管轮询，**禁止重复启动任务**。
 
 **步骤3 FlagGems 启动崩溃算子诊断**：
 - FlagGems 模式启动崩溃时（不含超时），先备份崩溃日志再诊断：
@@ -468,8 +534,9 @@ ${STEP1}
   docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/diagnose_ops.py crash-log \\
     --log-path /flagos-workspace/logs/startup_default_crashed.log --json\"
 - crashed_ops 非空 → 禁用问题算子（toggle_flaggems.py --action modify-enable --disabled-ops \"算子列表\"）→ 重启服务 → 最多重试 2 轮
+- crashed_ops 为空但 candidate_ops 非空 → **不算"无算子"**：candidate_ops 是正则命中但白名单外的低置信候选（版本新增/命名变体），逐个/二分禁用这些候选后重启验证；仍属算子排查、不得直接走 Issue 规则
 - 重试成功 → 记录 disabled_ops 到 context.yaml 的 optimization.disabled_ops，正常继续
-- 重试全部失败或 crashed_ops 为空 → 走下方 Issue 强制规则
+- 重试全部失败或 crashed_ops 与 candidate_ops 均为空 → 走下方 Issue 强制规则
 
 **步骤3 Issue 强制规则**：
 - FlagGems 模式启动崩溃（不含超时）→ 必须调用 issue_reporter.py：
@@ -484,7 +551,7 @@ ${STEP1}
 - FlagGems 模式启动成功（推理验证通过）→ **必须设置 workflow.service_ok=true**（通过 update_context.py --set workflow.service_ok=true）
 - **记录实际 vllm serve 命令到 context**：服务启动成功后，将实际执行的 vllm serve 命令（不含 docker exec 包装、不含 PATH= 前缀、不含环境变量）写入 context.yaml：
   docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set 'commands.serve_start=<实际执行的 vllm serve 完整命令>'\"
-- 算子诊断重试全部失败或 crashed_ops 为空 → 提交 issue 后设置 workflow.service_ok=false
+- 算子诊断重试全部失败，且 crashed_ops 与 candidate_ops 均为空（candidate_ops 已逐个试过仍无效）→ 提交 issue 后设置 workflow.service_ok=false
 - 非算子原因（非硬件）导致的 FlagGems 崩溃 → 同样设置 workflow.service_ok=false
 - service_ok=false 时：用 USE_FLAGGEMS=0 启动 native 服务验证环境可用性，但不影响 service_ok 判定
 - service_ok 含义：FlagGems 模式是否可用（native 能启动但 FlagGems 不能 → service_ok=false）
@@ -574,6 +641,23 @@ DEBUG_FILE="${LOG_DIR}/claude_debug_${TIMESTAMP}.log"
 PIPELINE_LOG="${LOG_DIR}/pipeline.log"
 TERMINAL_LOG="${LOG_DIR}/terminal.log"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROGRESS_RUNNER="${PROJECT_ROOT}/tools/notifications/progress_runner.sh"
+FLAGOS_PROGRESS_RUN_ID="${FLAGOS_PROGRESS_RUN_ID:-single_${TIMESTAMP}_$$}"
+# 汇报默认 live：模型事件即时消费通知。批量调用已在 run_batch.sh 中 export 覆盖，此处仅兜底单跑场景。
+export FLAGOS_PROGRESS_WORKER_MODE="${FLAGOS_PROGRESS_WORKER_MODE:-live}"
+
+# 汇报完全旁路：组件不存在、无权限、挂死或退出非零都不会进入主流程控制路径。
+progress_emit_detached() {
+    if [ "${FLAGOS_PROGRESS_REPORT:-1}" = "0" ]; then
+        return 0
+    fi
+    nohup "${PROGRESS_RUNNER}" emit "$@" \
+        </dev/null \
+        >/dev/null \
+        2>&1 &
+    return 0
+}
 
 echo "日志文件:"
 echo "  原始事件流: ${LOG_FILE}"
@@ -616,6 +700,161 @@ print(f'{ctr}|{env}|{last}')
 " 2>/dev/null
 }
 
+# ===== 段末确定性兜底：主动生成/刷新报告（不依赖 Claude 是否记得执行） =====
+# 方案A：每段 claude 调用完成后，脚本主动补跑一次 generate_report。
+# 即便 Claude 在段内漏做（上下文压缩遗忘/中途中断/API 抖动），段末也一定刷新一次报告。
+# 全部 || true 兜底，失败不阻断主流程；无 context 时 generate_report 自身安全退出、不覆盖旧报告。
+regenerate_report() {
+    local ctr="$1"
+    [ -z "${ctr}" ] && return 0
+    docker inspect --type=container "${ctr}" &>/dev/null || return 0
+    docker exec "${ctr}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md" >/dev/null 2>&1 || true
+    docker exec "${ctr}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py --json --output /flagos-workspace/results/report.json" >/dev/null 2>&1 || true
+    echo "  ✓ 报告已刷新（段末兜底）"
+}
+
+# ===== 平台上传（脚本退出时自动执行） =====
+upload_to_platform_on_exit() {
+    [ -z "${MODEL:-}" ] && return 0
+    [ -z "${FLAGRELEASE_API_TOKEN:-}" ] && return 0
+
+    local host_base="/data/flagos-workspace/${MODEL}"
+    local ctx_file="${host_base}/config/context_final.yaml"
+    [ ! -f "${ctx_file}" ] && ctx_file="${host_base}/config/context_snapshot.yaml"
+
+    local results_dir="${host_base}/results/"
+
+    # 尝试从容器同步最新数据（异常退出时宿主机可能是旧版本）
+    local ctr="${DIAG_CONTAINER:-${SEG_CTR:-${CONTAINER:-}}}"
+    if [ -n "${ctr}" ] && docker inspect --type=container "${ctr}" &>/dev/null; then
+        mkdir -p "${host_base}/config" "${host_base}/results"
+        docker cp "${ctr}:/flagos-workspace/shared/context.yaml" "${host_base}/config/context_snapshot.yaml" 2>/dev/null || true
+        docker cp "${ctr}:/flagos-workspace/results/." "${results_dir}" 2>/dev/null || true
+        # 刷新 ctx_file（同步后可能新增了 context_snapshot）
+        [ ! -f "${ctx_file}" ] && ctx_file="${host_base}/config/context_snapshot.yaml"
+    fi
+
+    [ ! -f "${ctx_file}" ] && return 0
+    [ ! -d "${results_dir}" ] && return 0
+
+    # 至少有一个 json 数据文件才上传
+    local has_data
+    has_data=$(find "${results_dir}" -name "*.json" -type f 2>/dev/null | head -1)
+    [ -z "${has_data}" ] && return 0
+
+    echo ""
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EXIT] 上传结果到 FlagRelease 平台..."
+    python3 skills/flagos-release/tools/upload_to_platform.py \
+        --context "${ctx_file}" \
+        --results-dir "${results_dir}" \
+        --logs-dir "${host_base}/logs/" \
+        --model-owner "自动化" \
+        2>&1 && echo "  ✓ 数据已上传到 FlagRelease 平台" || echo "  ⚠ 数据上传失败（不影响流程结果）"
+}
+
+# ===== evalscope 评测明细归档（脚本退出时自动执行） =====
+# 将容器内 evalscope 生成的 predictions/reviews 汇聚到宿主机的跨模型固定目录，
+# 按模型名分子目录。容器是"每模型一份独立挂载"，看不到别的模型的地盘，
+# 因此集中汇聚只能在宿主机编排层用 docker cp 完成（容器内脚本做不到）。
+# 固定目录：/data/flagos-workspace/_eval_details/<model>/
+#   （_ 前缀与各模型工作目录并列但不冲突；模型名不会取 _eval_details）
+archive_eval_details_on_exit() {
+    [ -z "${MODEL:-}" ] && return 0
+
+    # 容器解析与 upload_to_platform_on_exit 保持一致
+    local ctr="${DIAG_CONTAINER:-${SEG_CTR:-${CONTAINER:-}}}"
+    [ -z "${ctr}" ] && return 0
+    docker inspect --type=container "${ctr}" &>/dev/null || return 0
+
+    # 评测 CWD 为 /flagos-workspace/scripts，evalscope 输出按数据集落在 scripts/outputs/{dataset}/
+    local src=""
+    for _ds in ${DATASET_LIST:-gpqa_diamond}; do
+        if docker exec "${ctr}" test -d "/flagos-workspace/scripts/outputs/${_ds}" 2>/dev/null; then
+            src="${src} /flagos-workspace/scripts/outputs/${_ds}"
+        fi
+    done
+    [ -z "${src}" ] && return 0
+    docker exec "${ctr}" test -d "${src}" 2>/dev/null || return 0
+
+    local dest="/data/flagos-workspace/_eval_details/${MODEL}"
+    mkdir -p "${dest}"
+
+    echo ""
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EXIT] 归档评测明细 (predictions/reviews) → ${dest}/"
+    # 整目录汇聚：含各轮 (V1/V2/V3) 的 predictions/reviews/reports/configs，按 timestamp 天然分隔
+    local _arch_ok=0
+    for _ds_dir in ${src}; do
+        if docker cp "${ctr}:${_ds_dir}/." "${dest}/" 2>/dev/null; then
+            _arch_ok=1
+        fi
+    done
+    if [ "${_arch_ok}" = "1" ]; then
+        local n_pred n_rev
+        n_pred=$(find "${dest}" -type d -name predictions 2>/dev/null | wc -l)
+        n_rev=$(find "${dest}" -type d -name reviews 2>/dev/null | wc -l)
+        echo "  ✓ 已归档 (predictions 目录 ${n_pred} 份, reviews 目录 ${n_rev} 份)"
+    else
+        echo "  ⚠ 评测明细归档失败（不影响流程结果）"
+    fi
+}
+
+# ===== 发布一致性校验 + 自动重试（批处理结束兜底） =====
+# 2026-08-05 Mistral-Small V3 发布事故：发布命令因 env/绝对路径前缀未命中 Bash
+# 白名单被 headless 自动拒绝，main.py 未执行但流程继续 → 静默未发布。
+# 白名单已加兜底规则（settings.local.json），本函数是最后一道防线：
+# 校验发布 trace 与 context 镜像一致性，失败则从 context 推断版本自动重试一次
+# （main.py 幂等，已发布部分自动跳过）。
+verify_and_retry_release() {
+    [ -z "${MODEL:-}" ] && return 0
+    local ctr="${DIAG_CONTAINER:-${SEG_CTR:-${CONTAINER:-}}}"
+    [ -z "${ctr}" ] && return 0
+    docker inspect --type=container "${ctr}" &>/dev/null || return 0
+
+    local host_base="/data/flagos-workspace/${MODEL}"
+    local ctx_file="${host_base}/config/context_snapshot.yaml"
+    [ ! -f "${ctx_file}" ] && return 0
+
+    echo ""
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EXIT] 发布一致性校验..."
+    if python3 skills/flagos-release/tools/verify_release_consistency.py \
+        --host-base "${host_base}" --container "${ctr}" 2>&1 | tail -6; then
+        return 0
+    fi
+
+    # 校验失败 → 从 context 推断应发布的版本并自动重试一次
+    local retry_tag
+    retry_tag=$(python3 -c "
+import yaml
+try:
+    ctx = yaml.safe_load(open('${ctx_file}')) or {}
+except Exception:
+    print('v2'); raise SystemExit
+versions = ctx.get('versions', {}) or {}
+plugin_wf = ctx.get('plugin_workflow', {}) or {}
+def v(k):
+    node = versions.get(k, {}) or {}
+    return node.get('harbor_image') or node.get('image_url') or ''
+if v('v4'): print('v4')
+elif v('v3') or plugin_wf.get('triggered'): print('v3')
+else: print('v2')
+" 2>/dev/null || echo "v2")
+
+    echo ""
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EXIT] 发布一致性校验失败，自动重试发布 (--version-tag ${retry_tag})..."
+    if python3 skills/flagos-release/tools/main.py \
+        --from-context "${ctx_file}" --container-name "${ctr}" \
+        --version-tag "${retry_tag}" 2>&1 | tail -12; then
+        echo "  ✓ 自动重试发布成功"
+        docker cp "${ctr}:/flagos-workspace/shared/context.yaml" "${ctx_file}" 2>/dev/null || true
+        # 重试后二次校验（仍失败仅告警，不再循环）
+        python3 skills/flagos-release/tools/verify_release_consistency.py \
+            --host-base "${host_base}" --container "${ctr}" 2>&1 | tail -3 || true
+    else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ 自动重试发布仍失败，请人工检查（traces/ 发布 trace 与线上 README tag）" \
+            >> "${host_base}/logs/pipeline.log" 2>/dev/null || true
+    fi
+}
+
 # ===== GPU 服务清理（脚本退出时自动执行） =====
 cleanup_gpu_services() {
     local ctr=""
@@ -641,17 +880,70 @@ except: pass
         fi
     fi
     # 执行清理
+    # 优先 docker restart（宿主机层直接可用 docker）——比 pkill 更彻底：
+    # privileged 容器里 vllm 的 multiprocessing worker 常残留僵尸进程占着显存，
+    # 单纯 pkill 未必清干净；docker restart 强制回收容器全部进程与显存。
+    # 仅当 docker restart 失败（如 daemon 异常）时，降级回 pkill 兜底。
     if [ -n "${ctr}" ] && docker inspect --type=container "${ctr}" &>/dev/null; then
         echo ""
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 清理 GPU 资源：停止容器 ${ctr} 内的推理服务..."
-        docker exec "${ctr}" bash -c "pkill -f 'vllm\|sglang\|flagscale' 2>/dev/null; sleep 2" 2>/dev/null && \
-            echo "  ✓ 推理服务已停止，GPU 显存已释放" || \
-            echo "  ⚠ 未发现运行中的推理服务（可能已停止）"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 清理 GPU 资源：重启容器 ${ctr} 以彻底释放显存..."
+        if docker restart "${ctr}" >/dev/null 2>&1; then
+            echo "  ✓ 容器已重启，GPU 显存已完全释放"
+        else
+            echo "  ⚠ docker restart 失败，降级为 pkill 清理推理进程..."
+            docker exec "${ctr}" bash -c "pkill -9 -f 'vllm\|flagscale' 2>/dev/null; sleep 2" 2>/dev/null && \
+                echo "  ✓ 推理服务已停止（pkill 兜底）" || \
+                echo "  ⚠ 未发现运行中的推理服务（可能已停止）"
+        fi
     else
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 未找到有效容器，跳过 GPU 服务清理"
     fi
 }
-trap 'cleanup_gpu_services' EXIT
+
+pipeline_on_exit() {
+    local original_exit_code="$1"
+    local elapsed_seconds=0
+    local ended_at=0
+    local outcome="failed"
+
+    # 退出前最后一次刷新报告：所有退出路径（正常结束/exit 1/超时被 SIGTERM 杀/异常）
+    # 都必经 EXIT trap，这里是"保证产出报告"的唯一兜底点——即便 Claude 全程没生成过、
+    # 或某段跑超时被 run_batch.sh 的 timeout --signal=TERM 杀掉，也能在拷回宿主机前补一份。
+    # 必须在 upload_to_platform_on_exit（其内部 docker cp results/ 回宿主机）之前执行。
+    # 容器解析与 upload_to_platform_on_exit 保持一致；全程 || true，不影响退出码。
+    regenerate_report "${DIAG_CONTAINER:-${SEG_CTR:-${CONTAINER:-}}}" || true
+
+    # 保留原有退出清理；平台上传失败不能覆盖主流程退出码。
+    upload_to_platform_on_exit || true
+    # 评测明细归档必须在 cleanup_gpu_services（可能停容器）之前，趁容器还活着 docker cp。
+    archive_eval_details_on_exit || true
+    # 发布一致性校验+自动重试：同样需容器活着（main.py 要 docker exec），放清理之前。
+    verify_and_retry_release || true
+    cleanup_gpu_services || true
+
+    # 批量模式由 run_batch.sh 投递模型事件，避免重复通知。
+    if [ "${FLAGOS_BATCH_MODE:-0}" != "1" ] && [ -n "${PIPELINE_START_TS:-}" ]; then
+        ended_at=$(date +%s)
+        elapsed_seconds=$(( ended_at - PIPELINE_START_TS ))
+        if [ "${original_exit_code}" -eq 0 ]; then
+            outcome="success"
+        elif [ "${original_exit_code}" -eq 124 ]; then
+            outcome="timeout"
+        fi
+        progress_emit_detached single-finish \
+            --batch-id "${FLAGOS_PROGRESS_RUN_ID}" \
+            --workspace "${FLAGOS_WORKSPACE:-/data/flagos-workspace}" \
+            --target "${TARGET:-${IMAGE:-${CONTAINER:-unknown}}}" \
+            --model "${MODEL:-unknown}" \
+            --outcome "${outcome}" \
+            --exit-code "${original_exit_code}" \
+            --elapsed-seconds "${elapsed_seconds}" \
+            --run-started-at "${PIPELINE_START_TS}" \
+            --run-ended-at "${ended_at}" || :
+    fi
+    return 0
+}
+trap 'pipeline_on_exit "$?"' EXIT
 
 # ===== 段间完成性校验 =====
 # 检查 context_snapshot.yaml 中 workflow_ledger 的步骤完成状态
@@ -718,6 +1010,14 @@ PYEOF
 
 # ===== 全流程计时 =====
 PIPELINE_START_TS=$(date +%s)
+if [ "${FLAGOS_BATCH_MODE:-0}" != "1" ]; then
+    progress_emit_detached single-start \
+        --batch-id "${FLAGOS_PROGRESS_RUN_ID}" \
+        --workspace "${FLAGOS_WORKSPACE:-/data/flagos-workspace}" \
+        --target "${TARGET:-${IMAGE:-${CONTAINER:-unknown}}}" \
+        --model "${MODEL}" \
+        --started-at "${PIPELINE_START_TS}" || :
+fi
 
 # ===== 段1: 1/2/3 (容器准备 + 环境检测 + 服务启动) =====
 echo ""
@@ -725,6 +1025,9 @@ echo "╔═══════════════════════�
 echo "║  段1/3  容器准备 + 环境检测 + 服务启动  (步骤 1→2→3)       ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 SEG1_START_TS=$(date +%s)
+# 持久化段1本次会话起始时间(UTC ISO)，供越界检测按 finished_at 时间戳区分
+# "本次会话新产生的越界" vs "断点续跑的历史产出"，避免误删有效产出。
+date -u +%Y-%m-%dT%H:%M:%S > "${LOG_DIR}/seg1_start_ts"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 段1 开始"
 claude -p "${PROMPT_SEG1}" \
     --permission-mode auto \
@@ -798,9 +1101,16 @@ echo "  环境类型: ${SEG_ENV}"
 echo "  最后完成步骤: ${SEG_LAST}"
 echo ""
 
-# ===== 段1越界检测：如果段1执行了步骤4+的操作，回滚 context 中的越界状态 =====
-SEG1_OVERFLOW=$(python3 -c "
-import yaml, re
+# 段1末确定性兜底刷新报告
+regenerate_report "${SEG_CTR}"
+
+# ===== 段1越界检测：如果段1【本次会话】执行了步骤4+的操作，回滚 context 中的越界状态 =====
+# 关键：按 finished_at 时间戳区分——只有 finished_at 晚于本次段1会话起始(seg1_start_ts)
+# 的 step≥4 才算真越界。断点续跑时上次遗留的历史产出(finished_at 更早)不判越界，
+# 避免误触发清理删掉有效产出。seg1_start_ts 缺失时回退为宽松判据(保持旧行为)。
+SEG1_START_ISO=$(cat "${LOG_DIR}/seg1_start_ts" 2>/dev/null || echo "")
+SEG1_OVERFLOW=$(SEG1_START_ISO="${SEG1_START_ISO}" python3 -c "
+import yaml, re, os, datetime
 with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
     ctx = yaml.safe_load(f)
 ledger = ctx.get('workflow_ledger', {}).get('steps', [])
@@ -808,22 +1118,33 @@ overflow_steps = []
 def step_num(s):
     m = re.match(r'(\d+)', str(s))
     return int(m.group(1)) if m else 0
-if isinstance(ledger, list):
-    for s in ledger:
-        if not isinstance(s, dict):
-            continue
-        step = s.get('step', '')
-        status = s.get('status', '')
-        if step_num(step) >= 4 and status not in ('pending', ''):
-            overflow_steps.append(f'{step}={status}')
-elif isinstance(ledger, dict):
-    for key, s in ledger.items():
-        if not isinstance(s, dict):
-            continue
-        step = str(s.get('step', key))
-        status = s.get('status', '')
-        if step_num(step) >= 4 and status not in ('pending', ''):
-            overflow_steps.append(f'{step}={status}')
+seg1_start = None
+_iso = os.environ.get('SEG1_START_ISO', '').strip()
+if _iso:
+    try:
+        seg1_start = datetime.datetime.fromisoformat(_iso.replace('Z', ''))
+    except ValueError:
+        seg1_start = None
+def is_this_session(s):
+    # seg1_start 不可用 → 回退宽松判据(旧行为)：只要非 pending 即算越界
+    if seg1_start is None:
+        return True
+    fin = str(s.get('finished_at', '') or '').replace('Z', '')
+    if not fin:
+        # 有 success 状态但无 finished_at → 无法判定时间，保守视为本次(维持旧行为)
+        return True
+    try:
+        return datetime.datetime.fromisoformat(fin) > seg1_start
+    except ValueError:
+        return True
+items = ledger if isinstance(ledger, list) else list(ledger.values()) if isinstance(ledger, dict) else []
+for s in items:
+    if not isinstance(s, dict):
+        continue
+    step = s.get('step', '')
+    status = s.get('status', '')
+    if step_num(step) >= 4 and status not in ('pending', '') and is_this_session(s):
+        overflow_steps.append(f'{step}={status}')
 print(','.join(overflow_steps) if overflow_steps else '')
 " 2>/dev/null) || SEG1_OVERFLOW=""
 
@@ -831,21 +1152,21 @@ if [ -n "${SEG1_OVERFLOW}" ]; then
     echo "  ⚠ 段1越界检测：以下步骤被段1提前执行，将回滚为 pending 状态: ${SEG1_OVERFLOW}"
     # 通过容器内 update_context.py 回滚越界步骤
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
-        --ledger-update 04_quick_accuracy --ledger-status pending --ledger-notes '段1越界回滚' \
+        --ledger-update 04_v2_environment --ledger-status pending --ledger-notes '段1越界回滚' \
         --json" >/dev/null 2>&1 || true
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
-        --ledger-update 05_accuracy_tuning --ledger-status pending --ledger-notes '段1越界回滚' \
+        # 05_accuracy_tuning 已并入04_v2_environment，无需独立回滚 \
         --json" >/dev/null 2>&1 || true
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
-        --ledger-update 06_quick_performance --ledger-status pending --ledger-notes '段1越界回滚' \
+        # 06_quick_performance 已并入04_v2_environment，无需独立回滚 \
         --json" >/dev/null 2>&1 || true
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
-        --ledger-update 07_performance_tuning --ledger-status pending --ledger-notes '段1越界回滚' \
+        # 07_performance_tuning 已并入04_v2_environment，无需独立回滚 \
         --json" >/dev/null 2>&1 || true
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
-        --ledger-update 08_release --ledger-status pending --ledger-notes '段1越界回滚' \
+        --ledger-update 05_v2_release --ledger-status pending --ledger-notes '段1越界回滚' \
         --json" >/dev/null 2>&1 || true
-    for STEP_KEY in 09_plugin_install 10_plugin_service_startup 11_plugin_accuracy 12_plugin_performance 13_plugin_release; do
+    for STEP_KEY in 06_v3_environment 07_v3_delivery 08_v4_reduction 09_v4_release; do
         docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
             --ledger-update ${STEP_KEY} --ledger-status pending --ledger-notes '段1越界回滚' \
             --json" >/dev/null 2>&1 || true
@@ -862,12 +1183,13 @@ if [ -n "${SEG1_OVERFLOW}" ]; then
         --set-timing steps.release=0 \
         --json" >/dev/null 2>&1 || true
     # 清理越位执行产生的实际数据（算子配置、评测结果等）
+    # rollback_overflow.py 按"步骤->产出文件"映射精细清理，--preserve-step3-disabled-ops
+    # 保留步骤3已确定的算子集。失败时【不做无差别 rm】(旧 fallback 会误删已达标产出)，
+    # 与段2/段3 一致仅告警继续——ledger 已回滚 pending，越界步骤会重跑覆盖。
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/rollback_overflow.py \
-        --overflow-from 4 --preserve-step3-disabled-ops" 2>/dev/null || {
-        echo "  ⚠ rollback_overflow.py 执行失败，手动清理关键文件"
-        docker exec "${SEG_CTR}" bash -c "rm -f /root/flaggems_ops_control.json /flagos-workspace/results/operator_config.json" 2>/dev/null || true
-    }
-    echo "  ✓ 越位执行产生的数据已清理"
+        --overflow-from 4 --preserve-step3-disabled-ops" 2>/dev/null || \
+        echo "  ⚠ rollback_overflow.py 执行失败，跳过数据清理（ledger 已回滚，越界步骤将重跑覆盖），继续执行"
+    echo "  ✓ 越位执行状态已回滚"
     # 同步回滚后的 context 到宿主机快照
     MOUNT_MODE=$(docker exec "${SEG_CTR}" cat /flagos-workspace/.mount_mode 2>/dev/null || echo "internal")
     if [ "$MOUNT_MODE" = "mounted" ] || [ "$MOUNT_MODE" = "symlink" ]; then
@@ -950,6 +1272,36 @@ else:
     fi
 fi
 
+# ===== 双 pipeline 路由：读取段1 inspect_env 产出的 entry_image_type =====
+# 分支 A (gems_tree): 简单路径 — V1裸启动 → V2代码注入 → V3切plugin → V4减算子
+# 分支 B (gems_tree_plugin): 复杂路径 — V1三选 → V2(2.1/2.2) → V3(3.1/3.2) → V4
+# 分类是确定性的（inspect_env.classify_entry_image_type），此处只读结果不做判断。
+ENTRY_IMAGE_TYPE=$(python3 -c "
+import yaml
+with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
+    ctx = yaml.safe_load(f)
+wf = ctx.get('workflow', {})
+# 优先读 workflow.entry_image_type；回退到 inspect_env 的 entry_classification
+et = wf.get('entry_image_type', '')
+if not et:
+    et = ctx.get('entry_classification', {}).get('entry_image_type', '')
+print(et or 'unknown')
+" 2>/dev/null) || ENTRY_IMAGE_TYPE="unknown"
+
+case "${ENTRY_IMAGE_TYPE}" in
+    gems_tree)         PIPELINE_BRANCH="A" ;;
+    gems_tree_plugin)  PIPELINE_BRANCH="B" ;;
+    native)            PIPELINE_BRANCH="native" ;;
+    *)                 PIPELINE_BRANCH="" ;;
+esac
+echo "══════════════════════════════════════════════════════════════"
+echo "  双 pipeline 路由: entry_image_type=${ENTRY_IMAGE_TYPE} → 分支 ${PIPELINE_BRANCH:-未知}"
+echo "══════════════════════════════════════════════════════════════"
+# 持久化分支决策到 context（供段2/3 及报告消费）
+if [ -n "${PIPELINE_BRANCH}" ]; then
+    docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py --set workflow.pipeline_branch='${PIPELINE_BRANCH}' --json" 2>/dev/null || true
+fi
+
 SKIP_SEG2=false
 IS_NATIVE=false
 if [ "${SERVICE_OK}" = "False" ]; then
@@ -964,7 +1316,110 @@ fi
 
 if [ "${SKIP_SEG2}" = "false" ]; then
 # ===== 段2: 4/5/6/7 (精度评测 + 精度调优 + 性能评测 + 性能调优) =====
-PROMPT_SEG2="容器名: ${SEG_CTR}，模型名: ${MODEL}，env_type: ${SEG_ENV}
+# 双 pipeline 分支指令：据段1路由结果注入，指引下游会话按对应 pipeline 定义执行
+case "${PIPELINE_BRANCH}" in
+    A)
+        BRANCH_DIRECTIVE="**PIPELINE 分支 A（gems_tree 简单路径）**：本次准入镜像为 flaggems+tree 无 plugin。按 CLAUDE.md 分支 A 工作流执行：V1(裸启动基线) → V2(代码注入全量算子) → V3(切 plugin 白名单) → V4(减算子提性能)。精度基线优先本地 V1，缺失时用 nv_baseline.yaml 兜底；性能基线在 V1 完全不可用时按 CLAUDE.md 合成基线规则（V2 初始性能 ×1.05，synthesize_perf_baseline.py）兜底。"
+        ;;
+    B)
+        BRANCH_DIRECTIVE="**PIPELINE 分支 B（gems_tree_plugin 复杂路径）**：本次准入镜像为 flaggems+tree+plugin。按新流程 v3.1 工作流执行（共4版本）：V1(步骤1-3,三选baseline_selector.py确定v1.1/v1.2/v1.3/none+V1精度观察+性能基线) → V2(步骤4-5, 2.1代码注入精度+性能调优 或 2.2仅精度;精度达标发harbor+MS/HF) → V3(步骤6-7, 3.1清注入或3.2免清+plugin全量+仅精度;达标发flagrelease-project交付) → V4(步骤8-9,随机选1~3算子只开+≤2轮;达标发harbor+更新README)。精度基线统一用 NV（nv_baseline.yaml），性能基线 V1 实测或 V2.2 路径下 V2 首测×1.05。"
+        ;;
+    native)
+        BRANCH_DIRECTIVE="**PIPELINE native 简化路径**：本次准入镜像无 flaggems，仅执行精度/性能评测，不做算子调优与多版本发布。"
+        ;;
+    *)
+        BRANCH_DIRECTIVE=""
+        ;;
+esac
+
+# ===== 评测时间预算计算（2026-08-10）：解决 thinking 模型评测必超时问题 =====
+# 背景：thinking 模型（QwQ/DeepSeek-R1 等）正常评测 7-10h，原 max-timeout 写死
+# 7200s(2h) 必然超时 → 评测反复失败 → agent 自发跳过评测 → 数据缺失。
+# 公式：max_timeout = 题数 × 单题预算 × 1.25 缓冲
+#   thinking：单题 600s（慢速芯片思考链实测上界 12min），默认 30 题（时长分级；
+#             fast_gpqa 按序取前 N 题，V1/V2 同样本，精度判据不受影响；
+#             30 题样本下 noise_zone 容忍绝对差异 ≤2 题判达标）
+#   普通：     单题 60s，默认 50 题，固定 7200s（50×60×1.25=3750 < 7200，
+#             clamp 上界生效 → 与改动前的 2h 语义完全一致，零回归）
+# clamp：thinking [7200, 43200]，普通固定 7200
+# 安全网：max_timeout 调大不会让 runaway 无限拖——fast_gpqa max_tokens cap（防线1）
+# 锁死复读生成窗口；eval_wrapper 进度看门狗（防线3）收尾停滞照杀。生成中停滞只
+# 提示不杀（慢≠死），所以给足预算不会误杀正常长推理。
+# 函数化：启动时调用一次供 PROMPT 注入（snapshot 尚不存在，走模型名模式匹配）；
+# 段1结束后兜底函数再调用一次（snapshot 已同步，runtime.thinking_model 生效）。
+compute_eval_budget() {
+    THINKING_PATTERNS="qwen3|qwq|deepseek-r1|deepseek-r2|mimo|hunyuan"
+    IS_THINKING=$(python3 -c "
+import re, yaml
+mn = '${MODEL}'.lower()
+rt = False
+try:
+    with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
+        rt = bool(yaml.safe_load(f).get('runtime', {}).get('thinking_model', False))
+except Exception:
+    pass
+print('true' if rt or re.search('${THINKING_PATTERNS}', mn) else 'false')
+" 2>/dev/null || echo "false")
+    # 数据集→评测预算（2026-08-14 题数降采样定稿：mmlu 20/子集、math_500 200 题，
+    # gap 实测 -0.4pt/±5.4pt，见记忆 eval-sampling-gap-measured）：
+    #   gpqa_diamond: 单题 60s（thinking 600s），默认 50 题（thinking 30）
+    #                 → 7200s（thinking 22500s），仅单数据集时显式传 --limit
+    #   mmlu:         默认 20/子集 = 1140 题（不传 --limit），实测 64 并发 ~56s，
+    #                 上限 21600s——timeout 是防挂死的上限而非性能预期，
+    #                 国产慢卡（10×~30×）也绝不误杀
+    #   math_500:     默认 200 题（40/等级 × 5，不传 --limit），实测 64 并发 ~40s，
+    #                 上限 7200s——同上宽松原则
+    # 多数据集：EVAL_MAX_TO 取各数据集最大值；--limit 全局语义（fast_gpqa 不支持
+    # per-dataset limit）→ 多数据集一律不传 --limit（各数据集用默认题数）
+    EVAL_LIMIT=""                 # 空 = 评测命令不传 --limit（mmlu/math_500 及多数据集用各数据集默认题数）
+    EVAL_MAX_TO=7200
+    for _ds in ${DATASET_LIST}; do
+        case "${_ds}" in
+            gpqa_diamond)
+                if [ "${IS_THINKING}" = "true" ]; then
+                    _ds_max=$(( 30 * 600 * 125 / 100 ))   # 22500s ≈ 6.3h
+                    [ "${_ds_max}" -lt 7200 ] && _ds_max=7200
+                    [ "${_ds_max}" -gt 43200 ] && _ds_max=43200
+                    [ "${DATASET_COUNT}" -eq 1 ] && EVAL_LIMIT=30
+                else
+                    _ds_max=7200
+                    [ "${DATASET_COUNT}" -eq 1 ] && EVAL_LIMIT=50
+                fi
+                ;;
+            mmlu)
+                _ds_max=21600   # 1140 题慢 10 倍 9min；上限宽松防国产慢卡误杀
+                ;;
+            math_500)
+                _ds_max=7200    # 200 题慢 10 倍 7min；上限宽松防国产慢卡误杀
+                ;;
+        esac
+        [ "${_ds_max}" -gt "${EVAL_MAX_TO}" ] && EVAL_MAX_TO="${_ds_max}"
+    done
+    if [ -n "${EVAL_LIMIT}" ]; then
+        EVAL_BUDGET_NOTE="**评测时间预算（数据集: ${DATASETS_CSV}）**：${EVAL_LIMIT} 题 × 单题 $([ "${IS_THINKING}" = "true" ] && echo 600s || echo 60s) × 1.25 缓冲 = ${EVAL_MAX_TO}s（约 $(( EVAL_MAX_TO / 3600 ))h）。评测耗时长是预算内预期，**禁止因耗时长主动跳过或放弃评测**；超时按评测等待策略重试规则处理，GPU 调度由编排层负责。**V1 与 V2 必须使用相同参数：均加 --limit ${EVAL_LIMIT}**（同样本可对比，不得一方 50 题一方 30 题）。"
+    else
+        EVAL_BUDGET_NOTE="**评测时间预算（数据集: ${DATASETS_CSV}）**：max_timeout=${EVAL_MAX_TO}s。mmlu 默认 1140 题（每子集 20）、math_500 默认 200 题（每等级 40）、gpqa_diamond 默认 50 题（thinking 30）——评测命令**不传 --limit**（fast_gpqa 按数据集默认题数）。实测基准（H20 @64 并发）：mmlu ~56s、math_500 ~40s；国产慢 10 倍时 9min/7min。评测耗时长是预算内预期，**禁止因耗时长主动跳过或放弃评测**。"
+    fi
+    # EVAL_BASH_MS 概念已废弃（2026-08 长任务执行协议）：Bash 工具 10 分钟硬上限使
+    # 超大 timeout 无效，长任务统一走 task_runner.py detached 启动 + 状态文件 + 短轮询
+}
+compute_eval_budget
+
+# 构建每数据集评测任务规格（供 PROMPT_SEG2 引用；--limit 仅 gpqa_diamond 单数据集时附加，
+# mmlu/math_500 及多数据集一律不传 --limit，fast_gpqa.py 按数据集默认题数评测）
+# 文件命名用前缀（gpqa_diamond → gpqa_native.json，与历史一致；mmlu/math_500 → mmlu_/math_500_）
+DATASET_EVAL_SPEC=""
+for _ds in ${DATASET_LIST}; do
+    _PREF=$(ds_prefix "${_ds}")
+    _LIMIT_ARGS=""
+    [ "${_ds}" = "gpqa_diamond" ] && [ -n "${EVAL_LIMIT}" ] && _LIMIT_ARGS="--limit ${EVAL_LIMIT} "
+    DATASET_EVAL_SPEC="${DATASET_EVAL_SPEC}
+- **${_ds}**：V1 输出 /flagos-workspace/results/${_PREF}_native.json，V2 输出 /flagos-workspace/results/${_PREF}_flagos.json；任务文件 eval_v1_${_PREF}.cmd / eval_v2_${_PREF}.cmd（state/log 同命名）；评测命令：python3 fast_gpqa.py --config fast_gpqa_config.yaml --dataset ${_ds} ${_LIMIT_ARGS}--output <输出路径>；判定：accuracy_compare.py --v1 <V1结果> --v2 <V2结果> --metric ${_ds} --output /flagos-workspace/results/accuracy_compare_${_PREF}.json"
+done
+
+PROMPT_SEG2="容器名: ${SEG_CTR}，模型名: ${MODEL}，env_type: ${SEG_ENV}，pipeline分支: ${PIPELINE_BRANCH:-未定}
+
+${BRANCH_DIRECTIVE}
 
 **变量定义（后续命令中直接使用）**：CONTAINER=${SEG_CTR}
 ${COMMON_TOKENS}
@@ -985,7 +1440,7 @@ ${SEG2_CTX_SUMMARY}
   docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --ledger-update 04_quick_accuracy --ledger-status success --ledger-notes '...'\"
 
 **步骤编号（严格遵守，输出 [步骤X] 时必须使用以下编号）**：
-- [步骤4] 精度评测（GPQA Diamond）
+- [步骤4] 精度评测（数据集: ${DATASETS_CSV}）
 - [步骤5] 精度算子调优（条件触发：accuracy_ok=false 时执行）
 - [步骤6] 性能评测（benchmark）
 - [步骤7] 性能算子调优（条件触发：performance_ok=false 时执行）
@@ -997,15 +1452,25 @@ ${SEG2_CTX_SUMMARY}
 3. 读取 skills/flagos-performance-testing/SKILL.md 了解性能评测工具用法
 4. 读取 skills/flagos-operator-replacement/SKILL.md 了解算子调优工具用法（仅在步骤5/7需要时读取）
 
+**无 V1 场景性能基线合成（条件触发，在步骤4之前执行）**：
+- 触发条件：context 的 baseline.v1_available=false（分支 B 三选=none），或分支 A 的 V1 服务无法启动（步骤3已确认）——即 V1 性能基线完全不可测
+- 执行（此时算子集为步骤3幸存的初始状态，尚未被步骤5削减，正是合成基线要求的\"使能 flaggems 后首次可正常启动\"口径）：
+  1. 以 flagos 模式启动 V2 服务（当前算子集，不做任何调优改动）
+  2. quick 模式测一轮：PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/benchmark_runner.py --mode quick --output-name v2_initial_performance
+  3. 合成基线：PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/synthesize_perf_baseline.py --v2-initial /flagos-workspace/results/v2_initial_performance.json --output /flagos-workspace/results/native_performance.json（全芯片统一 ×1.05：吞吐×1.05、延迟÷1.05；脚本拒绝覆盖已存在的实测 V1 基线）
+  4. 更新 context：update_context.py --set 'baseline.perf_baseline_source=v2_initial_x1.05'，并停止服务释放 GPU，再进入步骤4
+- 合成基线落盘为 native_performance.json 标准格式（_meta.synthetic=true + target_ratio_override=1.0 标记），步骤6/7 及 operator_optimizer init 照常把它当 V1 基线消费——**达标线 = 基线×1.0 = V2 首测×1.05**（脚本 _meta 覆盖默认 0.8，仅对合成基线生效，实测 V1 不受影响）；步骤6 **跳过 V1 性能测试**（无 V1 可测），只测 V2 与合成基线对比
+- V1 可用时**严禁**执行本节任何操作
+
 **算子调优**：
 - 步骤4完成后如 accuracy_ok=false → 立即执行步骤5（5完成后再进入6）
 - 步骤5精度算子调优采用**累积禁用**策略：第1轮禁用组A，第2轮禁用组A+B，第3轮禁用组A+B+C（每轮在上一轮基础上追加禁用，而非独立禁用单组）
-- 步骤5每轮使用 diagnose_ops.py 输出的 cumulative_test_env.control_file 白名单写入 /root/flaggems_ops_control.json + FLAGGEMS_CONTROL_MODE=only_enable，通过 start_service.sh 启动服务（与步骤7性能调优的 operator_search.py 使用相同的白名单控制路径，**不使用** toggle_flaggems.py --action modify-enable --disabled-ops）
+- 步骤5每轮算子控制的路径判据是**当前实际控制方式**而非 env_type（vllm_fl 包存在≠plugin 控制生效）：执行 docker exec \$CONTAINER grep -q '^VLLM_FL_PREFER_ENABLED=true' /etc/environment，命中=plugin_env 路径，未命中=control_file 路径。**plugin_env 路径**用 diagnose_ops.py 输出的 cumulative_test_env.env_inline（VLLM_FL_FLAGOS_BLACKLIST 等）作启动命令内联前缀重启，与步骤7性能调优 operator_search.py 走相同的 env_inline 路径，**禁止写 /root/flaggems_ops_control.json**（VLLM_FL_PREFER_ENABLED=true 使控制文件无效，写它会调优空转）；**control_file 路径**（含分支 B V1=v1.1/v1.2 场景的 V2——baseline_selector 已清除 PREFER_ENABLED，flaggems 经注入代码+控制文件生效，即使镜像装有 vllm_fl 包）用 cumulative_test_env.control_file 写控制文件 + FLAGGEMS_CONTROL_MODE=only_enable 经 start_service.sh 启动。两者均**不使用** toggle_flaggems.py --action modify-enable --disabled-ops
 - 步骤6完成后如 performance_ok=false → 执行步骤7（elimination 逐删策略）
 - 调优后产出 V3 结果（flagos_optimized.json），更新 context.yaml
 
 **V2 服务启动时保留已禁用算子**：
-- 如果 context.yaml 中 optimization.disabled_ops 非空（步骤3算子诊断已禁用部分算子），V2 启动前必须写入白名单控制文件：将启用算子写入 /root/flaggems_ops_control.json（{"include": [启用算子]}），start_service.sh 会自动从控制文件推断 FLAGGEMS_CONTROL_MODE=only_enable
+- 如果 context.yaml 中 optimization.disabled_ops 非空（步骤3算子诊断已禁用部分算子），V2 启动前必须写入白名单控制文件：将启用算子写入 /root/flaggems_ops_control.json（{\"include\": [启用算子]}），start_service.sh 会自动从控制文件推断 FLAGGEMS_CONTROL_MODE=only_enable
 - 禁止使用 --action enable（会重置为全量开启）
 - 步骤5/7 的算子调优在此基础上累加禁用
 
@@ -1017,23 +1482,38 @@ ${SEG2_CTX_SUMMARY}
     --state-path /flagos-workspace/results/operator_config.json \\
     --perf-config /flagos-workspace/scripts/config/perf_config.yaml \\
     --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh' \\
-    --max-rounds 50\"
+    --max-rounds 2\"
 - operator_search.py 已封装 next→配置→重启→benchmark→update 全流程，含 GPU 显存释放验证和可用性前置检查
-- 步骤5精度算子调优：通过 diagnose_ops.py accuracy-groups 获取分组和累积白名单，每轮写控制文件 + 重启服务 + fast_gpqa.py 评测
+- 步骤5精度算子调优：**按不达标数据集逐个进行**（每轮只针对一个数据集：该数据集 V1/V2 判定 rel_drop >5% 才调优，调优评测用 --dataset <该数据集> 与判定同参；多数据集时先列全部数据集判定结果，取不达标者按上述规则逐个调优，已达标数据集不重复评测）。通过 diagnose_ops.py accuracy-groups 获取分组和累积配置，每轮按实际控制方式应用（/etc/environment 有 VLLM_FL_PREFER_ENABLED=true → env_inline 内联重启；否则写控制文件经 start_service.sh）+ 重启服务 + fast_gpqa.py 评测；轮次上限=分组数（绝对上限 8）。**全部数据集达标才设 workflow.accuracy_ok=true**（update_context.py 会校验全部 accuracy_compare_{dataset}.json）
 
 **进度输出**：步骤开始/完成时输出 [步骤X] 标记，关键命令后输出 ✓/✗ 结果摘要。
 
-**评测等待策略（硬性）**：
-- 精度评测必须通过 eval_wrapper.py 执行（不要直接调用 fast_gpqa.py）：
-  python3 eval_wrapper.py --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --output <输出路径>' --service-log <服务日志路径> --stall-timeout 300 --max-timeout 3600
-- eval_wrapper.py 会阻塞直到评测完成或异常退出，无需轮询
-- 使用 Bash(timeout=3600) 前台执行 eval_wrapper.py，不要用后台任务
-- 退出码 0 = 成功（最后一行 [RESULT_JSON] 为结果），非 0 = 异常（[EVAL_ERROR] 为错误摘要）
-- 异常时根据 error type 决定处理：service_crash/service_exited → 重启服务后重试；stall/timeout → 检查日志后重试；eval_failed → 检查错误信息
-- 禁止使用 TaskOutput 轮询，禁止每隔 N 秒检查评测状态
+${EVAL_BUDGET_NOTE}
+**评测等待策略（长任务执行协议 — 硬性）**：
+Bash 工具前台命令有 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败——**禁止**用 Bash(timeout=大数) 前台阻塞等待评测，**禁止** TaskOutput 轮询（转后台后轮询会全量重发上下文烧 token）。按三步执行：
+1. 精度评测必须通过 eval_wrapper.py 执行（不要直接调用 fast_gpqa.py），**每个数据集独立任务**（本流程数据集: ${DATASETS_CSV}，共 ${DATASET_COUNT} 个），先写任务命令文件 eval_v1_{prefix}.cmd / eval_v2_{prefix}.cmd（prefix 见下方数据集任务规格表，gpqa_diamond 用历史短名 gpqa），以 ${PRIMARY_DATASET}（前缀 ${PRIMARY_PREFIX}）的 V2 为例：
+   docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.cmd << 'CMD_EOF'
+cd /flagos-workspace/scripts
+PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --dataset ${PRIMARY_DATASET} --output <输出路径>' --service-log <服务日志路径> --stall-timeout 300 --max-timeout ${EVAL_MAX_TO}
+CMD_EOF\"
+   （mmlu/math_500 及多数据集不传 --limit，fast_gpqa 按数据集默认题数；gpqa_diamond 单数据集时 eval-cmd 加 --limit ${EVAL_LIMIT}，V1/V2 必须相同——见下方数据集任务规格表）
+2. detached 启动（每条任务独立启动，一条命令立即返回，不等待）：
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.cmd' --state /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.state --log /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.log --timeout ${EVAL_MAX_TO}\"
+3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
+   sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.log\"
+   - status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f <任务命令特征> 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
+   - status=done → 评测成功（日志最后一行 [RESULT_JSON] 为结果），读取结果文件继续
+   - status=error → 读日志按 error type 处理：service_crash/service_exited → 重启服务后重试；stall/timeout → 检查日志后重试；eval_failed → 检查错误信息
+   - status=timeout → 超过 --max-timeout 总闸，读日志诊断
+- 启动前检查 /flagos-workspace/logs/tasks/eval_v2_{dataset}.state：若存在且 status=running，说明上一会话已启动评测（会话被杀任务继续跑）——**直接接管轮询，禁止重复启动评测**；status=done/error 则按终态直接处理
+- **评测耗时长（尤其 thinking 模型）是预算内预期，禁止因等待时间长主动跳过、放弃或截断评测**；预算上限已按题数×单题时间×1.25 缓冲计算，预算内完成即为正常
 - **禁止**直接 import evalscope 或内联编写评测代码，必须通过 eval_wrapper.py 执行
 - eval_wrapper.py 自动从 context.yaml 获取端口和模型名，无需手动指定 --model-name 或 --api-base
-- V1 结果路径: /flagos-workspace/results/gpqa_native.json，V2 结果路径: /flagos-workspace/results/gpqa_flagos.json
+**数据集任务规格表（每个数据集独立评测、独立判定，全部达标才 accuracy_ok=true）**：
+${DATASET_EVAL_SPEC}
+- **V1/V2 参数必须完全相同**（同一 --dataset；mmlu/math_500 不传 --limit 用数据集默认题数：mmlu 20/子集=1140 题、math_500 40/等级=200 题）
+- **判定**：每数据集 accuracy_compare.py --v1 .../{dataset}_native.json --v2 .../{dataset}_flagos.json --metric {dataset} --output .../accuracy_compare_{dataset}.json（本地 V1 基线模式 --metric 不影响判据，仅报告标题）；rel_drop >5% 的数据集记录到 logs/issues_accuracy.log 并触发步骤5调优（按不达标数据集逐个进行，每轮只针对一个数据集）；update_context.py 写入 accuracy_ok=true 前会自动校验**全部** accuracy_compare_{dataset}.json 均 aligned，缺失或任一不达标则拒绝
+- nv_baseline.yaml 需已收录该模型对应数据集指标（用户补充，结构已支持多指标）；缺失时以本地 V1 为基线
 
 **Issue 强制规则**（达到条件必须生成 issue 文件）：
 GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
@@ -1075,7 +1555,7 @@ GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
 - 推荐使用 safe_restart_service.sh 一条命令完成重启（自动 restart + start + wait）
 - 禁止在不 restart 容器的情况下启动新的 vLLM 服务（旧进程会占用端口导致启动失败）
 - wait_for_service.sh 检测到残留服务会 exit 2 并提示需要 docker restart
-- **wait_for_service.sh 等待策略**：使用 Bash(timeout=600000) 前台执行，禁止 TaskOutput 轮询。Bash timeout 单位是毫秒，600000ms = 10 分钟"
+- **wait_for_service.sh 等待策略**：按上方「长任务执行协议」三步执行（写 startup_default.cmd → docker exec -d 启动 task_runner.py → sleep 480 短轮询 state），**禁止** Bash(timeout=大数) 前台阻塞或 TaskOutput 轮询"
 
 # native 场景追加硬性约束：只执行步骤4/6，跳过5/7
 if [ "${IS_NATIVE}" = "true" ]; then
@@ -1139,10 +1619,67 @@ CTX_INFO=$(read_context "${MODEL}" 2>/dev/null) || {
 SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
 echo "  容器名: ${SEG_CTR}"
 
+# 段2末确定性兜底刷新报告
+regenerate_report "${SEG_CTR}"
+
+# ===== 分支 B V1 三选强制闸门：确保 baseline_selector.py 真实执行过，不信任 Claude 臆断的 v1_variant =====
+# 动机：baseline_selector.py 全程无 shell 强制调用点，Claude 可能自起服务测一下就把
+# baseline.v1_variant/v1_available 写成臆断值，导致下游 V2 分支(2.1/2.2)、合成基线触发、
+# 精度基线回退 NV 全部建立在未经三选验证的判据上。v1_gate.py 只认 v1_baseline_selection.json
+# 里 baseline_selector 产出的 attempts[] 真实痕迹(每变体 service_ok/smoke_passed)，
+# needed=缺真实三选产物 → shell 兜底直调 baseline_selector.py。仅分支 B 需要三选。
+if [ "${PIPELINE_BRANCH:-}" = "B" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+    RES_DIR_V1="/data/flagos-workspace/${MODEL}/results"
+    V1_SELECTION="${RES_DIR_V1}/v1_baseline_selection.json"
+    V1_GATE=$(python3 "${SCRIPT_DIR}/v1_gate.py" --selection "${V1_SELECTION}" 2>/dev/null) || V1_GATE="needed"
+    if [ "$V1_GATE" = "ok" ]; then
+        echo "  ✓ V1 三选闸门：baseline_selector.py 已真实执行过（v1_baseline_selection.json 含完整 attempts 痕迹）"
+    else
+        echo "  ⚠ V1 三选闸门：缺 baseline_selector 真实产物（Claude 疑似臆断 v1_variant）→ shell 兜底直调三选状态机..."
+        # 取端口与模型名供三选启动服务/冒烟使用（一次 docker exec 读全，read_context 不含 port）
+        V1_META=$(docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 -c \"
+import yaml
+try:
+    with open('/flagos-workspace/shared/context.yaml') as f:
+        c = yaml.safe_load(f)
+    print(str(c.get('service',{}).get('port',8000)) + '|' + c.get('model',{}).get('name',''))
+except: print('8000|')
+\"" 2>/dev/null) || V1_META="8000|"
+        V1_PORT=$(echo "$V1_META" | cut -d'|' -f1); V1_PORT="${V1_PORT:-8000}"
+        V1_MODEL_NAME=$(echo "$V1_META" | cut -d'|' -f2-)
+        docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/baseline_selector.py \
+            --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh' \
+            --vendor-plugin auto \
+            --port ${V1_PORT} \
+            --model-name '${V1_MODEL_NAME}' \
+            --output /flagos-workspace/results/v1_baseline_selection.json \
+            --json" 2>&1 | tee -a "${LOG_FILE}" || true
+        # 同步三选产出的 context 与结果回宿主机
+        if [ -f "${SHARED_CTX}" ]; then
+            cp "${SHARED_CTX}" "${CTX_FILE}" 2>/dev/null || true
+        else
+            docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+        fi
+        docker cp "${SEG_CTR}:/flagos-workspace/results/v1_baseline_selection.json" "${V1_SELECTION}" 2>/dev/null || true
+        # 复检
+        V1_GATE_RECHECK=$(python3 "${SCRIPT_DIR}/v1_gate.py" --selection "${V1_SELECTION}" 2>/dev/null) || V1_GATE_RECHECK="needed"
+        if [ "$V1_GATE_RECHECK" = "ok" ]; then
+            echo "  ✓ shell 兜底 baseline_selector.py 执行完毕，V1 三选已确定"
+        else
+            echo "  ✗ shell 兜底后仍无有效三选产物（容器/脚本异常），下游将按 v1_available 现状继续"
+        fi
+    fi
+fi
+
 # ===== 段2 结束后：直接执行精度评测（默认流程，不依赖 Claude 是否正确调用） =====
 run_eval_if_missing() {
     local OUTPUT_FILE="$1"
     local SEG2_START="$2"
+    # 从输出文件名派生数据集（{prefix}_native.json / {prefix}_flagos.json；
+    # 前缀 gpqa 反向映射回 dataset gpqa_diamond，其余前缀即 dataset 名）
+    local DS_NAME DS_PREF
+    DS_PREF=$(echo "${OUTPUT_FILE}" | sed 's/_native\.json$//;s/_flagos\.json$//')
+    DS_NAME=$(ds_from_prefix "${DS_PREF}")
 
     EVAL_STATUS=$(docker exec "${SEG_CTR}" bash -c "
         PATH=/opt/conda/bin:\$PATH python3 -c \"
@@ -1190,14 +1727,22 @@ with open('/flagos-workspace/shared/context.yaml') as f:
     fi
 
     # 直接执行 eval_wrapper.py
+    # 超时预算复用顶部 compute_eval_budget（此刻 snapshot 已同步，runtime.thinking_model 生效；
+    # thinking 模型 30 题 × 600s × 1.25 = 22500s，普通 50 题 × 60s × 1.25 = 7200s 封顶）
+    compute_eval_budget
+    echo "  [${IS_THINKING}] 评测预算: limit=${EVAL_LIMIT}, max_timeout=${EVAL_MAX_TO}s"
+
     echo "  ▶ docker exec ${SEG_CTR} ... eval_wrapper.py --output ${OUTPUT_FILE}"
+    # --limit 仅 gpqa_diamond 单数据集时附加（EVAL_LIMIT 非空即成立），mmlu/math_500 用数据集默认题数
+    local _LIMIT_ARGS=""
+    [ "${DS_NAME}" = "gpqa_diamond" ] && [ -n "${EVAL_LIMIT}" ] && _LIMIT_ARGS="--limit ${EVAL_LIMIT} "
     docker exec "${SEG_CTR}" bash -c "
         cd /flagos-workspace/scripts && \
         PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py \
-            --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --output /flagos-workspace/results/${OUTPUT_FILE}' \
+            --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --dataset ${DS_NAME} ${_LIMIT_ARGS}--output /flagos-workspace/results/${OUTPUT_FILE}' \
             --context-yaml /flagos-workspace/shared/context.yaml \
             --service-log \$(ls -t /flagos-workspace/logs/startup_*.log 2>/dev/null | head -1) \
-            --stall-timeout 300 --max-timeout 3600
+            --stall-timeout 300 --max-timeout ${EVAL_MAX_TO}
     "
     return $?
 }
@@ -1205,9 +1750,67 @@ with open('/flagos-workspace/shared/context.yaml') as f:
 # 获取 seg2 启动时间戳
 SEG2_START_ISO=$(date -d "@$(cat "${LOG_DIR}/seg2_start_ts" 2>/dev/null || echo 0)" --iso-8601=seconds 2>/dev/null || echo "2000-01-01T00:00:00")
 
+# 检测当前服务是否 FlagGems 模式（V2 精度兜底前置判据）
+# 判据（agent 无法用嘴伪造）：startup_default.log 软链指向 startup_flagos*.log，
+# 或 /etc/environment 中 USE_FLAGGEMS=1。二者任一命中即视为 FlagGems 服务。
+is_flaggems_service() {
+    docker exec "${SEG_CTR}" bash -c '
+        LINK=$(readlink /flagos-workspace/logs/startup_default.log 2>/dev/null || echo "")
+        case "$LINK" in
+            *startup_flagos*) echo "yes"; exit 0 ;;
+        esac
+        if grep -q "^USE_FLAGGEMS=1" /etc/environment 2>/dev/null; then
+            echo "yes"; exit 0
+        fi
+        echo "no"
+    ' 2>/dev/null || echo "no"
+}
+
 # 尝试直接执行精度评测（如果 Claude 未正确产出结果）
 if docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
-    run_eval_if_missing "gpqa_native.json" "${SEG2_START_ISO}" || true
+    # V1 (native) 精度兜底：当前服务能测即测（每个数据集独立任务，文件名用前缀）
+    for _ds in ${DATASET_LIST}; do
+        run_eval_if_missing "$(ds_prefix "${_ds}")_native.json" "${SEG2_START_ISO}" || true
+    done
+
+    # V2 (FlagGems) 精度兜底：仅当当前服务确为 FlagGems 模式且存活时直接测；
+    # 否则不硬测（避免拿 native/错误配置服务测出污染的 V2 分数），交由后续段2 retry
+    # 让 Claude 用 skill 正确切换 FlagGems 服务后重测。
+    # native 场景无 FlagGems、无 V2，跳过整个 V2 兜底（否则打印误导性"V2 缺失"日志）。
+    if [ "${SEG_ENV}" = "native" ]; then
+        V2_EVAL_STATE="SKIP_NATIVE"
+    else
+        for _ds in ${DATASET_LIST}; do
+            _PREF=$(ds_prefix "${_ds}")
+            V2_EVAL_STATE=$(docker exec "${SEG_CTR}" bash -c "
+            PATH=/opt/conda/bin:\$PATH python3 -c \"
+import json
+from datetime import datetime
+try:
+    with open('/flagos-workspace/results/${_PREF}_flagos.json') as f:
+        d = json.load(f)
+    if d.get('_producer') != 'fast_gpqa.py' or d.get('score') is None:
+        print('INVALID')
+    elif datetime.fromisoformat(d['timestamp']) > datetime.fromisoformat('${SEG2_START_ISO}'):
+        print('OK')
+    else:
+        print('STALE')
+except FileNotFoundError:
+    print('MISSING')
+except Exception:
+    print('INVALID')
+\"" 2>/dev/null) || V2_EVAL_STATE="ERROR"
+
+            if [ "${V2_EVAL_STATE}" = "OK" ]; then
+                echo "  ✓ ${_PREF}_flagos.json (V2) 评测结果有效"
+            elif [ "$(is_flaggems_service)" = "yes" ]; then
+                echo "  ⚠ ${_PREF}_flagos.json (V2) 结果无效 (${V2_EVAL_STATE})，当前为 FlagGems 服务，直接兜底评测..."
+                run_eval_if_missing "${_PREF}_flagos.json" "${SEG2_START_ISO}" || true
+            else
+                echo "  ⚠ ${_PREF}_flagos.json (V2) 结果无效 (${V2_EVAL_STATE})，但当前非 FlagGems 服务，不硬测（防污染），交由段2 retry 由 Claude 正确切换服务后重测"
+            fi
+        done
+    fi
 fi
 
 # 段2 完成性校验：步骤4（精度评测）必须有明确结果
@@ -1233,19 +1836,19 @@ if [ "$SEG2_STATUS" != "complete" ] || [ "$SEG2_PERF_STATUS" != "complete" ]; th
 import json, sys
 from datetime import datetime
 seg2_start = datetime.fromisoformat('${SEG2_START_UTC}')
-# 检查 V1
+# 检查 V1（主数据集 ${PRIMARY_DATASET}，文件前缀 ${PRIMARY_PREFIX}）
 v1_score = None
 try:
-    with open('/flagos-workspace/results/gpqa_native.json') as f:
+    with open('/flagos-workspace/results/${PRIMARY_PREFIX}_native.json') as f:
         d = json.load(f)
     ts = datetime.fromisoformat(d['timestamp'])
     if ts > seg2_start:
         v1_score = d['score']
 except: pass
-# 检查 V2
+# 检查 V2（主数据集）
 v2_score = None
 try:
-    with open('/flagos-workspace/results/gpqa_flagos.json') as f:
+    with open('/flagos-workspace/results/${PRIMARY_PREFIX}_flagos.json') as f:
         d = json.load(f)
     ts = datetime.fromisoformat(d['timestamp'])
     if ts > seg2_start:
@@ -1262,15 +1865,15 @@ if v1_score is not None:
             V1_INJECT="
 
 **⚠ 已有 V1 结果（上一会话已完成，禁止重跑）**：
-- V1 (native) GPQA 得分: ${V1_SCORE}%（文件: /flagos-workspace/results/gpqa_native.json，时间戳已校验为本次产出）
+- V1 (native) ${PRIMARY_DATASET} 得分: ${V1_SCORE}%（文件: /flagos-workspace/results/${PRIMARY_PREFIX}_native.json，时间戳已校验为本次产出）
 - 直接从 V2 (FlagGems) 评测开始，跳过 V1 评测和 V1 服务启动"
             if echo "${V1_RESULT}" | grep -q "^V2="; then
                 V2_SCORE=$(echo "${V1_RESULT}" | grep "^V2=" | cut -d= -f2)
                 V1_INJECT="
 
 **⚠ V1 和 V2 结果均已存在（上一会话已完成，禁止重跑）**：
-- V1 (native) GPQA 得分: ${V1_SCORE}%
-- V2 (FlagGems) GPQA 得分: ${V2_SCORE}%
+- V1 (native) ${PRIMARY_DATASET} 得分: ${V1_SCORE}%
+- V2 (FlagGems) ${PRIMARY_DATASET} 得分: ${V2_SCORE}%
 - 跳过整个步骤4评测，直接进入精度对比（accuracy_compare.py）和后续步骤"
             fi
             echo "  ✓ 检测到本次已有结果: ${V1_RESULT}"
@@ -1327,35 +1930,30 @@ if v1_score is not None:
     fi
 fi
 
-# ===== 段2 步骤7 补充检查：performance_ok=false 且步骤7未执行时，补一次重试 =====
+# ===== 段2 步骤7 强制闸门：编排层自算达标率 + 产物痕迹判定，不信任 agent 写的 performance_ok/ledger =====
+# 动机：agent 可用无数据支撑的臆断跳过 operator_search 并把 performance_ok/ledger 步骤7
+# 写成任意值绕过补跑。step7_gate.py 只看两类 agent 无法伪造的事实：
+#   (1) 达标率——编排层读实测吞吐 JSON ÷ 基线 JSON 自算 min-ratio
+#   (2) 是否真跑过 operator_search——看 operator_config.json 的 search_log/痕迹
+# 返回 needed=必须补跑 / done=真跑过仍未达标(尊重实测) / ok=已达标 / no_data=缺数据
 if [ "${IS_NATIVE:-false}" != "true" ]; then
-    SEG2_NEED_STEP7=$(python3 -c "
-import yaml
-try:
-    with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
-        ctx = yaml.safe_load(f)
-    wf = ctx.get('workflow', {})
-    # performance_ok=false 说明需要步骤7
-    if wf.get('performance_ok') == False or str(wf.get('performance_ok','')).lower() == 'false':
-        ledger = ctx.get('workflow_ledger', {}).get('steps', {})
-        step7_done = False
-        items = ledger.items() if isinstance(ledger, dict) else [(i, s) for i, s in enumerate(ledger)] if isinstance(ledger, list) else []
-        for key, s in items:
-            if not isinstance(s, dict): continue
-            step = str(s.get('step', key)).lower()
-            status = s.get('status', '')
-            if ('07' in step or 'performance_tun' in step or 'perf_tun' in step) and status in ('success', 'skipped'):
-                step7_done = True
-                break
-        if not step7_done:
-            print('needed')
-        else:
-            print('done')
-    else:
-        print('not_needed')
-except Exception as e:
-    print('not_needed')
-" 2>/dev/null) || SEG2_NEED_STEP7="not_needed"
+    RES_DIR="/data/flagos-workspace/${MODEL}/results"
+    # V2 实测结果命名：普通场景 flagos_performance.json，合成基线场景 v2_initial_performance.json
+    FLAGOS_PERF_ARG="${RES_DIR}/flagos_performance.json"
+    [ ! -f "${FLAGOS_PERF_ARG}" ] && [ -f "${RES_DIR}/v2_initial_performance.json" ] && FLAGOS_PERF_ARG="${RES_DIR}/v2_initial_performance.json"
+    SEG2_NEED_STEP7=$(python3 "${SCRIPT_DIR}/step7_gate.py" \
+        --baseline "${RES_DIR}/native_performance.json" \
+        --flagos "${FLAGOS_PERF_ARG}" \
+        --optimized "${RES_DIR}/flagos_optimized.json" \
+        --state "${RES_DIR}/operator_config.json" \
+        --target 0.8 2>/dev/null) || SEG2_NEED_STEP7="no_data"
+
+    case "$SEG2_NEED_STEP7" in
+        ok)      echo "  ✓ 步骤7 闸门：性能已达标（编排层自算 min-ratio≥0.8），无需调优" ;;
+        done)    echo "  ✓ 步骤7 闸门：operator_search 已真实执行过（有搜索痕迹），未达标但尊重实测结果" ;;
+        no_data) echo "  ⚠ 步骤7 闸门：缺基线或实测结果，无法判定达标率，跳过强制补跑（交由后续兜底）" ;;
+        needed)  echo "  ⚠ 步骤7 闸门：未达标 且 无 operator_search 真实运行痕迹 → 强制补跑（agent 疑似臆断跳过）" ;;
+    esac
 
     if [ "$SEG2_NEED_STEP7" = "needed" ]; then
         echo ""
@@ -1388,10 +1986,38 @@ except Exception as e:
         print_ledger_summary "${CTX_FILE}"
         CTX_INFO=$(read_context "${MODEL}" 2>/dev/null) || true
         [ -n "$(echo "$CTX_INFO" | cut -d'|' -f1)" ] && SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
+
+        # ===== 补跑后复检：agent 若在补跑会话里仍臆断跳过（无真实搜索痕迹），shell 直接兜底调 operator_search =====
+        # 这是最后一道闸门——绕开 agent 的"想"，由编排层直接执行确定性搜索脚本。
+        SEG2_RECHECK=$(python3 "${SCRIPT_DIR}/step7_gate.py" \
+            --baseline "${RES_DIR}/native_performance.json" \
+            --flagos "${FLAGOS_PERF_ARG}" \
+            --optimized "${RES_DIR}/flagos_optimized.json" \
+            --state "${RES_DIR}/operator_config.json" \
+            --target 0.8 2>/dev/null) || SEG2_RECHECK="no_data"
+        if [ "$SEG2_RECHECK" = "needed" ]; then
+            echo "  ⚠ 补跑会话仍未执行 operator_search（无搜索痕迹），shell 兜底直接调用脚本..."
+            if [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+                docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_search.py run \
+                    --state-path /flagos-workspace/results/operator_config.json \
+                    --perf-config /flagos-workspace/scripts/config/perf_config.yaml \
+                    --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh' \
+                    --max-rounds 2" 2>&1 | tee -a "${LOG_FILE}" || true
+                # 同步搜索产出回宿主机
+                if [ -f "${SHARED_CTX}" ]; then
+                    cp "${SHARED_CTX}" "${CTX_FILE}" 2>/dev/null || true
+                else
+                    docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+                fi
+                echo "  ✓ shell 兜底 operator_search 执行完毕"
+            else
+                echo "  ✗ 容器 ${SEG_CTR} 不存在，无法 shell 兜底调 operator_search"
+            fi
+        fi
     fi
 fi
 
-# ===== 段2越界检测：如果段2执行了步骤8+的操作，回滚 context 中的越界状态 =====
+# ===== 段2越界检测：如果段2执行了步骤6+的操作，回滚 context 中的越界状态 =====
 SEG2_OVERFLOW=$(python3 -c "
 import yaml, re
 with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
@@ -1407,7 +2033,7 @@ if isinstance(ledger, list):
             continue
         step = s.get('step', '')
         status = s.get('status', '')
-        if step_num(step) >= 8 and status not in ('pending', ''):
+        if step_num(step) >= 6 and status not in ('pending', ''):
             overflow_steps.append(f'{step}={status}')
 elif isinstance(ledger, dict):
     for key, s in ledger.items():
@@ -1415,21 +2041,21 @@ elif isinstance(ledger, dict):
             continue
         step = str(s.get('step', key))
         status = s.get('status', '')
-        if step_num(step) >= 8 and status not in ('pending', ''):
+        if step_num(step) >= 6 and status not in ('pending', ''):
             overflow_steps.append(f'{step}={status}')
 print(','.join(overflow_steps) if overflow_steps else '')
 " 2>/dev/null) || SEG2_OVERFLOW=""
 
 if [ -n "${SEG2_OVERFLOW}" ]; then
     echo "  ⚠ 段2越界检测：以下步骤被段2提前执行，将回滚为 pending 状态: ${SEG2_OVERFLOW}"
-    for STEP_KEY in 08_release 09_plugin_install 10_plugin_service_startup 11_plugin_accuracy 12_plugin_performance 13_plugin_release; do
+    for STEP_KEY in 05_v2_release 06_v3_environment 07_v3_delivery 08_v4_reduction 09_v4_release; do
         docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
             --ledger-update ${STEP_KEY} --ledger-status pending --ledger-notes '段2越界回滚' \
             --json" >/dev/null 2>&1 || true
     done
     # 清理越位执行产生的实际数据（发布状态、Plugin 配置等）
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/rollback_overflow.py \
-        --overflow-from 8" 2>/dev/null || \
+        --overflow-from 6" 2>/dev/null || \
         echo "  ⚠ rollback_overflow.py 执行失败，继续执行"
     echo "  ✓ 越位执行产生的数据已清理"
     # 同步回滚后的 context 到宿主机
@@ -1499,7 +2125,31 @@ print(f'''- 模型路径(容器内): {mdl.get('container_path','')}
 - 宿主机路径: {ws.get('host_path','')}''')
 " 2>/dev/null || echo "  (context 摘要提取失败)")
 
-# ===== 段3: 8 (打包发布) =====
+# 段2 全部补跑（retry/step7 闸门）结束后，用最新 context 再刷新一次报告
+regenerate_report "${SEG_CTR}"
+
+# ===== 段3: 5 (V2 发布) =====
+# V1=v1.3 场景（分支 B 2.2/3.2）：V2 经 plugin 方式使能，V2 镜像=V3 镜像，
+# 段3 一次 commit 双 tag 发布(--also-tag v3)，段4 整段跳过（不重复 plugin 验证）
+V1_VARIANT=$(python3 -c "
+import yaml
+try:
+    with open('${CTX_FILE}') as f:
+        ctx = yaml.safe_load(f)
+    print(ctx.get('baseline', {}).get('v1_variant', ''))
+except: print('')
+" 2>/dev/null) || V1_VARIANT=""
+
+if [ "${V1_VARIANT}" = "v1.3" ] || [ "${V1_VARIANT}" = "none" ]; then
+    SEG3_RELEASE_ARGS="--version-tag v2 --also-tag v3"
+    SEG3_V13_NOTE="
+**V1=${V1_VARIANT} 特殊场景（2.2/3.2 同镜像双 tag）**：本次 V1 三选结果为 ${V1_VARIANT}（依赖 fl plugin；none=三选均失败强依赖 flaggems，baseline_selector 已固化 VLLM_FL_PREFER_ENABLED=true 使 V2 走 plugin 路径），V2 经 plugin 方式使能，V2 镜像与 V3 镜像本质相同。发布命令已含 --also-tag v3（一次 commit，-v2/-v3 双 tag 上传）。这**不算**进入步骤13：ledger 仍只更新 08_release，步骤 9-13（V3 plugin 流程）的 ledger 由编排层置 skipped，禁止触碰。"
+    echo "[段3] V1=${V1_VARIANT} 检测：启用 2.2/3.2 同镜像双 tag 发布 (--also-tag v3)，段4 将跳过"
+else
+    SEG3_RELEASE_ARGS="--version-tag v2"
+    SEG3_V13_NOTE=""
+fi
+
 PROMPT_SEG3="容器名: ${SEG_CTR}，模型名: ${MODEL}
 
 **变量定义（后续命令中直接使用）**：CONTAINER=${SEG_CTR}
@@ -1530,7 +2180,14 @@ ${SEG3_CTX_SUMMARY}
 **发布前同步 context 到宿主机**（发布工具从宿主机路径读取）：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
 （如果 mount_mode=mounted，也可：cp /data/flagos-workspace/${MODEL}/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml）
-发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
+**发布长任务协议（硬性 — main.py 可能运行数小时，镜像推送 54 分钟级）**：**禁止**用 Bash(timeout=大数) 前台阻塞等待发布（Bash 工具 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败——前台阻塞 = 会话被杀、发布中断），按三步执行：
+1. detached 启动（一条命令立即返回，python3 开头 + & 后台符，不加 nohup）：
+   mkdir -p ${LOG_DIR}/tasks && python3 skills/flagos-eval-comprehensive/tools/task_runner.py --cmd 'python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml ${SEG3_RELEASE_ARGS}${SEG3_V13_NOTE}' --state ${LOG_DIR}/tasks/release_v2.state --log ${LOG_DIR}/tasks/release_v2.log --timeout 21600 &
+   echo \"发布任务已 detached 启动，PID: \$!\"
+2. 短轮询（每 8 分钟一次，单条命令 <10 分钟且每次都有输出）：
+   sleep 480 && cat ${LOG_DIR}/tasks/release_v2.state && echo '---' && tail -3 ${LOG_DIR}/tasks/release_v2.log
+   - status=running → 继续轮询；status=done → 校验镜像已推送（docker images 含对应 tag）后继续；status=error → 读日志按发布错误规则处理；status=timeout → 诊断
+3. 断点恢复：启动前检查 release_v2.state——status=running 说明上一会话已启动发布，直接接管轮询，**禁止重复发布**（重复发布会推同名 tag 覆盖，浪费数小时）
 完成后通过 docker cp 回传最终 context：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
 
@@ -1581,7 +2238,7 @@ claude -p "${PROMPT_SEG3}" \
     --max-turns 500 \
     2>&1 | tee -a "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
-         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 8 --cost-file "${LOG_DIR}/seg3_cost.txt" --load-durations "${LOG_DIR}/seg2_durations.json" --durations-file "${LOG_DIR}/seg3_durations.json" ${FILTER_FLAGS} || true
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 5 --cost-file "${LOG_DIR}/seg3_cost.txt" --load-durations "${LOG_DIR}/seg2_durations.json" --durations-file "${LOG_DIR}/seg3_durations.json" ${FILTER_FLAGS} || true
 
 SEG3_END_TS=$(date +%s)
 SEG3_ELAPSED=$(( SEG3_END_TS - SEG3_START_TS ))
@@ -1589,7 +2246,7 @@ SEG3_MIN=$(( SEG3_ELAPSED / 60 ))
 SEG3_SEC=$(( SEG3_ELAPSED % 60 ))
 fi
 
-# ===== 段3越界检测：如果段3执行了步骤9+的操作，回滚 context 中的越界状态 =====
+# ===== 段3越界检测：如果段3执行了步骤8+的操作，回滚 context 中的越界状态 =====
 SEG3_OVERFLOW=$(python3 -c "
 import yaml, re
 with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
@@ -1605,7 +2262,7 @@ if isinstance(ledger, list):
             continue
         step = s.get('step', '')
         status = s.get('status', '')
-        if step_num(step) >= 9 and status not in ('pending', ''):
+        if step_num(step) >= 8 and status not in ('pending', ''):
             overflow_steps.append(f'{step}={status}')
 elif isinstance(ledger, dict):
     for key, s in ledger.items():
@@ -1613,21 +2270,21 @@ elif isinstance(ledger, dict):
             continue
         step = str(s.get('step', key))
         status = s.get('status', '')
-        if step_num(step) >= 9 and status not in ('pending', ''):
+        if step_num(step) >= 8 and status not in ('pending', ''):
             overflow_steps.append(f'{step}={status}')
 print(','.join(overflow_steps) if overflow_steps else '')
 " 2>/dev/null) || SEG3_OVERFLOW=""
 
 if [ -n "${SEG3_OVERFLOW}" ]; then
     echo "  ⚠ 段3越界检测：以下步骤被段3提前执行，将回滚为 pending 状态: ${SEG3_OVERFLOW}"
-    for STEP_KEY in 09_plugin_install 10_plugin_service_startup 11_plugin_accuracy 12_plugin_performance 13_plugin_release; do
+    for STEP_KEY in 08_v4_reduction 09_v4_release; do
         docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
             --ledger-update ${STEP_KEY} --ledger-status pending --ledger-notes '段3越界回滚' \
             --json" >/dev/null 2>&1 || true
     done
     # 清理越位执行产生的实际数据（Plugin 配置等）
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/rollback_overflow.py \
-        --overflow-from 9" 2>/dev/null || \
+        --overflow-from 8" 2>/dev/null || \
         echo "  ⚠ rollback_overflow.py 执行失败，继续执行"
     echo "  ✓ 越位执行产生的数据已清理"
     MOUNT_MODE=$(docker exec "${SEG_CTR}" cat /flagos-workspace/.mount_mode 2>/dev/null || echo "internal")
@@ -1638,7 +2295,7 @@ if [ -n "${SEG3_OVERFLOW}" ]; then
         docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml" 2>/dev/null || \
             echo "  ⚠ 回滚后 context 同步失败（容器可能已停止），继续执行"
     fi
-    echo "  ✓ 越界状态已回滚，段4 将从步骤9重新开始"
+    echo "  ✓ 越界状态已回滚，段4 将从步骤8重新开始"
 fi
 
 # ===== 段间检查：是否触发 plugin 流程（步骤 9-13） =====
@@ -1659,7 +2316,13 @@ CTX_INFO=$(read_context "${MODEL}" 2>/dev/null) || { echo "错误：段3未更�
 SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
 echo "  容器名: ${SEG_CTR}"
 
+# 段3末确定性兜底刷新报告
+regenerate_report "${SEG_CTR}"
+
 # 读取 qualified 状态（含兜底计算：如果 qualified 字段未设置但三个条件都满足，自动判定为 True）
+# 注意（用户 2026-07 定稿）：QUALIFIED（含 performance_ok）已**不再门控**任何段，仅作发布标签/日志参考。
+# 门控分工（2026-07-20 起）：plugin/V3 入口用 PLUGIN_ENTRY(=service_ok)；V4 用 QUALIFIED_CORE_V3。
+# 下方 QUALIFIED_CORE(=service_ok AND accuracy_ok) 保留仅作最终汇总的"旧值对照"，不再门控任何段。
 QUALIFIED=$(python3 -c "
 import yaml
 try:
@@ -1675,9 +2338,67 @@ try:
 except: print('False')
 " 2>/dev/null || echo "False")
 
+# QUALIFIED_CORE = service_ok AND accuracy_ok（精度硬闸门 + 能起服务）。
+# 流程哲学（用户 2026-07 定稿）：性能不看重、不阻断，只要镜像 work 且精度达标(rel_drop≤5%)
+# 就按流程继续产出 V3/V4；性能是否达标只影响发布标签 qualified，不门控后续段。
+# 用途：仅作 V4 门控的基础(见 QUALIFIED_CORE_V3)与最终汇总展示；【不再】用于 plugin/V3 入口。
+QUALIFIED_CORE=$(python3 -c "
+import yaml
+try:
+    with open('${CTX_FILE}') as f:
+        ctx = yaml.safe_load(f)
+    wf = ctx.get('workflow', {})
+    print(bool(wf.get('service_ok') and wf.get('accuracy_ok')))
+except: print('False')
+" 2>/dev/null || echo "False")
+
+# PLUGIN_ENTRY = service_ok（仅"能起服务"）。plugin/V3 入口门控（用户 2026-07-20 定稿）。
+# 关键解耦：V2(FlagGems 注入)与 V3(plugin) 是两套不同的算子调度路径，V2 注入精度差
+# 不代表 V3 plugin 也差（甚至可能相反）。因此只要 V2 能起服务就应进入 plugin 流程尝试 V3，
+# V3 自己的精度在步骤11单独判（步骤13发布门控用 plugin_workflow.accuracy_ok）。
+# 历史缺陷：旧逻辑用 V2 的 accuracy_ok 门控 plugin 入口，把 V2 精度不达标的模型直接挡在
+# V3 门外（Mistral-7B/Ministral-8B/LFM2/VibeThinker 从未尝试过 V3）。
+PLUGIN_ENTRY=$(python3 -c "
+import yaml
+try:
+    with open('${CTX_FILE}') as f:
+        ctx = yaml.safe_load(f)
+    wf = ctx.get('workflow', {})
+    print(bool(wf.get('service_ok')))
+except: print('False')
+" 2>/dev/null || echo "False")
+
 SEG4_ELAPSED=0
 SEG4_MIN=0
 SEG4_SEC=0
+
+# 重读 v1_variant（防断点续跑时段3块未执行导致变量为空）
+V1_VARIANT=$(python3 -c "
+import yaml
+try:
+    with open('${CTX_FILE}') as f:
+        ctx = yaml.safe_load(f)
+    print(ctx.get('baseline', {}).get('v1_variant', ''))
+except: print('')
+" 2>/dev/null) || V1_VARIANT=""
+
+# V1=v1.3/none（2.2/3.2 同镜像）：V3 已由段3 --also-tag v3 双 tag 发布，段4 整段跳过
+if [ "${PLUGIN_ENTRY}" = "True" ] && { [ "${V1_VARIANT}" = "v1.3" ] || [ "${V1_VARIANT}" = "none" ]; }; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] V1=${V1_VARIANT}（V2=V3 同镜像，2.2/3.2 场景）：V3 已随段3 双 tag 发布，跳过段4 Plugin 验证（步骤 9-13）"
+    if [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+        for STEP_KEY in 09_plugin_install 10_plugin_service_startup 11_plugin_accuracy 12_plugin_performance 13_plugin_release; do
+            docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
+                --ledger-update ${STEP_KEY} --ledger-status skipped --ledger-notes 'V1=${V1_VARIANT}: V2=V3 同镜像，段3已双tag发布(2.2/3.2)' \
+                --json" >/dev/null 2>&1 || true
+        done
+        docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+        echo "  ✓ 步骤 9-13 ledger 已置 skipped，context 已同步"
+    fi
+    QUALIFIED_SEG4="False"
+else
+    # plugin/V3 入口：仅需 service_ok（V2 精度不再门控 V3 尝试）
+    QUALIFIED_SEG4="${PLUGIN_ENTRY}"
+fi
 
 # 保存步骤8已推送的 Harbor 镜像地址（段4 plugin 流程可能污染容器，兜底发布需要回退到此镜像）
 SEG3_HARBOR_IMAGE=$(python3 -c "
@@ -1687,7 +2408,35 @@ with open('${CTX_FILE}') as f:
 print(ctx.get('image', {}).get('registry_url', ''))
 " 2>/dev/null) || SEG3_HARBOR_IMAGE=""
 
-if [ "${QUALIFIED}" = "True" ]; then
+# 段4 从 context 重读分支（断点续跑时 PIPELINE_BRANCH 变量可能为空）。
+# 分支 B（准入镜像自带 plugin）步骤9 禁止重装 plugin。
+SEG4_BRANCH=$(python3 -c "
+import yaml
+try:
+    with open('${CTX_FILE}') as f:
+        ctx = yaml.safe_load(f)
+    wf = ctx.get('workflow', {}) or {}
+    et = str(wf.get('entry_image_type', '') or '')
+    pb = str(wf.get('pipeline_branch', '') or '')
+    if et == 'gems_tree_plugin' or pb == 'B':
+        print('B')
+    elif et == 'gems_tree' or pb == 'A':
+        print('A')
+    else:
+        print('')
+except: print('')
+" 2>/dev/null) || SEG4_BRANCH=""
+
+# 分支专属的步骤9 plugin 安装指令
+if [ "${SEG4_BRANCH}" = "B" ]; then
+    SEG4_PLUGIN_DIRECTIVE="**⚠ 分支 B（准入镜像自带 plugin）步骤9 硬约束**：本次准入镜像 entry_image_type=gems_tree_plugin，**已自带可用 plugin**。步骤9 **禁止执行 install_plugin.py --action install（禁止重装 plugin）**——重装会 rm -rf + 重新 clone/pip，覆盖镜像里厂商适配好的 plugin、破坏 V3 对比语义。步骤9 只需 install_plugin.py --action verify 确认可用 + 记状态；plugin 通过启动环境变量 VLLM_PLUGINS=fl 在步骤10 使能。（即便误调 install，工具内置分支闸门也会拒绝重装返回 skipped，但仍不应主动调 install。）"
+elif [ "${SEG4_BRANCH}" = "A" ]; then
+    SEG4_PLUGIN_DIRECTIVE="**分支 A（准入镜像无 plugin）步骤9**：entry_image_type=gems_tree，准入镜像无 plugin → 照常 install_plugin.py --action install 安装 plugin，再 --action verify 验证。"
+else
+    SEG4_PLUGIN_DIRECTIVE="**步骤9 plugin 安装**：按 skills/flagos-plugin-install/SKILL.md 编排层指令的分支分流执行（先读 workflow.entry_image_type 判断分支 A/B：分支 B 自带 plugin 禁止重装，仅 verify + VLLM_PLUGINS=fl 使能；分支 A 无 plugin 照常 install）。"
+fi
+
+if [ "${QUALIFIED_SEG4}" = "True" ]; then
     # 提取段4所需参数
     SEG4_CTX_SUMMARY=$(python3 -c "
 import yaml
@@ -1725,6 +2474,20 @@ print(f'''- container_name: {ctr.get('name','')}
 " 2>/dev/null || echo "  (context 摘要提取失败)")
 
     # ===== 段4: 9-13 (Plugin 验证 + 发布) =====
+    # V3(plugin) 精度评测口径与 V2(步骤4)完全一致：跑全部 ${DATASETS_CSV}，每个数据集
+    # 独立评测、独立判定，全部达标才 plugin_workflow.accuracy_ok=true。
+    # --limit 仅 gpqa_diamond 单数据集时附加（mmlu/math_500 及多数据集用数据集默认题数）。
+    V3_EVAL_LIMIT_ARGS=""
+    [ "${PRIMARY_DATASET}" = "gpqa_diamond" ] && [ "${DATASET_COUNT}" -eq 1 ] && [ -n "${EVAL_LIMIT}" ] && V3_EVAL_LIMIT_ARGS="--limit ${EVAL_LIMIT} "
+    # 逐数据集任务规格（供步骤11 独立评测/判定使用）
+    V3_DATASET_SPEC=""
+    for _ds in ${DATASET_LIST}; do
+        _PREF=$(ds_prefix "${_ds}")
+        _LIMIT_ARGS=""
+        [ "${_ds}" = "gpqa_diamond" ] && [ "${DATASET_COUNT}" -eq 1 ] && [ -n "${EVAL_LIMIT}" ] && _LIMIT_ARGS="--limit ${EVAL_LIMIT} "
+        V3_DATASET_SPEC="${V3_DATASET_SPEC}
+- **${_ds}**：任务文件 plugin_eval_${_PREF}.cmd（state/log 同名）；评测命令 python3 fast_gpqa.py --config fast_gpqa_config.yaml --dataset ${_ds} ${_LIMIT_ARGS}--output /flagos-workspace/results/${_PREF}_flagos_optimized.json；与 V2 判定同参对比 V1 基线 /flagos-workspace/results/${_PREF}_native.json（缺失回退 NV），判定 accuracy_compare.py --v1 <V1或NV> --v2 /flagos-workspace/results/${_PREF}_flagos_optimized.json --metric ${_ds} --output /flagos-workspace/results/accuracy_compare_${_PREF}_v3.json"
+    done
     PROMPT_SEG4="容器名: ${SEG_CTR}，模型名: ${MODEL}
 
 **变量定义（后续命令中直接使用）**：CONTAINER=${SEG_CTR}
@@ -1732,10 +2495,12 @@ ${COMMON_TOKENS}
 
 按 CLAUDE.md 工作流定义执行步骤 9-13 Plugin 验证流程。
 
+${SEG4_PLUGIN_DIRECTIVE}
+
 **前段状态（段1+段2+段3已完成，无需验证）**：
 - 步骤 1-8 已在前三段全部完成
 - 容器 ${SEG_CTR} 已就绪，主流程发布已完成
-- workflow.qualified=true（已由 shell 层验证）
+- plugin/V3 入口门控 = service_ok（服务可起）；**V2 精度是否达标不影响是否尝试 V3**——V2(注入)与 V3(plugin)是两套算子调度路径，V3 精度以步骤11为准
 - **禁止**回头检查或重做步骤 1-8，直接执行步骤 9
 
 **关键参数（从 context.yaml 提取）**：
@@ -1761,14 +2526,43 @@ ${SEG4_CTX_SUMMARY}
 **Plugin 流程特殊规则**：
 - 步骤 9 安装失败 → issue_reporter.py --type plugin-error --repo flagos-ai/vllm-plugin-FL → 停止任务
 - 步骤 10 服务崩溃 → issue_reporter.py --type plugin-error --repo flagos-ai/vllm-plugin-FL → 停止任务
-- 步骤 11/12 不达标 → 写 issue 到 flagos-ai/vllm-plugin-FL，继续（不调优）
-- 步骤 13 触发条件：plugin_workflow.accuracy_ok=true AND performance_ok=true
+- **流程哲学（用户 2026-07 定稿）：性能不看重、不阻断**。步骤12（plugin 性能评测）无论达标与否都不阻断步骤13发布，性能仅影响发布标签 qualified。**精度是唯一硬闸门**（rel_drop≤5%）。
+- **步骤 11 精度评测口径（与 V2 步骤4 完全一致）**：对全部 ${DATASET_COUNT} 个数据集（${DATASETS_CSV}）**逐个独立评测、独立判定**（每数据集见下方 V3 数据集任务规格；rel_drop≤5% 为达标），**全部数据集达标才置 plugin_workflow.accuracy_ok=true**；任一数据集不达标即 accuracy_ok=false，进入下方三级递进。
+- 步骤 11 精度不达标 → **三级递进**（精度专用，不直接放弃；多数据集时**按不达标数据集逐个处理**）：
+  ① 先写 issue 到 flagos-ai/vllm-plugin-FL 记录问题（注明哪个/哪些数据集不达标）；
+  ② plugin 模式关算子调优：**按不达标数据集逐个调优**（每轮只针对一个不达标数据集，operator_search.py 加 --dataset <该数据集> 与判定同参）：operator_search.py run --plugin-mode --dataset <数据集> --final-output-name v3_performance --state-path /flagos-workspace/results/operator_config_v3.json（走 env_inline VLLM_FL_FLAGOS_BLACKLIST，在已达标算子集基础上继续关拖累精度算子直到该数据集精度达标）；已达标数据集不重复评测，**全部数据集达标才置 accuracy_ok=true 继续**；
+  ③ 全关 flaggems 算子仍有数据集精度不达标 → 判定为框架问题，提交 plugin-error issue（标注全关仍不达标的数据集），保持 accuracy_ok=false（精度硬闸门未过 → V3 不产出）。
+- 步骤 12 性能不达标 → 仅写 performance-degraded issue 记录 + 标 performance_ok=false，**照常继续步骤13**（可选：跑一次 plugin 模式性能调优尽力提升，达上限即停，不强求达标）。
+- 步骤 13 触发条件：plugin_workflow.accuracy_ok=true（**仅精度硬闸门**；performance_ok 不再门控，仅决定发布 tag 的 qualified 标签）
+- **⚠ 步骤13硬约束（不可跳过）**：只要步骤11精度达标（accuracy_ok=true），**必须**立即执行步骤13发布 V3，**禁止**因 performance_ok=false / qualified=false 而跳过步骤13；**禁止**在步骤13完成前进入 V4 或结束会话。若精度达标却未发 V3，即为流程违规（历史事故：DeepSeek-R1-0528 精度62%达标、性能77.9%<80%，agent误把performance_ok=false当门控、跳过步骤13直接跑V4致V3漏发）。步骤11→步骤13之间除步骤12性能记录外不得插入任何其他阶段。
 - 所有 issue 提交到 flagos-ai/vllm-plugin-FL（非 FlagGems）
-- 算子集复用主流程已达标版本，不重新调优
+- 算子集以主流程已达标版本为起点；**精度达标则不重新调优，精度不达标则进入上述精度三级递进允许在 plugin 模式下继续调优**（性能不达标不强制重调，按上条尽力即可）
 - 启动环境变量：USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true + 已有 blacklist
-- 如果 disabled_ops 非空，启动前必须写入白名单控制文件 /root/flaggems_ops_control.json（{"include": [启用算子]}），start_service.sh 自动推断 FLAGGEMS_CONTROL_MODE=only_enable
+- **算子控制必须用 env（VLLM_FL_FLAGOS_BLACKLIST），禁止写控制文件**：plugin 下 VLLM_FL_PREFER_ENABLED=true 使注入代码 pass，/root/flaggems_ops_control.json 无效。用 apply_op_config.py --mode custom --flagos-blacklist '禁用算子逗号分隔' 生成 env_inline 作启动前缀。
 
 **进度输出**：步骤开始/完成时输出 [步骤N] 标记，关键命令后输出 ✓/✗ 结果摘要。
+
+**执行等待策略（长任务执行协议 — 硬性）**：
+本段步骤 9-12 含多个长跑命令（plugin 安装、wait_for_service.sh 起服务、eval_wrapper.py 精度评测、benchmark_runner.py 性能测试、operator_search.py --plugin-mode 算子调优），全部**禁止**用 Bash(timeout=大数) 前台阻塞执行（Bash 工具 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败——前台阻塞 = 会话被杀、任务丢失），**禁止** TaskOutput 轮询。统一按三步执行（以精度评测为例，其余命令同样式替换 <TASK_ID>）：
+1. 写任务命令文件（一条 docker exec，内容自由写无转义问题）：
+   docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/<TASK_ID>.cmd << 'CMD_EOF'
+cd /flagos-workspace/scripts
+<完整原命令>
+CMD_EOF\"
+2. detached 启动（一条命令立即返回，不等待）：
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/<TASK_ID>.cmd' --state /flagos-workspace/logs/tasks/<TASK_ID>.state --log /flagos-workspace/logs/tasks/<TASK_ID>.log --timeout <上限秒>\"
+3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
+   sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/<TASK_ID>.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/<TASK_ID>.log\"
+   - status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f <任务命令特征> 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
+   - status=done → 任务成功，按各步骤规则读取结果文件继续
+   - status=error → 读日志按原错误处理规则处理（如重启服务后重试等）
+   - status=timeout → 超过总闸，读日志诊断
+- **断点恢复（硬性）**：启动任务前先检查 /flagos-workspace/logs/tasks/<TASK_ID>.state——若存在且 status=running，说明上一会话已启动该任务（会话被杀任务继续跑），**直接接管轮询，禁止重复启动**；status=done/error 则按终态直接处理
+${EVAL_BUDGET_NOTE}
+- **精度评测**（<TASK_ID>=plugin_eval_{prefix}，**每个数据集一个独立任务**）：必须通过 eval_wrapper.py 执行（不要直接调用 fast_gpqa.py），对全部 ${DATASET_COUNT} 个数据集（${DATASETS_CSV}）**逐个独立评测、独立判定，全部达标才 accuracy_ok=true**（与 V2 步骤4 口径一致；与 V2 评测同样本可对比；mmlu/math_500 及多数据集不传 --limit，用数据集默认题数）。各数据集任务规格如下（cmd 文件用 eval_wrapper.py --eval-cmd 包裹对应 fast_gpqa 命令，--service-log <服务日志> --stall-timeout 300 --max-timeout ${EVAL_MAX_TO}；task_runner --timeout ${EVAL_MAX_TO}；退出码 0=成功末行 [RESULT_JSON]，非 0=异常 [EVAL_ERROR]）：${V3_DATASET_SPEC}
+  **评测耗时长（尤其 thinking 模型 × 多数据集）是预算内预期，禁止因等待时间长主动跳过任一数据集评测**。
+- **服务等待**（<TASK_ID>=startup_plugin）：wait_for_service.sh 命令（--timeout 180 --max-timeout 5760 --mode flagos）写入 cmd 文件执行，task_runner --timeout 6000。
+- **性能/调优**（<TASK_ID>=benchmark_v3 / search_v3）：benchmark_runner.py 命令（--output-name flagos_optimized）与 operator_search.py run --plugin-mode --final-output-name v3_performance --state-path /flagos-workspace/results/operator_config_v3.json 命令写入 cmd 文件执行，task_runner --timeout 86400（调优可能数小时，脚本内部已有完整循环）。
 
 - Issue 模板：
   docker exec -e GITHUB_TOKEN=${GITHUB_TOKEN} \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \\
@@ -1778,7 +2572,15 @@ ${SEG4_CTX_SUMMARY}
 **步骤 13 发布**：
 发布前同步 context 到宿主机：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
-发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --plugin-mode
+发布工具在宿主机执行，main.py 可能运行数小时（镜像推送），按宿主机长任务协议三步执行：
+1. detached 启动（一条命令立即返回，python3 开头 + & 后台符，不加 nohup）：
+   mkdir -p ${LOG_DIR}/tasks && python3 skills/flagos-eval-comprehensive/tools/task_runner.py --cmd 'python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --version-tag v3' --state ${LOG_DIR}/tasks/release_v3.state --log ${LOG_DIR}/tasks/release_v3.log --timeout 21600 &
+   echo \"发布任务已 detached 启动，PID: \$!\"
+2. 短轮询（每 8 分钟一次，单条命令 <10 分钟且每次都有输出）：
+   sleep 480 && cat ${LOG_DIR}/tasks/release_v3.state && echo '---' && tail -3 ${LOG_DIR}/tasks/release_v3.log
+   - status=running → 继续轮询；status=done → 校验镜像已推送（docker images 含对应 tag）后继续；status=error → 读日志按发布错误规则处理；status=timeout → 诊断
+3. 断点恢复：启动前检查 release_v3.state——status=running 说明上一会话已启动发布，直接接管轮询，禁止重复发布
+（3.1 特殊情况：若本段验证确认厂商 platform plugin 与 fl plugin 均不适配本模型——即 plugin 模式无论怎么调优都无法启动/达标且已按三级递进判定为框架问题——发布时追加 --incompatible-tag '<模型名>-flagos-<厂商>-incompatible' 打不适配标记）
 完成后通过 docker cp 回传最终 context：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
 
@@ -1826,7 +2628,7 @@ print('no')
         --max-turns 500 \
         2>&1 | tee -a "${LOG_FILE}" \
              | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
-             | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 9 --cost-file "${LOG_DIR}/seg4_cost.txt" --load-durations "${LOG_DIR}/seg3_durations.json" --durations-file "${LOG_DIR}/seg4_durations.json" ${FILTER_FLAGS} || true
+             | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 6 --cost-file "${LOG_DIR}/seg4_cost.txt" --load-durations "${LOG_DIR}/seg3_durations.json" --durations-file "${LOG_DIR}/seg4_durations.json" ${FILTER_FLAGS} || true
 
     SEG4_END_TS=$(date +%s)
     SEG4_ELAPSED=$(( SEG4_END_TS - SEG4_START_TS ))
@@ -1835,8 +2637,318 @@ print('no')
     fi
 else
     echo ""
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] qualified=${QUALIFIED}，跳过 Plugin 流程（步骤 9-13）"
+    if [ "${PLUGIN_ENTRY}" = "True" ] && { [ "${V1_VARIANT}" = "v1.3" ] || [ "${V1_VARIANT}" = "none" ]; }; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] V1=${V1_VARIANT} 同镜像场景，段4 已跳过（V3 已随段3 双 tag 发布）"
+    else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] plugin_entry=${PLUGIN_ENTRY}（service_ok 未满足=服务起不来），跳过 Plugin 流程（步骤 9-13）"
+    fi
 fi
+
+# 保存 Plugin/V3 阶段耗时；后续 V4 阶段会复用 SEG4_* 临时变量。
+SEG4_PLUGIN_ELAPSED=${SEG4_ELAPSED:-0}
+SEG4_PLUGIN_MIN=${SEG4_MIN:-0}
+SEG4_PLUGIN_SEC=${SEG4_SEC:-0}
+SEG4V4_ELAPSED=0
+SEG4V4_MIN=0
+SEG4V4_SEC=0
+
+# ===== 段4: V4 减算子 + 发布 (步骤 8-9) =====
+# 触发条件：qualified_core=true（service_ok AND accuracy_ok；性能不再门控）。
+# V4 在 V3 plugin 镜像基础上减算子提性能，
+# 精度终检以 V1（或 NV）基线为准，rel_drop≤5% 是 V4 成立前提。
+# 强制同步 context（读取段4/plugin 的最新产出）
+CTX_FILE="/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+SHARED_CTX="/data/flagos-workspace/${MODEL}/shared/context.yaml"
+if [ -f "${SHARED_CTX}" ]; then
+    cp "${SHARED_CTX}" "${CTX_FILE}"
+elif [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+    docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+fi
+CTX_INFO=$(read_context "${MODEL}" 2>/dev/null) || CTX_INFO=""
+[ -n "$(echo "$CTX_INFO" | cut -d'|' -f1)" ] && SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
+
+# ===== V4 门控重算：折叠 V3 plugin 精度（基于新流程 v3.1；2026-07-20 解耦 V2）=====
+# 段3(V3) 若 plugin 精度不达标，plugin_workflow.accuracy_ok=false，
+# 旧门控读不到它 → V4 门控误触发，复用不合格 V3 镜像。重算如下：
+# 此处在段4 context 重同步后，重算门控 QUALIFIED_CORE_V3：
+#   走了 plugin 流程(plugin_workflow.triggered) → service_ok AND plugin_workflow.accuracy_ok
+#     （V4 建立在 V3 之上，只看 V3 精度；【不再】叠加 V2 的 accuracy_ok——见缺陷1解耦）；
+#   未走 plugin(分支 A，无 V3) → 退回 service_ok AND accuracy_ok(V2)，避免误关。
+# 说明：plugin/V3 入口门控用 PLUGIN_ENTRY(=service_ok，见上文)；V4 门控用本处 QUALIFIED_CORE_V3。
+QUALIFIED_CORE_V3=$(python3 -c "
+import yaml
+try:
+    with open('${CTX_FILE}') as f:
+        ctx = yaml.safe_load(f)
+    wf = ctx.get('workflow', {}) or {}
+    pw = ctx.get('plugin_workflow', {}) or {}
+    # 走了 plugin 流程时：V4 建立在 V3 之上，其合格性只由 V3(plugin) 精度决定，
+    # 【不再】叠加 V2(注入)的 accuracy_ok——V2 精度不达标但 V3 达标的模型仍应允许 V4。
+    # 未走 plugin(分支 A)：无 V3，退回 service_ok AND accuracy_ok(V2)。
+    if pw.get('triggered'):
+        print(bool(wf.get('service_ok') and pw.get('accuracy_ok')))
+    else:
+        print(bool(wf.get('service_ok') and wf.get('accuracy_ok')))
+except: print('False')
+" 2>/dev/null || echo "False")
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] V4 门控重算：QUALIFIED_CORE_V3=${QUALIFIED_CORE_V3}（折叠 V3 plugin 精度；旧 QUALIFIED_CORE=${QUALIFIED_CORE}）"
+
+SEG4_ELAPSED=0
+SEG4_MIN=0
+SEG4_SEC=0
+
+# 幂等检查：V4 是否已完成（ledger 08_v4_reduction 非 pending）
+SEG4_V4DONE=$(python3 -c "
+import yaml
+try:
+    with open('${CTX_FILE}') as f:
+        ctx = yaml.safe_load(f)
+    ledger = ctx.get('workflow_ledger', {}).get('steps', [])
+    items = ledger if isinstance(ledger, list) else list(ledger.values()) if isinstance(ledger, dict) else []
+    for s in items:
+        if isinstance(s, dict) and str(s.get('step','')).startswith('08_v4') and s.get('status') in ('success','failed','skipped'):
+            print('yes'); exit()
+except: pass
+print('no')
+" 2>/dev/null) || SEG4_V4DONE="no"
+
+if [ "${QUALIFIED_CORE_V3}" = "True" ] && [ "${SEG4_V4DONE}" = "no" ] && [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+
+# 提取精度基线：优先本次 V1({prefix}_native.json) 得分，缺失时回退
+# accuracy_compare_{prefix}.json 的 nv_score（gpqa_diamond 场景 = 原 gpqa_native.json 零回归）
+# V4_ACC_BASELINE：主数据集单标量（向后兼容 operator_reduction.py 的 --accuracy-baseline）
+# V4_ACC_DATASETS：全部数据集的 "dataset:baseline" 逗号分隔映射（供 --accuracy-datasets，
+#                  与 V2/V3 口径一致：V4 终检逐个数据集判定、全部达标才成立）
+V4_DS_PREFIX_MAP=""
+for _ds in ${DATASET_LIST}; do
+    V4_DS_PREFIX_MAP="${V4_DS_PREFIX_MAP}${_ds}:$(ds_prefix "${_ds}") "
+done
+V4_ACC_DATASETS=$(docker exec "${SEG_CTR}" bash -c "
+python3 -c \"
+import json
+pairs = '${V4_DS_PREFIX_MAP}'.split()
+out = []
+for pair in pairs:
+    ds, pref = pair.split(':', 1)
+    baseline = 0.0
+    try:
+        with open('/flagos-workspace/results/%s_native.json' % pref) as f:
+            d = json.load(f)
+        s = d.get('score')
+        if s and float(s) > 0:
+            baseline = float(s)
+    except Exception: pass
+    if baseline <= 0:
+        try:
+            with open('/flagos-workspace/results/accuracy_compare_%s.json' % pref) as f:
+                d = json.load(f)
+            nv = (d.get('nv') or {}).get('score') or d.get('nv_score')
+            if nv and float(nv) > 0:
+                baseline = float(nv)
+        except Exception: pass
+    out.append('%s:%s' % (ds, baseline))
+print(','.join(out))
+\"" 2>/dev/null) || V4_ACC_DATASETS=""
+# 主数据集单标量（从映射中取第一个，向后兼容）
+V4_ACC_BASELINE=$(echo "${V4_ACC_DATASETS}" | tr ',' '\n' | awk -F: 'NR==1{print $2}')
+[ -z "${V4_ACC_BASELINE}" ] && V4_ACC_BASELINE="0.0"
+
+# V4 路径参数：读取 V1 三选结果确定 V2 路径（2.1 或 2.2），供 operator_reduction.py 使用
+V4_V2_PATH=$(python3 -c "
+import yaml
+try:
+    with open('${CTX_FILE}') as f:
+        ctx = yaml.safe_load(f)
+    v1v = str(ctx.get('baseline', {}).get('v1_variant', '') or '')
+    # v1.3 或 none → V2.2 路径（通过 plugin 使能，无独立 V2 性能基线）
+    if v1v in ('v1.3', 'none', ''):
+        print('2.2')
+    else:
+        print('2.1')  # v1.1 / v1.2 → 代码注入路径，有独立 V2
+except:
+    print('2.1')
+" 2>/dev/null) || V4_V2_PATH="2.1"
+
+# V2.1 路径下：读取 V2 调优后的最终算子列表，供 operator_reduction.py 计算起点交集
+V4_V2_FINAL_OPS=$(python3 -c "
+import yaml, json
+try:
+    with open('${CTX_FILE}') as f:
+        ctx = yaml.safe_load(f)
+    # 优先读 versions.v2.enabled_ops
+    v2ops = ctx.get('versions', {}).get('v2', {}).get('enabled_ops', [])
+    if v2ops:
+        print(','.join(v2ops))
+    else:
+        # 兜底：从 v2_oplist.txt 读（operator_search.py 产出）
+        # 无法直接读容器内文件，留空→ run_reduction 退回 V3 全集
+        print('')
+except:
+    print('')
+" 2>/dev/null) || V4_V2_FINAL_OPS=""
+
+echo "[段4] V4 路径参数: v2_path=${V4_V2_PATH}, v2_final_ops 数量=$(echo "${V4_V2_FINAL_OPS}" | tr ',' '\n' | grep -c .)"
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  段4    V4 减算子 + 发布  (步骤 8-9)                          ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
+SEG4_START_TS=$(date +%s)
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] 段4 开始 (V4 Flag-express 减算子, 精度基线=${V4_ACC_BASELINE})"
+
+PROMPT_SEG4V4="容器名: ${SEG_CTR}，模型名: ${MODEL}
+
+**变量定义**：CONTAINER=${SEG_CTR}
+${COMMON_TOKENS}
+
+执行步骤8（V4 减算子）和步骤9（V4 发布）。
+
+**前段状态**：容器 ${SEG_CTR} 已就绪，步骤1-7 已全部完成，V3(Max) 已发布且精度达标。
+V4 从 V3 的算子列表里随机选 1~3 个算子只开（极简组合），若性能超优化基线且精度达标则采纳，循环≤2轮，保底≥1算子。2轮内无达标组合 → 回退到起点（精度已合格版）。
+**精度终检口径（与 V2/V3 一致）**：V4 精度校验对全部 ${DATASET_COUNT} 个数据集（${DATASETS_CSV}）逐个独立判定，全部达标（每数据集 rel_drop≤5%）才 V4 成立。脚本已通过 --accuracy-datasets '${V4_ACC_DATASETS}' 接收各数据集基线（单数据集时等价于 --accuracy-baseline）；回退到起点的版本等价 V3，继承 V3 已验证精度结论、不重复终检。
+
+**步骤8 V4 减算子（通过脚本自动执行）**：
+operator_reduction.py 新算法：从 V3 算子池随机选 1~3 个只开，性能>优化基线+精度达标即采纳，≤2轮，2轮无果回退起点。
+优化基线来源：V2.1 路径=起点交集实测吞吐；V2.2/无V1路径=V2首测×1.05。一条命令执行：
+  docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/operator_reduction.py \\
+    --context-yaml /flagos-workspace/shared/context.yaml \\
+    --v1-perf /flagos-workspace/results/native_performance.json \\
+    --v3-perf /flagos-workspace/results/flagos_optimized.json \\
+    --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh --mode flagos' \\
+    --v2-path ${V4_V2_PATH} \\
+    --v2-final-ops '${V4_V2_FINAL_OPS}' \\
+    --v2-first-perf /flagos-workspace/results/v2_initial_performance.json \\
+    --accuracy-baseline ${V4_ACC_BASELINE} \\
+    --accuracy-datasets '${V4_ACC_DATASETS}' \\
+    --accuracy-guard 5.0 \\
+    --max-rounds 2 \\
+    --output-dir /flagos-workspace/results/ \\
+    --state-path /flagos-workspace/results/operator_config_v4.json \\
+    --json\"
+**执行方式（长任务执行协议 — 严格遵守，否则产出会残缺）**：
+operator_reduction.py 可能运行数小时，**禁止**用 Bash(timeout=大数) 前台阻塞执行（Bash 工具 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败——前台阻塞 = 会话被杀、任务丢失），**禁止** TaskOutput 轮询。按三步执行：
+1. 写任务命令文件（一条 docker exec，上方完整参数命令写入 cmd 文件）：
+   docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/v4_reduction.cmd << 'CMD_EOF'
+cd /flagos-workspace/scripts
+PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_reduction.py --context-yaml /flagos-workspace/shared/context.yaml --v1-perf /flagos-workspace/results/native_performance.json --v3-perf /flagos-workspace/results/flagos_optimized.json --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh --mode flagos' --v2-path ${V4_V2_PATH} --v2-final-ops '${V4_V2_FINAL_OPS}' --v2-first-perf /flagos-workspace/results/v2_initial_performance.json --accuracy-baseline ${V4_ACC_BASELINE} --accuracy-datasets '${V4_ACC_DATASETS}' --accuracy-guard 5.0 --max-rounds 2 --output-dir /flagos-workspace/results/ --state-path /flagos-workspace/results/operator_config_v4.json --json
+CMD_EOF\"
+2. detached 启动（一条命令立即返回，不等待）：
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/v4_reduction.cmd' --state /flagos-workspace/logs/tasks/v4_reduction.state --log /flagos-workspace/logs/tasks/v4_reduction.log --timeout 88200\"
+3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出）：
+   sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/v4_reduction.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/v4_reduction.log\"
+   - status=running → 继续轮询。**禁止**在脚本"看起来在运行/有输出"时就认为完成并结束会话——必须等到 status=done/error/timeout；若 state 长时间停在 running 且日志停止增长，pgrep -f operator_reduction 确认任务进程：存活=任务仍在跑，继续等待；消失=任务已死，读日志诊断
+   - status=done → 任务真正结束，**必须**再回读容器内完成标记确认：docker exec \${CONTAINER} cat /flagos-workspace/results/v4_reduction.done —— 该文件存在且含 exit_code 才代表脚本真正跑完；不存在说明未完成，不得继续后续步骤或输出完成标志
+   - status=error/timeout → 读日志诊断，不得静默继续
+- 断点恢复：启动前检查 /flagos-workspace/logs/tasks/v4_reduction.state——status=running 说明上一会话已启动减算子任务（会话被杀任务继续跑），**直接接管轮询，禁止重复启动**。
+脚本退出码 0 = V4 成立（有提升+精度达标 或 回退起点——回退版等价 V3，精度继承 V3 已验证结论，不重复终检）；1 = 不成立（仅\"采纳新随机组合但独立精度终检不达标\"时才会出现）。
+**重要**：回退到起点（fell_back_to_start=true）时脚本已跳过重复精度终检、直接继承 V3 精度结论（accuracy_ok=true），退出码必为 0 —— 回退版就是 V3 等价配置，绝不因 GPQA 评测抖动被二次否定。
+读取输出的 JSON 结果，更新 context.yaml 的 v4_reduction 字段（含 kept_ops/fell_back_to_start/beats_baseline/accuracy_ok/accuracy_verified）和 workflow_ledger（步骤 08_v4_reduction）。
+产出文件：operator_config_v4.json / v4_performance.json / v4_oplist.txt / gpqa_v4.json / v4_reduction.done（完成标记）。
+
+**说明**：若 --accuracy-baseline 为 0（NV 基线缺失），脚本跳过精度终检并标记 accuracy_verified=false，V4 仍产出但报告注明未验证。
+
+**步骤9 V4 发布（V4 无论成立与否都必须产出发布物，缺 V4 时由 V3 无条件兜底）**：
+  docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
+- **情况 A：V4 成立**（退出码 0，含回退到起点的等价 V3 情况）→ 正常发布 V4：
+    python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --version-tag v4
+- **情况 B：V4 不成立**（退出码 1，仅\"采纳新组合但独立精度终检不达标\"会走到这里）→ **不得让 V4 版位留空**。
+  设计初衷：V4 产不出更优配置时必须由 V3 兜底替换，绝不出现\"V3 已发布、V4 版位空缺/失败\"的空档。
+  兜底做法：把容器内算子配置恢复为 V3 全量配置（即 V3 已验证达标的算子集），再以 V4 tag 发布——V4 == V3 等价交付：
+    1) 恢复 V3 配置：docker exec ${SEG_CTR} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action restore-v3\" （或写回 V3 的 operator_config；V3 算子集在 context.versions.v3.enabled_ops）
+    2) 更新 context：置 v4_reduction.fell_back_to_start=true、v4_reduction.equivalent_v3=true、accuracy_ok=true（继承 V3），workflow_ledger 步骤 08_v4_reduction=success（注明\"V4 等价 V3 兜底\"）
+    3) 发布 V4：python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --version-tag v4
+  README 注明\"V4 未找到更优组合，等价 V3 交付\"。发布后 V4 版位必须有产出，退出前回读确认 -v4 镜像已推送。
+
+**进度输出**：步骤开始/完成时输出 [步骤8] / [步骤9] 标记。
+**完成标志**：输出 \"[段4] V4 减算子+发布完成\" 后停止所有操作。"
+
+mkdir -p "${LOG_DIR}"
+claude -p "${PROMPT_SEG4V4}" \
+    --permission-mode auto \
+    --output-format stream-json \
+    --verbose \
+    --debug-file "${DEBUG_FILE}.seg4" \
+    --max-turns 500 \
+    2>&1 | tee -a "${LOG_FILE}" \
+         | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 8 --cost-file "${LOG_DIR}/seg4v4_cost.txt" --load-durations "${LOG_DIR}/seg4_durations.json" --durations-file "${LOG_DIR}/seg4v4_durations.json" ${FILTER_FLAGS} || true
+
+# ===== V4 完成校验（防 Claude 提前结束会话导致后台脚本被 kill）=====
+# Claude 子进程返回不代表 operator_reduction.py 真跑完（它可能被转后台跑、Claude 看到有输出
+# 就提前结束）。这里轮询容器内完成标记 v4_reduction.done：
+#   - 标记存在 → 脚本真正跑完（成功/失败判定都会写标记）
+#   - 标记不存在但进程还活 → 继续等（上限 = 脚本自身超时 24h + 30min 余量）
+#   - 标记不存在且进程已死 → 判 V4 未完成，显式告警（不静默跳过）
+DONE_MARKER_PATH="/flagos-workspace/results/v4_reduction.done"
+V4_PROC_PATTERN="operator_reduction.py"
+V4_MAX_WAIT=$(( 24 * 3600 + 30 * 60 ))   # 24h30m
+V4_POLL_INTERVAL=60
+V4_WAIT_ELAPSED=0
+V4_COMPLETION="unknown"
+if docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 段4 校验 V4 是否真正完成（轮询完成标记 ${DONE_MARKER_PATH}）..."
+    while true; do
+        if docker exec "${SEG_CTR}" test -f "${DONE_MARKER_PATH}" 2>/dev/null; then
+            V4_COMPLETION="done"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ 检测到完成标记，V4 脚本已真正结束"
+            docker exec "${SEG_CTR}" cat "${DONE_MARKER_PATH}" 2>/dev/null | tee -a "${LOG_FILE}" || true
+            break
+        fi
+        # 标记未出现 → 看进程是否还活着
+        if docker exec "${SEG_CTR}" pgrep -f "${V4_PROC_PATTERN}" &>/dev/null; then
+            if [ "${V4_WAIT_ELAPSED}" -ge "${V4_MAX_WAIT}" ]; then
+                V4_COMPLETION="timeout"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ V4 脚本超过 ${V4_MAX_WAIT}s 仍未完成，停止等待（判超时未完成）"
+                break
+            fi
+            if [ $(( V4_WAIT_ELAPSED % 600 )) -eq 0 ]; then
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] V4 脚本仍在运行（已等待 $(( V4_WAIT_ELAPSED / 60 ))m），继续等待完成标记..."
+            fi
+            sleep "${V4_POLL_INTERVAL}"
+            V4_WAIT_ELAPSED=$(( V4_WAIT_ELAPSED + V4_POLL_INTERVAL ))
+        else
+            # 进程已死且无标记 → 未真正完成（可能被提前 kill 或崩溃）
+            V4_COMPLETION="incomplete"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ V4 脚本进程已退出但无完成标记 → V4 未真正完成（疑似提前结束/崩溃）"
+            break
+        fi
+    done
+    if [ "${V4_COMPLETION}" != "done" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠⚠ 警告：V4 完成状态=${V4_COMPLETION}，产出可能不完整（缺 operator_config_v4.json / v4_oplist.txt）。请检查日志。"
+    fi
+fi
+
+SEG4_END_TS=$(date +%s)
+SEG4_ELAPSED=$(( SEG4_END_TS - SEG4_START_TS ))
+SEG4_MIN=$(( SEG4_ELAPSED / 60 ))
+SEG4_SEC=$(( SEG4_ELAPSED % 60 ))
+SEG4V4_ELAPSED=${SEG4_ELAPSED}
+SEG4V4_MIN=${SEG4_MIN}
+SEG4V4_SEC=${SEG4_SEC}
+echo ""
+echo "┌──────────────────────────────────────────────────────────────┐"
+echo "│  段4 完成 — 耗时 ${SEG4V4_MIN}m ${SEG4V4_SEC}s                                       │"
+echo "└──────────────────────────────────────────────────────────────┘"
+
+# 强制同步 context
+if [ -f "${SHARED_CTX}" ]; then
+    cp "${SHARED_CTX}" "${CTX_FILE}"
+elif docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+    docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+fi
+
+# 段4末确定性兜底刷新报告
+regenerate_report "${SEG_CTR}"
+
+else
+    if [ "${QUALIFIED_CORE_V3}" != "True" ]; then
+        echo ""
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] qualified_core_v3=${QUALIFIED_CORE_V3}（V3 精度硬闸门未过：service_ok/accuracy_ok 或 plugin V3 精度不达标），跳过段4（V4 减算子，不基于不合格 V3 减算子）"
+    elif [ "${SEG4_V4DONE}" = "yes" ]; then
+        echo ""
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] V4 已完成（ledger 08_v4_reduction 非 pending），跳过段4"
+    fi
+fi
+
+# ===== V5 算子扩展流程已移除 (新流程 v3.1: V3=Max 为交付版本, 无 V5) =====
 
 # ===== Claude 退出后自动故障诊断 =====
 # 从宿主机 context_snapshot 读取容器名（镜像模式下容器名由 Claude 动态创建）
@@ -2064,10 +3176,11 @@ if summary:
     with open('${CONTEXT_SNAP}') as f:
         ctx = yaml.safe_load(f) or {}
     release = ctx.setdefault('release', {})
-    if summary.get('modelscope_url'):
-        release['modelscope_url'] = summary['modelscope_url']
-    if summary.get('huggingface_url'):
-        release['huggingface_url'] = summary['huggingface_url']
+    # 无条件覆盖(允许清空)：修复前 V2 精度不达标时可能写入"未建仓库的幽灵 URL"，
+    # 若仅非空才写，存量幽灵 URL 无法清除，步骤13 仍会误判"已有仓库"走更新 README
+    # 而非 full-publish 补发。summary 解析失败时 summary=None 不会进本分支，安全。
+    release['modelscope_url'] = summary.get('modelscope_url', '')
+    release['huggingface_url'] = summary.get('huggingface_url', '')
     with open('${CONTEXT_SNAP}', 'w') as f:
         yaml.dump(ctx, f, default_flow_style=False, allow_unicode=True)
     print('  ✓ context release 字段已更新')
@@ -2192,6 +3305,7 @@ except: print('True')
     fi
 fi
 
+# ========== 上传结果到 FlagRelease 平台 ===
 # 流程结束前清理推理服务
 cleanup_gpu_services
 
@@ -2201,32 +3315,80 @@ PIPELINE_ELAPSED=$(( PIPELINE_END_TS - PIPELINE_START_TS ))
 PIPELINE_MIN=$(( PIPELINE_ELAPSED / 60 ))
 PIPELINE_SEC=$(( PIPELINE_ELAPSED % 60 ))
 
-# 读取各段费用
-SEG1_COST=$(cat "${LOG_DIR}/seg1_cost.txt" 2>/dev/null || echo "N/A")
-SEG2_COST=$(cat "${LOG_DIR}/seg2_cost.txt" 2>/dev/null || echo "N/A")
-SEG3_COST=$(cat "${LOG_DIR}/seg3_cost.txt" 2>/dev/null || echo "N/A")
-SEG4_COST=$(cat "${LOG_DIR}/seg4_cost.txt" 2>/dev/null || echo "N/A")
-# 计算总费用（通过环境变量传递，避免 shell 注入）
-TOTAL_COST=$(SEG1_COST="${SEG1_COST}" SEG2_COST="${SEG2_COST}" SEG3_COST="${SEG3_COST}" SEG4_COST="${SEG4_COST}" python3 -c "
-import os
+# 读取各段真实 Claude 会话费用；每个 cost 文件只计一次，缺失保持 N/A。
+sum_cost_files() {
+    python3 - "$@" <<'PYEOF'
+import math
+import sys
+from pathlib import Path
+
 costs = []
-for k in ['SEG1_COST', 'SEG2_COST', 'SEG3_COST', 'SEG4_COST']:
-    try: costs.append(float(os.environ.get(k, '').strip()))
-    except: pass
-print(f'{sum(costs):.2f}' if costs else 'N/A')
-" 2>/dev/null || echo "N/A")
+for raw_path in sys.argv[1:]:
+    try:
+        value = float(Path(raw_path).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        continue
+    if math.isfinite(value) and value >= 0:
+        costs.append(value)
+print(f"{sum(costs):.2f}" if costs else "N/A")
+PYEOF
+}
+
+format_cost_value() {
+    if [ "$1" = "N/A" ]; then
+        printf 'N/A'
+    else
+        printf '$%s' "$1"
+    fi
+}
+
+SEG1_COST=$(sum_cost_files "${LOG_DIR}/seg1_cost.txt")
+SEG2_COST=$(sum_cost_files \
+    "${LOG_DIR}/seg2_cost.txt" \
+    "${LOG_DIR}/seg2_retry_cost.txt" \
+    "${LOG_DIR}/seg2_retry2_cost.txt" \
+    "${LOG_DIR}/seg2_step7_cost.txt")
+SEG3_COST=$(sum_cost_files "${LOG_DIR}/seg3_cost.txt")
+SEG4_PLUGIN_COST=$(sum_cost_files "${LOG_DIR}/seg4_cost.txt")
+SEG4_V4_COST=$(sum_cost_files "${LOG_DIR}/seg4v4_cost.txt")
+SEG4_COST=$(sum_cost_files "${LOG_DIR}/seg4_cost.txt" "${LOG_DIR}/seg4v4_cost.txt")
+SEG5_COST=$(sum_cost_files "${LOG_DIR}/seg5_cost.txt")
+TOTAL_COST=$(sum_cost_files \
+    "${LOG_DIR}/seg1_cost.txt" \
+    "${LOG_DIR}/seg2_cost.txt" \
+    "${LOG_DIR}/seg2_retry_cost.txt" \
+    "${LOG_DIR}/seg2_retry2_cost.txt" \
+    "${LOG_DIR}/seg2_step7_cost.txt" \
+    "${LOG_DIR}/seg3_cost.txt" \
+    "${LOG_DIR}/seg4_cost.txt" \
+    "${LOG_DIR}/seg4v4_cost.txt" \
+    "${LOG_DIR}/seg5_cost.txt")
+
+SEG1_COST_FMT=$(format_cost_value "${SEG1_COST}")
+SEG2_COST_FMT=$(format_cost_value "${SEG2_COST}")
+SEG3_COST_FMT=$(format_cost_value "${SEG3_COST}")
+SEG4_PLUGIN_COST_FMT=$(format_cost_value "${SEG4_PLUGIN_COST}")
+SEG4_V4_COST_FMT=$(format_cost_value "${SEG4_V4_COST}")
+SEG5_COST_FMT=$(format_cost_value "${SEG5_COST}")
+TOTAL_COST_FMT=$(format_cost_value "${TOTAL_COST}")
 
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║  全流程完成 — 耗时 & 费用汇总                                ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
-printf "║  段1  容器准备+环境检测+服务启动   %6s   \$%-8s║\n" "${SEG1_MIN}m${SEG1_SEC}s" "${SEG1_COST}"
-printf "║  段2  精度评测+调优+性能评测+调优  %6s   \$%-8s║\n" "${SEG2_MIN}m${SEG2_SEC}s" "${SEG2_COST}"
-printf "║  段3  打包发布                     %6s   \$%-8s║\n" "${SEG3_MIN}m${SEG3_SEC}s" "${SEG3_COST}"
-if [ "${QUALIFIED}" = "True" ]; then
-printf "║  段4  Plugin验证+发布              %6s   \$%-8s║\n" "${SEG4_MIN}m${SEG4_SEC}s" "${SEG4_COST}"
+printf "║  段1  容器准备+环境检测+服务启动   %6s   %-9s║\n" "${SEG1_MIN}m${SEG1_SEC}s" "${SEG1_COST_FMT}"
+printf "║  段2  精度评测+调优+性能评测+调优  %6s   %-9s║\n" "${SEG2_MIN}m${SEG2_SEC}s" "${SEG2_COST_FMT}"
+printf "║  段3  打包发布(V2 Pro)             %6s   %-9s║\n" "${SEG3_MIN}m${SEG3_SEC}s" "${SEG3_COST_FMT}"
+if [ "${PLUGIN_ENTRY}" = "True" ]; then
+printf "║  段4  Plugin验证+V3交付            %6s   %-9s║\n" "${SEG4_PLUGIN_MIN}m${SEG4_PLUGIN_SEC}s" "${SEG4_PLUGIN_COST_FMT}"
+fi
+if [ "${QUALIFIED_CORE_V3}" = "True" ]; then
+printf "║  段4  V4减算子+发布(express)       %6s   %-9s║\n" "${SEG4V4_MIN}m${SEG4V4_SEC}s" "${SEG4_V4_COST_FMT}"
+fi
+if [ "${SEG5_COST}" != "N/A" ]; then
+printf "║  段5  兼容流程费用                    -   %-9s║\n" "${SEG5_COST_FMT}"
 fi
 echo "║──────────────────────────────────────────────────────────────║"
-printf "║  总计                              %6s   \$%-8s║\n" "${PIPELINE_MIN}m${PIPELINE_SEC}s" "${TOTAL_COST}"
+printf "║  总计                              %6s   %-9s║\n" "${PIPELINE_MIN}m${PIPELINE_SEC}s" "${TOTAL_COST_FMT}"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Claude Code 流程结束"
@@ -2235,3 +3397,9 @@ echo "  原始事件流: ${LOG_FILE}"
 echo "  可读执行记录: ${FULL_LOG}"
 echo "  流水线日志: ${PIPELINE_LOG}"
 echo "  内部 debug: ${DEBUG_FILE}"
+
+# ===== usage 采集（纯编排层、只读既有产物、幂等、失败不影响主流程）=====
+# 覆盖非批次（直接跑本脚本）的正常完成路径；被 timeout 杀掉时本行不会执行，
+# 由 run_batch.sh 的 collect_model_usage 兜底（被杀段的 usage 仍留在 transcript 里）。
+python3 "${SCRIPT_DIR}/usage_collect.py" --log-dir "${LOG_DIR:-}" --cwd "${PROJECT_ROOT:-}" \
+    >> "${LOG_DIR:-/tmp}/usage_collect.log" 2>&1 || true
