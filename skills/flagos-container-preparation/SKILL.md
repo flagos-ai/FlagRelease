@@ -250,6 +250,28 @@ docker run -itd --name=${CONTAINER_NAME} \
 > **设备节点**：真实节点为 `/dev/alixpu`、`/dev/alixpu_ctl`、`/dev/alixpu_ppu0..N`，用 `-v /dev:/dev` 整体挂载覆盖（勿写死 `/dev/xpu`）。
 > **nvidia-smi 陷阱**：PPU 机的 `nvidia-smi`（位于 `/usr/local/PPU_SDK/CUDA_SDK/bin`）是 PPU wrapper，输出 PPU-SMI 而非真 NVIDIA，但支持标准 CSV query，选卡/显存检测可正常复用。
 
+#### 模板 H：天数智芯（Iluvatar，vendor=iluvatar）
+
+```bash
+docker run -itd --name=${CONTAINER_NAME} \
+    --privileged --network=host --ipc=host \
+    --shm-size=${SHM_SIZE:-64g} \
+    -v /lib/modules:/lib/modules \
+    -v /usr/src:/usr/src \
+    -v /dev:/dev \
+    -v /usr/local/corex/bin/ixsmi:/usr/local/corex/bin/ixsmi \
+    -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
+    -v ${WORKSPACE_PATH:-/data/flagos-workspace/${MODEL_NAME}}:/flagos-workspace \
+    -v /data:/data \
+    ${IMAGE}
+```
+
+> **天数/Iluvatar 识别**：`ixsmi` 命令可用，或 `/usr/local/corex` 目录存在，或 `detect_gpu.py` 返回 `vendor=iluvatar`（历史别名 `tianshu` 已归一为 `iluvatar`）。
+> **⚠️ ixsmi 必须 bind-mount**：基础镜像内 `/usr/local/corex` 的 `corex-<ver>` 目录**不含 ixsmi**（该工具由宿主机 corex 驱动自带），不挂载则容器内检不到 GPU，平台校验直接报"容器内没有 ixsmi"。对齐既有厂商做法：Ascend 挂 `npu-smi`、Cambricon 挂 `cnmon`、Hygon 挂 `/opt/hyhal`。
+> **挂软链路径，勿写版本目录**：宿主机 `/usr/local/corex` 为指向 `corex-<ver>` 的软链，故写 `/usr/local/corex/bin/ixsmi`；写死 `/usr/local/corex-4.5.0.20260509/bin/ixsmi` 会因宿主机 corex 版本不同（4.4.0 / 20260629 等）而失效。
+> **挂载前先确认源存在**（`ls -l /usr/local/corex/bin/ixsmi`）：`docker -v` 的源路径不存在时**会静默创建同名目录**——结果是容器内 `ixsmi` 成了目录、依然检不到 GPU，还在宿主机留下垃圾目录。
+> **设备与内核模块**：天数设备节点随卡型/驱动版本变化，用 `-v /dev:/dev` 整体挂载（勿写死具体节点）；`/lib/modules`、`/usr/src` 供 ixml 驱动内核模块使用。
+
 **模板规则**：
 - 业务环境变量（`USE_FLAGGEMS`、`VLLM_USE_V1` 等）不写入模板，由后续 skill 按需添加
 - 所有模板统一挂载 `/flagos-workspace`（宿主机路径为 `/data/flagos-workspace/${MODEL_NAME}`，按模型隔离）

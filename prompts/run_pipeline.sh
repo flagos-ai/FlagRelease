@@ -412,10 +412,11 @@ if $IMAGE_MODE; then
    - ${MODEL_NOTE}
    - 镜像已由编排层确保存在于本地（已完成存在性检查/拉取），**禁止执行 docker pull**
    - **容器名已由编排层确定: \${CONTAINER_NAME}=${CONTAINER_NAME_PRE}，必须原样使用，禁止自行生成/判断/修改**
-   - 检测 GPU 厂商（nvidia-smi / npu-smi / ppu-smi 等），选择 SKILL.md 中对应的 docker run 模板。**厂商≠NVIDIA 时禁止套用下方 NVIDIA 模板**（`--gpus=all` 是 NVIDIA 专属，PPU/昇腾/寒武纪等会失败）——必须去 flagos-container-preparation/SKILL.md 选对应模板（Ascend=B、Mthreads=C、MetaX=D、Cambricon=E、Hygon=F、平头哥PPU=G ...）
+   - 检测 GPU 厂商（nvidia-smi / npu-smi / ppu-smi 等），选择 SKILL.md 中对应的 docker run 模板。**厂商≠NVIDIA 时禁止套用下方 NVIDIA 模板**（\`--gpus=all\` 是 NVIDIA 专属，PPU/昇腾/寒武纪/天数等会失败）——必须去 flagos-container-preparation/SKILL.md 选对应模板（Ascend=B、Mthreads=C、MetaX=D、Cambricon=E、Hygon=F、平头哥PPU=G、天数Iluvatar=H）
    - **仅 NVIDIA 适用的模板（严格执行，仅替换变量值，禁止增删参数）**：
      docker run -itd --name=\${CONTAINER_NAME} --gpus=all --network=host -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} -v /data/flagos-workspace/${MODEL}:/flagos-workspace ${IMAGE}
-   - **平头哥 PPU（vendor=zhenwu，CUDA 兼容卡，识别标志：ppu-smi 命令 / /usr/local/PPU_SDK 目录 / nvidia-smi 输出含 PPU-SMI）用 SKILL.md 模板 G**：禁用 `--gpus=all`，改用 `--privileged -v /dev:/dev -v /usr/local/PPU_SDK:/usr/local/PPU_SDK -e XPU_VISIBLE_DEVICES=all` 等参数
+   - **平头哥 PPU（vendor=zhenwu，CUDA 兼容卡，识别标志：ppu-smi 命令 / /usr/local/PPU_SDK 目录 / nvidia-smi 输出含 PPU-SMI）用 SKILL.md 模板 G**：禁用 \`--gpus=all\`，改用 \`--privileged -v /dev:/dev -v /usr/local/PPU_SDK:/usr/local/PPU_SDK -e XPU_VISIBLE_DEVICES=all\` 等参数
+   - **天数 Iluvatar（vendor=iluvatar，识别标志：ixsmi 命令 / /usr/local/corex 目录 / detect_gpu.py 返回 iluvatar）用 SKILL.md 模板 H**：禁用 \`--gpus=all\`，**必须挂载 \`-v /usr/local/corex/bin/ixsmi:/usr/local/corex/bin/ixsmi\`**（基础镜像内不含 ixsmi，不挂则容器内检不到 GPU、平台校验报“容器内没有 ixsmi”）；挂软链路径而非 corex 版本目录，挂载前先 \`ls -l /usr/local/corex/bin/ixsmi\` 确认源存在（源不存在时 docker 会静默建同名目录）
    - **降级策略**：模板失败 → 检查变量值修正后重试 → 仍失败可 docker inspect 同类容器**仅抄参考其挂载/设备参数拼新的 docker run 命令**（容器名仍必须用 ${CONTAINER_NAME_PRE}），重试一次 → 仍失败则终止
    - **绝对禁止复用任何已存在的容器**（包括同镜像创建的）。docker run 失败不是复用的理由——复用旧容器=旧镜像跑新任务，产出错误归属，比失败更糟${DOWNLOAD_NOTE}
    - bash skills/flagos-container-preparation/tools/setup_workspace.sh \${CONTAINER} ${MODEL} --skip-archive 部署工具脚本（宿主机已归档，跳过容器内归档避免移走正在写入的日志）

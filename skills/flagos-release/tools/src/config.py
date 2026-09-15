@@ -241,6 +241,19 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
             "-v /data:/data --name flagos {{IMAGE}}"
         )
 
+    # 天数(Iluvatar)：ixsmi 由宿主机 corex 驱动提供，基础镜像的 /usr/local/corex 下
+    # corex-<ver> 目录不含该工具，必须 bind-mount 进容器，否则容器内检不到 GPU
+    # （平台校验报"容器内没有 ixsmi"）。对齐既有厂商做法：Ascend 挂 npu-smi、
+    # Cambricon 挂 cnmon、Hygon 挂 /opt/hyhal。挂宿主机软链路径而非具体版本目录，
+    # 可跨 corex 版本。刻意放在 if/else 之后统一注入：commands.container_run 缺失
+    # 走兜底命令时同样补上，不留"换个口子又漏挂"的缺口；已含 ixsmi 则不重复注入。
+    if ((ctx.get('gpu', {}) or {}).get('vendor', '') == 'iluvatar'
+            and 'ixsmi' not in config.model_info.container_run_cmd):
+        config.model_info.container_run_cmd = re.sub(
+            r'\{\{IMAGE\}\}',
+            '-v /usr/local/corex/bin/ixsmi:/usr/local/corex/bin/ixsmi {{IMAGE}}',
+            config.model_info.container_run_cmd, count=1)
+
     # 保存 canonical_model_path 供模板使用
     config.model_info.canonical_model_path = canonical_model_path
 
